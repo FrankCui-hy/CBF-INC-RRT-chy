@@ -4,15 +4,15 @@ from typing import Dict, List
 import numpy as np
 import torch
 import scipy.linalg
-import cvxpy as cp
+import cvxpy as cp 
 
 
 # Gravitation acceleration
 grav = 9.80665
 
 # Define a type alias for parameter scenarios
-Scenario = Dict[str, float]
-ScenarioList = List[Scenario]
+Scenario = Dict[str, float] #参数字典
+ScenarioList = List[Scenario] #多个场景组成的列表
 
 
 def lqr(

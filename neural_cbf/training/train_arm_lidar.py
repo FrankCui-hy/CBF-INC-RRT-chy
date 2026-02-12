@@ -36,7 +36,13 @@ def main(args):
     ]
 
     # Define environment and agent
-    environment = ArmEnv([args.robot_name], GUI=False, config_file='')
+    environment = ArmEnv(
+        [args.robot_name],
+        GUI=False,
+        config_file='',
+        obstacle_robot_name=args.obstacle_robot_name,
+        obstacle_traj_path=args.obstacle_traj_path,
+    )
     robot = environment.robot_list[0]
 
     # Define the dynamics model
@@ -48,11 +54,13 @@ def main(args):
         n_obs=args.n_observation,
         point_dim=args.point_dim,
         add_normal=bool('norm' in args.dataset_name),
+        include_point_velocity=False,
         point_in_dataset_pc = args.n_observation_dataset,
         list_sensor=robot.body_joints,
         env=environment,
         robot=robot,
         observation_type=args.observation_type,
+        obstacle_horizon_s=args.obstacle_horizon_s,
     )
 
     # Define goal_state for validation
@@ -74,6 +82,8 @@ def main(args):
         noise_level=args.noise_level,
         quotas={"safe": args.safe_portion, "goal": args.goal_portion, "unsafe": args.unsafe_portion},
         name=args.dataset_name,
+        obstacle_block_dist=args.obstacle_block_dist,
+        obstacle_block_check_steps=args.obstacle_block_check_steps,
     )
 
 
@@ -209,6 +219,13 @@ if __name__ == "__main__":
     parser.add_argument('--point_dim', type=int, default=3, help='cartesian or spherical coordinates')
     parser.add_argument('--observation_type', type=str, default='uniform_surface', help='[uniform_lidar, uniform_surface, cone_lidar]')
     parser.add_argument('--n_observation', type=int, default=256, help='num of rays from each lidar sensor')
+
+    # obstacle robot params
+    parser.add_argument('--obstacle_robot_name', type=str, default='panda')
+    parser.add_argument('--obstacle_traj_path', type=str, default='data/obstacle_trajs/panda_trajs.npz')
+    parser.add_argument('--obstacle_horizon_s', type=float, default=0.2)
+    parser.add_argument('--obstacle_block_dist', type=float, default=0.1)
+    parser.add_argument('--obstacle_block_check_steps', type=int, default=20)
 
     # datamodule params
     parser.add_argument('--dataset_name', type=str, default='pino_motor_norm', help='[5dpoints, motor_control]')

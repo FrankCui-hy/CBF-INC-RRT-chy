@@ -218,33 +218,82 @@ class BFContourExperiment(Experiment):
             if hasattr(controller_under_test.dynamics_model, "plot_environment"):
                 controller_under_test.dynamics_model.plot_environment(ax)
 
-            if hasattr(controller_under_test, "safe_level"):
-                ax.plot([], [], c="blue", label=f"predicted safe")
-                ax.tricontour(
-                    results_df[self.x_axis_label],
-                    results_df[self.y_axis_label],
-                    results_df["h"],
-                    colors=["blue"],
-                    levels=[-controller_under_test.safe_level],
-                    linewidths=linewid,
+            if hasattr(controller_under_test, "safe_level") and hasattr(controller_under_test, "unsafe_level"):
+                h_min = float(results_df["h"].min())
+                h_max = float(results_df["h"].max())
+                # NOTE: Sign convention.
+                # Paper defines safe as h_paper <= -gamma and unsafe as h_paper > +gamma.
+                # In this repo, the learned network output behaves as h_repo = -h_paper.
+                # Therefore, the same thresholds in repo-h are:
+                #   safe boundary:  h_repo = +gamma
+                #   unsafe boundary: h_repo = -gamma
+                pred_safe_level = float(controller_under_test.safe_level)      # +gamma in repo-h
+                pred_unsafe_level = -float(controller_under_test.unsafe_level)  # -gamma in repo-h
+
+                print("[BFContourExperiment] h min/max:", h_min, h_max)
+                print(
+                    "[BFContourExperiment] levels (paper h) (safe, unsafe):",
+                    -float(controller_under_test.safe_level),
+                    float(controller_under_test.unsafe_level),
                 )
-                ax.plot([], [], c="whitesmoke", label=f"predicted unsafe")
-                ax.tricontour(
-                    results_df[self.x_axis_label],
-                    results_df[self.y_axis_label],
-                    results_df["h"],
-                    colors=["white"],
-                    levels=[controller_under_test.unsafe_level],
-                    linewidths=linewid,
+                print(
+                    "[BFContourExperiment] levels (repo  h) (safe, unsafe):",
+                    pred_safe_level,
+                    pred_unsafe_level,
                 )
-                # ax.plot([], [], c="brown", label=f"h={0}")
-                # ax.tricontour(
-                #     results_df[self.x_axis_label],
-                #     results_df[self.y_axis_label],
-                #     results_df["h"],
-                #     colors=["brown"],
-                #     levels=[0.],
-                # )
+
+                # Diagnose sign convention: compare h on GT-safe vs GT-unsafe points
+                safe_mask = results_df["Safe region"].astype(bool)
+                unsafe_mask = results_df["Unsafe region"].astype(bool)
+                safe_h = results_df.loc[safe_mask, "h"]
+                unsafe_h = results_df.loc[unsafe_mask, "h"]
+                print("[BFContourExperiment] GT counts (safe, unsafe):", int(safe_mask.sum()), int(unsafe_mask.sum()))
+                if len(safe_h) > 0:
+                    print("[BFContourExperiment] GT-safe h min/mean/max:", float(safe_h.min()), float(safe_h.mean()), float(safe_h.max()))
+                if len(unsafe_h) > 0:
+                    print("[BFContourExperiment] GT-unsafe h min/mean/max:", float(unsafe_h.min()), float(unsafe_h.mean()), float(unsafe_h.max()))
+
+                ax.plot([], [], c="blue", label="predicted safe")
+                if h_min <= pred_safe_level <= h_max:
+                    ax.tricontour(
+                        results_df[self.x_axis_label],
+                        results_df[self.y_axis_label],
+                        results_df["h"],
+                        colors=["blue"],
+                        levels=[pred_safe_level],
+                        linewidths=linewid,
+                    )
+                else:
+                    print(
+                        "[BFContourExperiment] skip predicted safe contour (repo h): level",
+                        pred_safe_level,
+                        "outside [",
+                        h_min,
+                        ",",
+                        h_max,
+                        "]",
+                    )
+
+                ax.plot([], [], c="whitesmoke", label="predicted unsafe")
+                if h_min <= pred_unsafe_level <= h_max:
+                    ax.tricontour(
+                        results_df[self.x_axis_label],
+                        results_df[self.y_axis_label],
+                        results_df["h"],
+                        colors=["white"],
+                        levels=[pred_unsafe_level],
+                        linewidths=linewid,
+                    )
+                else:
+                    print(
+                        "[BFContourExperiment] skip predicted unsafe contour (repo h): level",
+                        pred_unsafe_level,
+                        "outside [",
+                        h_min,
+                        ",",
+                        h_max,
+                        "]",
+                    )
             else:
                 ax.plot([], [], c="blue", label="h(o(x)) = 0.0")
                 ax.tricontour(

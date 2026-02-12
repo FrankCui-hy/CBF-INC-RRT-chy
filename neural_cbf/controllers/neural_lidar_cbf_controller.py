@@ -60,6 +60,8 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		)
 
 		self.all_encoded_obs_dim = kwargs["feature_dim"]
+		self.obstacle_qdot_dim = getattr(self.dynamics_model, "obstacle_qdot_dim", 0)
+		self.z_dim = self.all_encoded_obs_dim + self.obstacle_qdot_dim
 		self.n_dims_extended = self.dynamics_model.n_dims + self.dynamics_model.o_dims
 
 		# ----------------------------------------------------------------------------
@@ -78,7 +80,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		# ----------------------------------------------------------------------------
 		# Define the BF network, which we denote h
 		# ----------------------------------------------------------------------------
-		num_h_inputs = self.dynamics_model.n_dims + self.all_encoded_obs_dim
+		num_h_inputs = self.dynamics_model.n_dims + self.z_dim
 
 		# CBF head
 		self.h_layers: OrderedDict[str, nn.Module] = OrderedDict()
@@ -125,15 +127,24 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		assert x.shape[1] == self.n_dims_extended
 
 		state = x[:, :self.dynamics_model.n_dims]
-		observation = x[:, self.dynamics_model.n_dims:]
-
-		# encoding
-		feature = self.pc_head(observation)
-		encoded_obs = self.encoder(feature)
-		# Then get the barrier function value.
-		h = self.h_nn(torch.cat([state, encoded_obs], dim=-1))
+		z = self.encode_observation(x, datax)
+		h = self.h_nn(torch.cat([state, z], dim=-1))
 
 		return h
+
+	def encode_observation(self, x: torch.Tensor, datax: torch.Tensor) -> torch.Tensor:
+		"""
+		Encode observation into feature vector z.
+		z = [encoded_pointcloud, obstacle_qdot] if available.
+		x is the state+observation tensor after datax_to_x.
+		"""
+		observation = x[:, self.dynamics_model.n_dims:]
+		feature = self.pc_head(observation)
+		encoded_obs = self.encoder(feature)
+		if self.obstacle_qdot_dim > 0:
+			qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(datax)
+			return torch.cat([encoded_obs, qdot_obs], dim=-1)
+		return encoded_obs
 
 	def h_with_jacobian(self, datax: torch.Tensor, data_jacobian: tuple) -> Tuple[
 		torch.Tensor, torch.Tensor, dict]:

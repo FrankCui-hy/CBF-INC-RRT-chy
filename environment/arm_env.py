@@ -25,11 +25,30 @@ class ArmEnv:
 	Separate arm interface with maze environment ones
 	'''
 
-	def __init__(self, robot_name_list, config_file: str, GUI=False, include_floor=True):
+	def __init__(
+			self,
+			robot_name_list,
+			config_file: str,
+			GUI=False,
+			include_floor=True,
+			obstacle_robot_name: str = None,
+			obstacle_traj_path: str = None,
+			obstacle_robot_base_pos: tuple = (0.3, 0.0, 0.0),
+			obstacle_robot_base_orn: tuple = (0.0, 0.0, 0.0, 1.0),
+	):
 		print("Initializing environment...")
 
 		self.robot_name_list = robot_name_list
 		self.robot_list = []
+		self.obstacle_robot = None
+		self.obstacle_robot_name = obstacle_robot_name
+		self.obstacle_robot_base_pos = obstacle_robot_base_pos
+		self.obstacle_robot_base_orn = obstacle_robot_base_orn
+		self.obstacle_traj = None
+		self.obstacle_traj_dt = None
+		self.obstacle_traj_idx = 0
+		self.obstacle_traj_step = 0
+		self.obstacle_qdot = None
 		self.obstacle_ids = []
 
 		self.include_floor = include_floor
@@ -55,12 +74,15 @@ class ArmEnv:
 		self.env_config = np.load(self.env_config_file, allow_pickle=True)
 
 		self.p.setAdditionalSearchPath(pybullet_data.getDataPath())
-		self.reset_env(self.get_env_config(-1), enable_object=False)
+		self.reset_env(self.get_env_config(-1), enable_object=False, obstacle_robot_name=obstacle_robot_name)
+
+		if obstacle_traj_path:
+			self.load_obstacle_trajectories(obstacle_traj_path)
 
 	def __str__(self):
 		return self.robot_name_list
 
-	def reset_env(self, obs_configs, enable_object=False):
+	def reset_env(self, obs_configs, enable_object=False, obstacle_robot_name: str = None):
 		self.p.resetSimulation()
 		self.robot_list = []
 		assert len(self.robot_name_list) <= 1, "Only support one robot now."
@@ -82,6 +104,27 @@ class ArmEnv:
 				if self.include_floor:
 					self.p.setCollisionFilterPair(self.robot_list[-1].robotId, self.plane, -1, -1, 0)
 					self.p.setCollisionFilterPair(self.robot_list[-1].robotId, self.plane, 1, -1, 0)
+
+			if obstacle_robot_name is None:
+				obstacle_robot_name = self.obstacle_robot_name
+
+			if obstacle_robot_name is not None:
+				if obstacle_robot_name == "panda":
+					self.obstacle_robot = FrankaPanda(self.p)
+				elif obstacle_robot_name == "magician":
+					self.obstacle_robot = Magician(self.p)
+				else:
+					raise NotImplementedError(f"Obstacle robot {obstacle_robot_name} not supported.")
+
+				self.p.resetBasePositionAndOrientation(
+					self.obstacle_robot.robotId,
+					self.obstacle_robot_base_pos,
+					self.obstacle_robot_base_orn,
+				)
+
+				if self.include_floor:
+					self.p.setCollisionFilterPair(self.obstacle_robot.robotId, self.plane, -1, -1, 0)
+					self.p.setCollisionFilterPair(self.obstacle_robot.robotId, self.plane, 1, -1, 0)
 
 		if enable_object:
 			if len(self.robot_list) > 1:
@@ -115,6 +158,8 @@ class ArmEnv:
 
 	def sample_obstacle_surface(self, total_num, add_normal=False):
 		# note: no self-collision information
+		if self.obstacle_robot is not None:
+			return self.sample_robot_surface(self.obstacle_robot, total_num, add_normal=add_normal)
 		for_floor = 0
 		each_obstacle = np.random.randint(low=0, high=len(self.obstacle_ids) - int(self.include_floor),
 										  size=total_num - for_floor)
@@ -132,6 +177,88 @@ class ArmEnv:
 										   add_normal=add_normal)
 				points_global = np.concatenate((points_global, new_array), axis=0)
 		return points_global
+
+	def sample_robot_surface(self, robot, total_num, add_normal=False):
+		"""
+		Approximate robot surface by sampling points on each link's AABB.
+		"""
+		link_ids = robot.body_joints
+		points_global = np.zeros((0, 3 + 3 * int(add_normal)), dtype=np.float32)
+		if len(link_ids) == 0:
+			return points_global
+
+		# Uniformly choose links to sample
+		link_choices = np.random.randint(low=0, high=len(link_ids), size=total_num)
+		for link_idx, link_id in enumerate(link_ids):
+			which = np.where(link_choices == link_idx)[0]
+			if which.shape[0] == 0:
+				continue
+			aabb_min, aabb_max = self.p.getAABB(robot.robotId, link_id)
+			aabb_min = np.array(aabb_min)
+			aabb_max = np.array(aabb_max)
+			center = (aabb_min + aabb_max) / 2.0
+			half = (aabb_max - aabb_min) / 2.0
+			rand_faces = np.random.randint(0, 6, which.shape[0])
+			for face_idx in range(6):
+				num = np.sum(rand_faces == face_idx)
+				if num == 0:
+					continue
+				samples = sample_surface(center, half, face_idx, num, add_normal=add_normal)
+				points_global = np.concatenate((points_global, samples), axis=0)
+
+		return points_global
+
+	def load_obstacle_trajectories(self, traj_path: str):
+		data = np.load(traj_path, allow_pickle=True)
+		self.obstacle_traj = data
+		self.obstacle_traj_dt = float(data["dt"])
+		self.obstacle_traj_idx = 0
+		self.obstacle_traj_step = 0
+		self.obstacle_qdot = np.zeros_like(data["q_trajs"][0, 0, :], dtype=np.float32)
+
+	def set_obstacle_trajectory(self, traj_idx: int, step_idx: int = 0):
+		self.obstacle_traj_idx = traj_idx
+		self.obstacle_traj_step = step_idx
+		self.apply_obstacle_step(step_idx)
+
+	def apply_obstacle_step(self, step_idx: int):
+		if self.obstacle_robot is None or self.obstacle_traj is None:
+			return
+		q_trajs = self.obstacle_traj["q_trajs"]
+		qdot_trajs = self.obstacle_traj["qdot_trajs"]
+		step_idx = int(step_idx % q_trajs.shape[1])
+		q = q_trajs[self.obstacle_traj_idx, step_idx]
+		qdot = qdot_trajs[self.obstacle_traj_idx, step_idx]
+		self.obstacle_robot.set_joint_position(self.obstacle_robot.body_joints, q)
+		self.obstacle_qdot = qdot
+		self.obstacle_traj_step = step_idx
+
+	def step_obstacle(self, num_steps: int = 1):
+		if self.obstacle_robot is None or self.obstacle_traj is None:
+			return
+		next_step = self.obstacle_traj_step + num_steps
+		self.apply_obstacle_step(next_step)
+
+	def get_obstacle_qdot(self):
+		if self.obstacle_qdot is None:
+			if self.obstacle_robot is None:
+				return None
+			return np.zeros((self.obstacle_robot.body_dim,), dtype=np.float32)
+		return self.obstacle_qdot
+
+	def robots_within_distance(self, robot_a, robot_b, distance: float) -> bool:
+		# robot_a, robot_b are BasicRobot instances
+		self.p.performCollisionDetection()
+		for link_idx in range(-1, robot_a.n_joints):
+			points = self.p.getClosestPoints(robot_a.robotId, robot_b.robotId, distance, linkIndexA=link_idx)
+			if bool(points):
+				return True
+		return False
+
+	def robots_in_contact(self, robot_a, robot_b) -> bool:
+		self.p.performCollisionDetection()
+		points = self.p.getContactPoints(robot_a.robotId, robot_b.robotId)
+		return len(points) > 0
 
 	# ===================== internal module ===========================
 
@@ -152,6 +279,15 @@ class ArmEnv:
 			np.savez(file_name, obstacle_positions=positions)
 
 	def _generate_obstacle(self, obs_configs):
+		if self.obstacle_robot is not None:
+			# Dynamic obstacle: another robot
+			self.obs_positions, self.obs_sizes = obs_configs
+			self.obstacle_ids = []
+			if self.include_floor:
+				self.obstacle_ids.append(self.plane)
+			self.obstacle_ids.append(self.obstacle_robot.robotId)
+			return
+
 		self.obs_positions, self.obs_sizes = obs_configs
 		if self.include_floor:
 			self.obstacle_ids = [self.plane]

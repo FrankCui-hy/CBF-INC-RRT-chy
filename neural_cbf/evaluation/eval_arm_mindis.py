@@ -115,13 +115,13 @@ def vis_CBF_contour(controller):
 
 if __name__ == "__main__":
     pl.seed_everything(seed=20)
-    robot_name = "panda"
+    robot_name = "magician"
 
     # Load the checkpoint file. This should include the experiment suite used during training.
     log_dir = "../../models/neural_cbf/"
 
     git_version = f"collection/{robot_name}_mindis/"
-    log_file = ""  # specify the checkpoint file
+    log_file = "checkpoints/epoch=499-step=395499.ckpt" # specify the checkpoint file
 
     with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
         args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
@@ -131,5 +131,5 @@ if __name__ == "__main__":
     neural_controller.h_nn.eval()
 
     # neural_controller.h_alpha=0.3
-    # vis_traj_rollout(neural_controller)
+    vis_traj_rollout(neural_controller)
     vis_CBF_contour(neural_controller)

@@ -135,11 +135,21 @@ def main(args):
 		save_dir=os.path.abspath(__file__).rsplit('/', 3)[0] + f"/models/neural_cbf/{dynamics_model}",
 		name=f"{args.version}",
 	)
+	# ------------------------------------------------------------
+	# Device selection (macOS / CPU-only friendly)
+	# ------------------------------------------------------------
+	# Lightning 1.x uses the `gpus` argument. On a CPU-only machine, requesting
+	# gpus=[0] raises MisconfigurationException. When running on CPU, force gpus=0.
+	if args.accelerator == "cpu":
+	    gpus = 0
+	else:
+	    gpus = [int(args.devices)]
+
 	trainer = pl.Trainer(
 		logger=tb_logger,
 		reload_dataloaders_every_epoch=True,
 		max_epochs=args.max_epochs,
-		gpus=args.devices,  # only supporting single-GPU at present
+		gpus=gpus,  # CPU: 0, GPU: [id]
 	)
 
 	# Train

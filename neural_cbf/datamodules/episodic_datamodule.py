@@ -38,6 +38,9 @@ class EpisodicDataModule(pl.LightningDataModule):
 			quotas: Optional[Dict[str, float]] = None,
 			shuffle: bool = True,
 			name: str = "",
+			obstacle_block_dist: float = 0.1,
+			obstacle_block_check_steps: int = 20,
+			skip_fixed_sampling: bool = False,
 	):
 		"""Initialize the DataModule
 
@@ -74,6 +77,9 @@ class EpisodicDataModule(pl.LightningDataModule):
 		self.val_split = val_split
 		self.batch_size = batch_size
 		self.noise_level = noise_level
+		self.obstacle_block_dist = obstacle_block_dist
+		self.obstacle_block_check_steps = obstacle_block_check_steps
+		self.skip_fixed_sampling = skip_fixed_sampling
 		if quotas is not None:
 			self.quotas = quotas
 		else:
@@ -104,21 +110,44 @@ class EpisodicDataModule(pl.LightningDataModule):
 
 		for episode in range(episode_num if episode_num else self.max_episode):
 			complete_episode = False
+			retry_count = 0
 			while not complete_episode:
 				try:
 					self.model.env.reset_env(obs_configs=self.model.env.get_env_config(int(random.uniform(0, 600))),
 											 enable_object=False)
+					if self.model.env.obstacle_traj is not None:
+						traj_count = self.model.env.obstacle_traj["q_trajs"].shape[0]
+						traj_idx = random.randint(0, traj_count - 1)
+						start_step = random.randint(0, self.model.env.obstacle_traj["q_trajs"].shape[1] - 1)
+						self.model.env.set_obstacle_trajectory(traj_idx, start_step)
 					self.model.set_goal(self.model.sample_state_space(1)[0, :self.model.q_dims])
 
 					# Start by sampling from initial conditions from the given region
 					traj_number = trajectory_num if trajectory_num else self.trajectories_per_episode
-					x_init = self.model.sample_boundary(traj_number, max_tries=2)[:, :self.n_dims]
+					try:
+						x_init = self.model.sample_boundary(traj_number, max_tries=50)[:, :self.n_dims]
+					except RuntimeWarning:
+						# Fallback: boundary sampling can fail in dynamic obstacle settings
+						x_init = self.model.sample_state_space(traj_number)[:, :self.n_dims]
+					if self.model.env.obstacle_robot is not None:
+						if not self._episode_has_blocking(x_init[:1]):
+							raise RuntimeWarning("Obstacle does not block this episode.")
 					complete_episode = True
 				except RuntimeWarning:
-					pass
+					retry_count += 1
+					if retry_count % 5 == 0:
+						print(f"[sample_trajectories] episode {episode}: retry {retry_count}")
+					if retry_count >= 20:
+						raise RuntimeError(
+							f"sample_trajectories failed after {retry_count} retries for episode {episode}. "
+							"Check obstacle blocking or sampling constraints."
+						)
 
 			# Simulate each initial condition out for the specified number of steps
-			batch_x_sim = simulator(x_init, self.trajectory_length, noise_level=self.noise_level,
+			batch_x_sim = simulator(
+				x_init,
+				self.trajectory_length,
+				noise_level=self.noise_level,
 									collect_dataset=True, use_motor_control=random.random() < 0.8)
 
 			# Reshape the data into a single replay buffer
@@ -134,6 +163,7 @@ class EpisodicDataModule(pl.LightningDataModule):
 			x_mask['unsafe'].append(self.model.unsafe_mask(batch_x_sim))
 			x_mask['goal'].append(self.model.goal_mask(batch_x_sim))
 			x_mask['boundary'].append(self.model.boundary_mask(batch_x_sim))
+			print(f"[sample_trajectories] finished episode {episode}")
 
 		# Return the sampled data
 		x_sim = torch.cat(x_sim, dim=0)
@@ -149,41 +179,51 @@ class EpisodicDataModule(pl.LightningDataModule):
 		"""
 		samples = []
 		x_mask = {'safe': [], 'unsafe': [], 'goal': [], 'boundary': []}
-		add_env_idx = 0
 		for episode in tqdm.tqdm(range(self.max_episode)):
-			complete_episode = False
-			while not complete_episode:
-				try:
-					sample = []
-					self.model.env.reset_env(obs_configs=self.model.env.get_env_config(episode + add_env_idx),
-											 enable_object=False)
-					# self.model.set_goal(self.model.sample_safe(1)[0, :self.model.q_dims])
-					# Figure out how many points are to be sampled at random, how many from the
-					# goal, safe, or unsafe regions specifically
-					allocated_samples = 0
-					for region_name, quota in self.quotas.items():
-						num_samples = int(self.fixed_samples * quota)
-						allocated_samples += num_samples
+			self.model.env.reset_env(
+				obs_configs=self.model.env.get_env_config(episode),
+				enable_object=False,
+			)
+			if self.model.env.obstacle_traj is not None:
+				traj_count = self.model.env.obstacle_traj["q_trajs"].shape[0]
+				traj_idx = random.randint(0, traj_count - 1)
+				start_step = random.randint(0, self.model.env.obstacle_traj["q_trajs"].shape[1] - 1)
+				self.model.env.set_obstacle_trajectory(traj_idx, start_step)
 
-						if region_name == "goal":
-							sample.append(self.model.sample_goal(num_samples))
-						elif region_name == "safe":
-							sample.append(self.model.sample_safe(num_samples))
-						elif region_name == "unsafe":
-							sample.append(self.model.sample_unsafe(num_samples))
-						elif region_name == "boundary":
-							sample.append(self.model.sample_boundary(num_samples))
-					complete_episode = True
-				except RuntimeWarning:
-					add_env_idx += 1
-					continue
+			# Uniformly sample in state space, then label
+			raw_state = self.model.sample_state_space(self.fixed_samples)
 
-			sample = torch.vstack(sample)
+			if "lidar" in str(self.model) and self.model.env.obstacle_robot is not None:
+				step_choices = torch.randint(
+					low=0,
+					high=self.model.env.obstacle_traj["q_trajs"].shape[1],
+					size=(raw_state.shape[0],),
+				)
+				sample = self.model.complete_sample_with_observations(
+					raw_state,
+					raw_state.shape[0],
+					obstacle_steps=step_choices,
+				)
+			else:
+				sample = self.model.complete_sample_with_observations(raw_state, raw_state.shape[0])
+
 			samples.append(sample)
-			x_mask['safe'].append(self.model.safe_mask(sample))
-			x_mask['unsafe'].append(self.model.unsafe_mask(sample))
-			x_mask['goal'].append(self.model.goal_mask(sample))
-			x_mask['boundary'].append(self.model.boundary_mask(sample))
+			safe_mask = self.model.safe_mask(sample)
+			unsafe_mask = self.model.unsafe_mask(sample)
+			goal_mask = self.model.goal_mask(sample)
+			boundary_mask = self.model.boundary_mask(sample)
+			x_mask['safe'].append(safe_mask)
+			x_mask['unsafe'].append(unsafe_mask)
+			x_mask['goal'].append(goal_mask)
+			x_mask['boundary'].append(boundary_mask)
+			if episode % 10 == 0:
+				print(
+					f"[sample_fixed] episode {episode}: "
+					f"safe={safe_mask.sum().item()} "
+					f"unsafe={unsafe_mask.sum().item()} "
+					f"goal={goal_mask.sum().item()} "
+					f"boundary={boundary_mask.sum().item()}"
+				)
 
 		samples = torch.vstack(samples)
 		x_mask['safe'] = torch.cat(x_mask['safe'], dim=0)
@@ -192,6 +232,28 @@ class EpisodicDataModule(pl.LightningDataModule):
 		x_mask['boundary'] = torch.cat(x_mask['boundary'], dim=0)
 
 		return samples, x_mask
+
+	def _episode_has_blocking(self, x_init: torch.Tensor) -> bool:
+		"""
+		Check whether the obstacle robot gets within obstacle_block_dist during a short rollout.
+		"""
+		if self.model.env.obstacle_robot is None:
+			return True
+		if self.obstacle_block_check_steps <= 0:
+			return True
+
+		x = x_init.clone()
+		for _ in range(self.obstacle_block_check_steps):
+			self.model.robot.set_joint_position(self.model.robot.body_joints, x[0, :self.model.q_dims])
+			if self.model.env.robots_within_distance(
+				self.model.robot,
+				self.model.env.obstacle_robot,
+				self.obstacle_block_dist,
+			):
+				return True
+			u = self.model.u_nominal(x)
+			x = self.model.closed_loop_dynamics(x, u, collect_dataset=False, update_observation=False)
+		return False
 
 	def prepare_data(self):
 		"""Create the dataset"""
@@ -204,7 +266,7 @@ class EpisodicDataModule(pl.LightningDataModule):
 			ray_per_sensor_ds = self.model.point_in_dataset_pc
 			observation_type = self.model.observation_type
 			dataset_path = dataset_path + f'{int(100 * self.model.dis_threshold)}_{self.model.env.obstacle_num}_' \
-										  f'{ray_per_sensor_ds}_{observation_type}_' \
+										  f'{ray_per_sensor_ds}_{observation_type}_vel{int(self.model.include_point_velocity)}_' \
 										  f'{int(self.noise_level * 1e2)}_{self.max_episode}_{self.trajectories_per_episode}_{self.trajectory_length}_' \
 										  f'{self.fixed_samples}.pt'
 		elif "mindis" in str(self.model):
@@ -228,14 +290,17 @@ class EpisodicDataModule(pl.LightningDataModule):
 		else:
 			print(f'Didn\'t find datset at {dataset_path}. Collecting new dataset......')
 
-			# Augment those points with samples from the fixed range
-			x_sample, x_sample_mask = self.sample_fixed()
-
 			# Get some data points from simulations
 			x_sim, x_sim_mask = self.sample_trajectories(self.model.noisy_simulator)
 
-			x = torch.cat((x_sim, x_sample), dim=0)
-			x_mask = {key: torch.cat((x_sim_mask[key], x_sample_mask[key]), dim=0) for key in x_sim_mask.keys()}
+			if self.skip_fixed_sampling:
+				x = x_sim
+				x_mask = x_sim_mask
+			else:
+				# Augment those points with samples from the fixed range
+				x_sample, x_sample_mask = self.sample_fixed()
+				x = torch.cat((x_sim, x_sample), dim=0)
+				x_mask = {key: torch.cat((x_sim_mask[key], x_sample_mask[key]), dim=0) for key in x_sim_mask.keys()}
 
 			# Randomly split data into training and test sets
 			random_indices = torch.randperm(x.shape[0])

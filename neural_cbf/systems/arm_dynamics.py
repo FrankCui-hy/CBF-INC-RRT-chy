@@ -248,7 +248,10 @@ class ArmDynamics(ControlAffineSystem):
 		#     pos = self.plant.EvalBodyPoseInWorld(self.plant_context, self.ee_body).translation()[:2]  # Drake returns pos in 3D, project into 2D for our system
 		#     near_goal_xy[i] = torch.tensor(np.abs(pos - self.ee_goal_pos) <= 0.1, dtype=torch.bool)
 
-		near_goal_xy = (x[:, :self.q_dims] - torch.tensor(self.goal_state[:self.q_dims]).type_as(x)).norm(dim=1) <= 0.2
+		# Avoid torch.tensor(tensor) which triggers repeated warnings; just cast/device-match
+		goal_xy = self.goal_state[:self.q_dims]
+		goal_xy = torch.as_tensor(goal_xy, device=x.device, dtype=x.dtype)
+		near_goal_xy = (x[:, :self.q_dims] - goal_xy).norm(dim=1) <= 0.2
 		goal_mask.logical_and_(near_goal_xy)
 		if velocity_limit:
 			near_goal_theta_velocity_1 = x[:, 2].abs() <= 0.1

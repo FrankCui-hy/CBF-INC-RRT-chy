@@ -72,7 +72,7 @@ class NeuralObsCBFController(pl.LightningModule, CBFController):
 			scenarios=scenarios,
 			experiment_suite=experiment_suite,
 			cbf_lambda=kwargs["cbf_alpha"],
-			cbf_relaxation_penalty=kwargs["cbf_relaxation_penalty"],
+			cbf_relaxation_penalty=kwargs.get("cbf_relaxation_penalty", 5000.0),
 			controller_period=dynamics_model.controller_dt,
 			safe_level=kwargs["safe_level"],
 			unsafe_level=kwargs["unsafe_level"],
