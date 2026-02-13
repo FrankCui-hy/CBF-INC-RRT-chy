@@ -171,8 +171,24 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			dq1 = dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dq2 = -dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dqs = torch.cat([dq1, dq2], dim=1)
-			assert datax.shape[
-					   1] == self.dynamics_model.n_dims + self.dynamics_model.o_dims_in_dataset + self.dynamics_model.state_aux_dims_in_dataset
+			expected = (
+				self.dynamics_model.n_dims
+				+ self.dynamics_model.o_dims_in_dataset
+				+ self.dynamics_model.state_aux_dims_in_dataset
+			)
+			if datax.shape[1] != expected:
+				# Try to infer obstacle_qdot_dim from datax shape
+				if hasattr(self.dynamics_model, "_infer_obstacle_qdot_dim_from_datax"):
+					self.dynamics_model._infer_obstacle_qdot_dim_from_datax(datax)
+					expected = (
+						self.dynamics_model.n_dims
+						+ self.dynamics_model.o_dims_in_dataset
+						+ self.dynamics_model.state_aux_dims_in_dataset
+					)
+				if datax.shape[1] != expected:
+					raise AssertionError(
+						f"datax dim mismatch: got {datax.shape[1]}, expected {expected}"
+					)
 
 			if torch.cuda.is_available():
 				torch.cuda.synchronize()

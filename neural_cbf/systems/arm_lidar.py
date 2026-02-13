@@ -105,6 +105,19 @@ class ArmLidar(ArmDynamics):
     def sensor_aux_dims(self) -> int:
         return len(self.list_sensor) * (3 + 9)
 
+    def _infer_obstacle_qdot_dim_from_datax(self, datax: torch.Tensor) -> None:
+        """
+        Infer obstacle_qdot_dim from datax shape if not already set.
+        datax shape should be: n_dims + o_dims_in_dataset + (sensor_aux + qdot_obs + 2)
+        """
+        if self.obstacle_qdot_dim > 0:
+            return
+        total = datax.shape[1]
+        base = self.n_dims + self.o_dims_in_dataset + self.sensor_aux_dims
+        extra = total - base
+        if extra >= 2:
+            self.obstacle_qdot_dim = extra - 2
+
     def _get_observation_with_state(self, state):
         if self.observation_type == "uniform_surface":
             obs = self.env.sample_obstacle_surface(
@@ -333,6 +346,7 @@ class ArmLidar(ArmDynamics):
         return torch.cat((q, obs.reshape(bs, -1)), dim=1)
 
     def get_obstacle_meta_from_datax(self, datax: torch.Tensor):
+        self._infer_obstacle_qdot_dim_from_datax(datax)
         if self.obstacle_qdot_dim == 0:
             return None, None, None
         meta = datax[:, -self.state_aux_dims_in_dataset :]
