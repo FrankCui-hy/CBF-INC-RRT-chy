@@ -89,13 +89,9 @@ def main(args):
     # Prepare data once to infer observation layout and log it
     try:
         data_module.prepare_data()
-        sample = data_module.train_dataset[0]
-        if isinstance(sample, (list, tuple)):
-            datax_sample = sample[0]
-        elif isinstance(sample, dict):
-            datax_sample = sample.get("x", None)
-        else:
-            datax_sample = None
+        datax_sample = None
+        if hasattr(data_module, "x_training") and data_module.x_training is not None:
+            datax_sample = data_module.x_training[0]
 
         if datax_sample is not None:
             if not torch.is_tensor(datax_sample):
