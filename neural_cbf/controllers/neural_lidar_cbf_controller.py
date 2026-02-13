@@ -171,6 +171,10 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			dq1 = dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dq2 = -dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dqs = torch.cat([dq1, dq2], dim=1)
+			# Try to infer observation layout from datax if needed
+			if hasattr(self.dynamics_model, "_infer_observation_from_datax"):
+				self.dynamics_model._infer_observation_from_datax(datax)
+
 			expected = (
 				self.dynamics_model.n_dims
 				+ self.dynamics_model.o_dims_in_dataset

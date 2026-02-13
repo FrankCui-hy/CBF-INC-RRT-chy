@@ -105,6 +105,42 @@ class ArmLidar(ArmDynamics):
     def sensor_aux_dims(self) -> int:
         return len(self.list_sensor) * (3 + 9)
 
+    def _infer_observation_from_datax(self, datax: torch.Tensor) -> None:
+        """
+        Infer per-point observation dimension from datax shape and update flags.
+        Expected per-point dims:
+          3 -> position
+          6 -> position + normal
+          9 -> position + velocity + normal
+        """
+        total = datax.shape[1]
+        base = self.n_dims + self.sensor_aux_dims
+        extra = total - base
+        # remove obstacle meta if present
+        if self.obstacle_qdot_dim > 0:
+            extra -= (self.obstacle_qdot_dim + 2)
+        else:
+            # try to guess obstacle meta length (qdot_obs + traj_idx + step_idx)
+            guess_meta = self.robot.body_dim + 2
+            if extra - guess_meta > 0:
+                extra -= guess_meta
+        if extra <= 0:
+            return
+        point_dim_dataset = extra // self.point_in_dataset_pc
+        if point_dim_dataset == 3:
+            self.include_point_velocity = False
+            self.add_normal = False
+        elif point_dim_dataset == 6:
+            self.include_point_velocity = False
+            self.add_normal = True
+        elif point_dim_dataset == 9:
+            self.include_point_velocity = True
+            self.add_normal = True
+        else:
+            # Unknown layout; do not mutate
+            return
+        self.point_dims = 3 + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
+
     def _infer_obstacle_qdot_dim_from_datax(self, datax: torch.Tensor) -> None:
         """
         Infer obstacle_qdot_dim from datax shape if not already set.
@@ -289,6 +325,7 @@ class ArmLidar(ArmDynamics):
 
     def datax_to_x(self, x: torch.Tensor):
         # x: bs * (n_dim + o_dim_in_dataset + aux_dim_in_dataset)
+        self._infer_observation_from_datax(x)
         bs = x.shape[0]
         q = x[:, : self.n_dims]
         point_dim_dataset = 3 + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
@@ -346,6 +383,7 @@ class ArmLidar(ArmDynamics):
         return torch.cat((q, obs.reshape(bs, -1)), dim=1)
 
     def get_obstacle_meta_from_datax(self, datax: torch.Tensor):
+        self._infer_observation_from_datax(datax)
         self._infer_obstacle_qdot_dim_from_datax(datax)
         if self.obstacle_qdot_dim == 0:
             return None, None, None
