@@ -86,6 +86,31 @@ def main(args):
         obstacle_block_check_steps=args.obstacle_block_check_steps,
     )
 
+    # Prepare data once to infer observation layout and log it
+    try:
+        data_module.prepare_data()
+        sample = data_module.train_dataset[0]
+        if isinstance(sample, (list, tuple)):
+            datax_sample = sample[0]
+        elif isinstance(sample, dict):
+            datax_sample = sample.get("x", None)
+        else:
+            datax_sample = None
+
+        if datax_sample is not None:
+            if not torch.is_tensor(datax_sample):
+                datax_sample = torch.as_tensor(datax_sample)
+            datax_sample = datax_sample.unsqueeze(0)
+            if hasattr(dynamics_model, "_infer_observation_from_datax"):
+                dynamics_model._infer_observation_from_datax(datax_sample)
+            print(
+                f"[dataset] inferred point_dims={dynamics_model.point_dims}, "
+                f"add_normal={dynamics_model.add_normal}, "
+                f"include_point_velocity={dynamics_model.include_point_velocity}"
+            )
+    except Exception as e:
+        print(f"[dataset] failed to infer observation layout: {e}")
+
 
     # Define the experiment suite
     exp_suite_list = []

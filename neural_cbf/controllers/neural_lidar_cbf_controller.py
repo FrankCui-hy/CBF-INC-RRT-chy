@@ -122,9 +122,15 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		returns:
 			h: bs x 1 tensor of BF values
 		"""
+		# Infer observation layout from datax so add_normal/include_point_velocity are consistent
+		if hasattr(self.dynamics_model, "_infer_observation_from_datax"):
+			self.dynamics_model._infer_observation_from_datax(datax)
 		x = self.dynamics_model.datax_to_x(datax)
 		bs = x.shape[0]
-		assert x.shape[1] == self.n_dims_extended
+		expected = self.dynamics_model.n_dims + self.dynamics_model.o_dims
+		if x.shape[1] != expected:
+			# update cached extended dims to match inferred observation layout
+			self.n_dims_extended = expected
 
 		state = x[:, :self.dynamics_model.n_dims]
 		z = self.encode_observation(x, datax)
