@@ -490,7 +490,7 @@ class ArmLidar(ArmDynamics):
                 t0 = time.time()
 
             if self.env is not None and self.env.obstacle_robot is not None:
-                self.env.step_obstacle(step)
+                self.env.step_obstacle(step, sim_dt=float(self.dt))
 
             # observation
             if update_observation:
