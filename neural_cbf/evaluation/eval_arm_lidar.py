@@ -1349,6 +1349,8 @@ if __name__ == "__main__":
 	args.gui = 1
 	# Ensure obstacle arm exists if training used it
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
+	# Evaluation-only tweak: move obstacle arm farther away to avoid blocking the goal
+	args.obstacle_robot_base_pos = (0.6, 0.35, 0.0)
 
 	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch
 	try:
@@ -1424,7 +1426,7 @@ if __name__ == "__main__":
 		omega_range=(1.2, 3.0),
 		obstacle_mode="arm",
 		obstacle_arm_seed=0,
-		obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
+		obstacle_arm_base_xyz=(0.6, 0.35, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
 		obstacle_arm_strength=260.0,
 		pause_on_goal=True,
