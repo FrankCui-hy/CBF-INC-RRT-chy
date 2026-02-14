@@ -1344,17 +1344,11 @@ if __name__ == "__main__":
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+	# Match evaluation params to training/sampling params
 	args.accelerator = 'cpu'
-	args.n_observation = 1024
 	args.gui = 1
-	# Ensure eval config matches checkpoint expectations
+	# Ensure obstacle arm exists if training used it
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
-	if not hasattr(args, "dataset_name") or args.dataset_name is None:
-		args.dataset_name = "ocbf_panda_vel_norm"
-	if "norm" not in str(args.dataset_name):
-		args.dataset_name = f"{args.dataset_name}_norm"
-	# In eval rollouts we drive the obstacle arm explicitly; disable trajectory playback.
-	args.obstacle_traj_path = None
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
@@ -1389,11 +1383,11 @@ if __name__ == "__main__":
 	run_moving_obstacle_rollout(
 		neural_controller,
 		t_sim=20.0,
-		move_obstacles=True,
+		move_obstacles=False,
 		seed=0,
 		realtime=True,
 		realtime_scale=1.0,
-		speed_scale=1.8,
+		speed_scale=1.0,
 		stop_on_goal=False,
 		goal_tol=0.10,
 		print_every=120,
