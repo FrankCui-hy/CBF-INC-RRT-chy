@@ -1349,6 +1349,35 @@ if __name__ == "__main__":
 	args.gui = 1
 	# Ensure obstacle arm exists if training used it
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
+
+	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch
+	try:
+		ckpt_path = log_dir + git_version + log_file
+		ckpt_obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+		state_dict = ckpt_obj.get("state_dict", {})
+		w = state_dict.get("pc_head.backbone_nn.fc11.weight", None)
+		if w is not None:
+			input_channel = int(w.shape[1])
+			# point_dims candidates
+			candidates = [3, 6, 9]
+			# prefer a candidate that yields a reasonable num_sensor
+			best = None
+			for pd in candidates:
+				num_sensor = input_channel - pd
+				if num_sensor <= 0:
+					continue
+				# panda has 7 joints; prefer exact match if possible
+				if getattr(args, "robot_name", "") == "panda" and num_sensor == 7:
+					best = pd
+					break
+				if best is None:
+					best = pd
+			if best is not None:
+				# ensure dataset_name encodes normals if needed
+				if best in (6, 9) and "norm" not in str(args.dataset_name):
+					args.dataset_name = f"{args.dataset_name}_norm"
+	except Exception:
+		pass
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
