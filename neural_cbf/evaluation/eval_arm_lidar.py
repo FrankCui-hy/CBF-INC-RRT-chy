@@ -1246,8 +1246,7 @@ if __name__ == "__main__":
 	if not hasattr(args, "dataset_name") or args.dataset_name is None:
 		args.dataset_name = "ocbf_panda_vel_norm"
 	if "norm" not in str(args.dataset_name):
-		print(f"[eval] Warning: dataset_name={args.dataset_name} has no 'norm' token. "
-			  f"Checkpoint may expect normals.")
+		args.dataset_name = f"{args.dataset_name}_norm"
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
