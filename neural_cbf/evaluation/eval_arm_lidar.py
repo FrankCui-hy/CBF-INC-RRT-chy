@@ -630,16 +630,19 @@ def _min_distance_and_collision(env: ArmEnv, robot_id: int, obstacle_ids, distan
 
 
 # ---- Remove all obstacles helper ----
-def _remove_all_obstacles(env: ArmEnv, robot_id: int = None):
+def _remove_all_obstacles(env: ArmEnv, robot_id: int = None, keep_ids: list = None):
     """Remove all non-floor obstacles from the pybullet world.
 
     This is used when you want a clean, obstacle-free evaluation scene.
     """
     p_ = env.p
     obstacle_ids = _get_eval_obstacle_ids(env, robot_id)
+    keep_set = set(int(k) for k in (keep_ids or []))
     removed = []
     for oid in obstacle_ids:
         try:
+            if int(oid) in keep_set:
+                continue
             p_.removeBody(int(oid))
             removed.append(int(oid))
         except Exception:
@@ -1075,7 +1078,13 @@ def run_moving_obstacle_rollout(
 
 	elif mode == "arm":
 		# User request: delete the original rigid/box obstacles, keep only the obstacle arm.
-		removed = _remove_all_obstacles(env, robot.robotId)
+		keep_ids = []
+		if getattr(env, "obstacle_robot", None) is not None:
+			try:
+				keep_ids.append(int(env.obstacle_robot.robotId))
+			except Exception:
+				pass
+		removed = _remove_all_obstacles(env, robot.robotId, keep_ids=keep_ids)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode=arm -> removed {len(removed)} rigid obstacles: {removed}")
 
