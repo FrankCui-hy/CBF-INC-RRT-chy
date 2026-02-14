@@ -1247,6 +1247,8 @@ if __name__ == "__main__":
 		args.dataset_name = "ocbf_panda_vel_norm"
 	if "norm" not in str(args.dataset_name):
 		args.dataset_name = f"{args.dataset_name}_norm"
+	# In eval rollouts we drive the obstacle arm explicitly; disable trajectory playback.
+	args.obstacle_traj_path = None
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
