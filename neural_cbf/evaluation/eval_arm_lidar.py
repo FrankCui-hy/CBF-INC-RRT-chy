@@ -45,7 +45,19 @@ def init_val(path, args):
 	config_file = ''
 	# config_file = '../../models/env_file/panda_100_8_v1_refined.npz'
 	gui_flag = getattr(args, 'gui', 1)
-	environment = ArmEnv([args.robot_name], GUI=gui_flag, config_file=config_file)
+	obstacle_robot_name = getattr(args, "obstacle_robot_name", None)
+	obstacle_traj_path = getattr(args, "obstacle_traj_path", None)
+	obstacle_robot_base_pos = getattr(args, "obstacle_robot_base_pos", (0.3, 0.0, 0.0))
+	obstacle_robot_base_orn = getattr(args, "obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0))
+	environment = ArmEnv(
+		[args.robot_name],
+		GUI=gui_flag,
+		config_file=config_file,
+		obstacle_robot_name=obstacle_robot_name,
+		obstacle_traj_path=obstacle_traj_path,
+		obstacle_robot_base_pos=obstacle_robot_base_pos,
+		obstacle_robot_base_orn=obstacle_robot_base_orn,
+	)
 	robot = environment.robot_list[0]
 
 	# Define the dynamics model
@@ -1219,9 +1231,9 @@ if __name__ == "__main__":
 	# Load the checkpoint file. This should include the experiment suite used during training.
 	robot_name = "panda"
 	log_dir = "./models/neural_cbf/"
-	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_2/"
+	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_10/"
 
-	log_file = "checkpoints/epoch=149-step=189899.ckpt"  # specify the checkpoint file
+	log_file = "checkpoints/epoch=119-step=151919.ckpt"  # specify the checkpoint file
 
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
@@ -1229,6 +1241,13 @@ if __name__ == "__main__":
 	args.accelerator = 'cpu'
 	args.n_observation = 1024
 	args.gui = 1
+	# Ensure eval config matches checkpoint expectations
+	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
+	if not hasattr(args, "dataset_name") or args.dataset_name is None:
+		args.dataset_name = "ocbf_panda_vel_norm"
+	if "norm" not in str(args.dataset_name):
+		print(f"[eval] Warning: dataset_name={args.dataset_name} has no 'norm' token. "
+			  f"Checkpoint may expect normals.")
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
