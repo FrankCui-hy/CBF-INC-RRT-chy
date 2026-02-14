@@ -839,6 +839,70 @@ def _spawn_obstacle_arm(
     }
 
 
+def _arm_spec_from_existing(
+    env: ArmEnv,
+    main_robot,
+    seed: int = 0,
+    amp_scale: float = 1.0,
+    omega_scale: float = 1.0,
+):
+    """Build an obstacle-arm spec using env.obstacle_robot (already loaded)."""
+    if env.obstacle_robot is None:
+        return None
+    p_ = env.p
+    arm_id = env.obstacle_robot.robotId
+    joint_indices = list(env.obstacle_robot.body_joints)
+
+    # joint limits
+    lower = []
+    upper = []
+    for j in joint_indices:
+        ji = p_.getJointInfo(arm_id, int(j))
+        lower.append(float(ji[8]))
+        upper.append(float(ji[9]))
+    lower = np.array(lower, dtype=np.float32)
+    upper = np.array(upper, dtype=np.float32)
+
+    # center pose
+    q0_main = None
+    try:
+        q0_main = np.array(getattr(main_robot, "q0"), dtype=np.float32)
+    except Exception:
+        q0_main = None
+    if q0_main is not None and q0_main.shape[0] >= len(joint_indices):
+        q_center = q0_main[: len(joint_indices)].copy()
+    else:
+        q_center = 0.5 * (lower + upper)
+
+    rng = np.random.default_rng(seed)
+    jitter = rng.uniform(low=-0.15, high=0.15, size=q_center.shape).astype(np.float32)
+    q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
+
+    amp = rng.uniform(low=0.10, high=0.45, size=q_center.shape).astype(np.float32)
+    amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
+    amp = amp * float(amp_scale)
+    amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
+    amp = np.clip(amp, 0.03, 0.80)
+
+    omega = rng.uniform(low=0.6, high=2.2, size=q_center.shape).astype(np.float32)
+    omega = omega * float(omega_scale)
+    phase = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
+
+    # apply initial pose
+    for idx, j in enumerate(joint_indices):
+        p_.resetJointState(arm_id, int(j), targetValue=float(q_center[idx]))
+
+    return {
+        "arm_id": int(arm_id),
+        "joint_indices": joint_indices,
+        "q_center": q_center,
+        "amp": amp,
+        "omega": omega,
+        "phase": phase,
+        "base_xyz": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+    }
+
+
 def _update_obstacle_arm(env: ArmEnv, arm_spec: dict, t: float, strength: float = 200.0):
     """Advance obstacle arm motion at time t (seconds)."""
     p_ = env.p
@@ -1077,28 +1141,41 @@ def run_moving_obstacle_rollout(
 	base = direction = omega = amp = None
 
 	if mode == "arm":
-		# Spawn a second arm as the moving obstacle
+		# Prefer using env.obstacle_robot so LiDAR sees it as the obstacle
 		try:
-			# allow passing an explicit URDF path
-			if obstacle_arm_urdf is not None:
-				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
-			obstacle_arm = _spawn_obstacle_arm(
-				env,
-				main_robot=robot,
-				base_xyz=tuple(obstacle_arm_base_xyz),
-				base_rpy=tuple(obstacle_arm_base_rpy),
-				seed=int(obstacle_arm_seed),
-				urdf_path=obstacle_arm_urdf,
-				use_fixed_base=True,
-				amp_scale=float(obstacle_arm_amp_scale),
-				omega_scale=float(obstacle_arm_omega_scale),
-			)
-			# Make sure collision/distance checks include the obstacle arm
-			if obstacle_arm["arm_id"] not in obstacle_ids:
-				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
-			print(f"[OBST_ARM] spawned id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
+			if env.obstacle_robot is not None:
+				obstacle_arm = _arm_spec_from_existing(
+					env,
+					main_robot=robot,
+					seed=int(obstacle_arm_seed),
+					amp_scale=float(obstacle_arm_amp_scale),
+					omega_scale=float(obstacle_arm_omega_scale),
+				)
+				if obstacle_arm is not None:
+					if obstacle_arm["arm_id"] not in obstacle_ids:
+						obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+					print(f"[OBST_ARM] using env.obstacle_robot id={obstacle_arm['arm_id']}")
+			else:
+				# Spawn a second arm as the moving obstacle (LiDAR will not see it unless
+				# you also map it into env.obstacle_robot yourself)
+				if obstacle_arm_urdf is not None:
+					setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+				obstacle_arm = _spawn_obstacle_arm(
+					env,
+					main_robot=robot,
+					base_xyz=tuple(obstacle_arm_base_xyz),
+					base_rpy=tuple(obstacle_arm_base_rpy),
+					seed=int(obstacle_arm_seed),
+					urdf_path=obstacle_arm_urdf,
+					use_fixed_base=True,
+					amp_scale=float(obstacle_arm_amp_scale),
+					omega_scale=float(obstacle_arm_omega_scale),
+				)
+				if obstacle_arm["arm_id"] not in obstacle_ids:
+					obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+				print(f"[OBST_ARM] spawned id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
 		except Exception as e:
-			print(f"[OBST_ARM] ERROR spawning obstacle arm: {e}")
+			print(f"[OBST_ARM] ERROR initializing obstacle arm: {e}")
 			obstacle_arm = None
 
 	elif mode == "rigid":
@@ -1139,7 +1216,22 @@ def run_moving_obstacle_rollout(
 			# else: mode == "none" -> do nothing
 
 		# 2) Compute control using current datax (q + obs + aux)
-		u = controller.u(x)[0]
+		# Also compute CBF activation diagnostics (constraint violation w.r.t. u_ref)
+		(u_qp, r_qp), _ = controller.solve_CLF_QP(x)
+		u = u_qp[0]
+		try:
+			u_ref = controller.u_reference(x)
+			V, Lf_V, Lg_V, _ = controller.V_with_lie_derivatives(x)
+			lambda_cbf = getattr(controller, "clf_lambda", 1.0)
+			lhs_ref = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_ref.unsqueeze(2)).squeeze(2)) \
+				+ lambda_cbf * V.unsqueeze(1)
+			lhs_qp = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_qp.unsqueeze(2)).squeeze(2)) \
+				+ lambda_cbf * V.unsqueeze(1)
+			cbf_active = (lhs_ref > 1e-6).any().item()
+		except Exception:
+			lhs_ref = None
+			lhs_qp = None
+			cbf_active = None
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# Conservative default clamp if the dynamics doesn't expose limits
@@ -1163,7 +1255,12 @@ def run_moving_obstacle_rollout(
 				md = min_dist_hist[-1]
 			else:
 				md = float("nan")
-			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
+			if cbf_active is None:
+				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
+			else:
+				lref = float(lhs_ref[0].item()) if lhs_ref is not None else float("nan")
+				lqp = float(lhs_qp[0].item()) if lhs_qp is not None else float("nan")
+				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
