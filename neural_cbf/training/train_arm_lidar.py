@@ -165,7 +165,7 @@ def main(args):
                                               cbf_hidden_layers=args.cbf_hidden_layers,
                                               cbf_hidden_size=args.cbf_hidden_size,
                                               cbf_alpha=args.cbf_alpha,
-                                              cbf_relaxation_penalty=5000,
+                                              cbf_relaxation_penalty=20000,
                                               feature_dim=args.feature_dim,
                                               per_feature_dim=args.per_feature_dim,
                                               learn_shape_epochs=args.learn_shape_epochs,
@@ -211,8 +211,8 @@ if __name__ == "__main__":
     parser.add_argument('--simulation_dt', type=float, default=1/120)
 
     # CBF definition params
-    parser.add_argument('--safe_level', type=float, default=0.1, help='h_safe < -safe_level')
-    parser.add_argument('--unsafe_level', type=float, default=0.1, help='h_unsafe > unsafe_level')
+    parser.add_argument('--safe_level', type=float, default=0.3, help='h_safe < -safe_level')
+    parser.add_argument('--unsafe_level', type=float, default=0.3, help='h_unsafe > unsafe_level')
 
     # training params
     parser.add_argument('--seed', type=int, default=1)
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     # neural network params
     parser.add_argument('--cbf_hidden_layers', type=int, default=2)
     parser.add_argument('--cbf_hidden_size', type=int, default=48)
-    parser.add_argument('--cbf_alpha', type=float, default=1, help='lambda in (L_f V + L_g V u + lambda V <= 0)')
+    parser.add_argument('--cbf_alpha', type=float, default=5, help='lambda in (L_f V + L_g V u + lambda V <= 0)')
     parser.add_argument('--per_feature_dim', type=int, default=64, help='local feature extracted from each point cloud')
     parser.add_argument('--feature_dim', type=int, default=32, help='global feature extracted from encoder')
     parser.add_argument('--use_bn', type=bool, default=False, help='global feature extracted from encoder')
@@ -234,7 +234,7 @@ if __name__ == "__main__":
     parser.add_argument('--u_coef_in_training', type=float, default=5e-1, help='control signal amplification coefficient in training')
     parser.add_argument('--safe_classification_weight', type=float, default=20, help='weight of safe region classification loss')
     parser.add_argument('--unsafe_classification_weight', type=float, default=20, help='weight of unsafe region classification loss')
-    parser.add_argument('--descent_violation_weight', type=float, default=2, help='weight of descent violation loss')
+    parser.add_argument('--descent_violation_weight', type=float, default=8, help='weight of descent violation loss')
     parser.add_argument('--hdot_divergence_weight', type=float, default=2e-2, help='weight of hdot divergence loss')
 
     # observation params
