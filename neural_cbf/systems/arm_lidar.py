@@ -37,6 +37,7 @@ class ArmLidar(ArmDynamics):
         point_dim=4,
         add_normal=False,
         include_point_velocity: bool = False,
+        record_obstacle_qdot: bool = True,
         obstacle_horizon_s: float = 0.05,
     ):
         """
@@ -57,13 +58,14 @@ class ArmLidar(ArmDynamics):
 
         self.add_normal = add_normal
         self.include_point_velocity = include_point_velocity
+        self.record_obstacle_qdot = record_obstacle_qdot
         if self.include_point_velocity and point_dim != 3:
             raise ValueError("When include_point_velocity=True, point_dim must be 3 (cartesian).")
         self.point_dims = point_dim + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
         self.obstacle_horizon_s = obstacle_horizon_s
         self.obstacle_qdot_dim = (
             self.robot.body_dim
-            if self.env is not None and self.env.obstacle_robot is not None
+            if self.record_obstacle_qdot and self.env is not None and self.env.obstacle_robot is not None
             else 0
         )
 
@@ -146,6 +148,9 @@ class ArmLidar(ArmDynamics):
         Infer obstacle_qdot_dim from datax shape if not already set.
         datax shape should be: n_dims + o_dims_in_dataset + (sensor_aux + qdot_obs + 2)
         """
+        if not self.record_obstacle_qdot:
+            self.obstacle_qdot_dim = 0
+            return
         if self.obstacle_qdot_dim > 0:
             return
         total = datax.shape[1]
@@ -277,7 +282,7 @@ class ArmLidar(ArmDynamics):
             p_r = torch.tensor(x_fk[i][1], device=state.device)
             state_aux.append(torch.cat((p_p.reshape(1, -1), p_r.reshape(1, -1)), dim=1))
         aux = torch.cat(state_aux, dim=0).reshape(-1)
-        if self.env is not None and self.env.obstacle_robot is not None:
+        if self.record_obstacle_qdot and self.env is not None and self.env.obstacle_robot is not None:
             qdot_obs = self.env.get_obstacle_qdot()
             traj_idx = float(self.env.obstacle_traj_idx)
             step_idx = float(self.env.obstacle_traj_step)
