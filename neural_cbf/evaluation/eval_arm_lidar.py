@@ -1339,7 +1339,7 @@ if __name__ == "__main__":
 	log_dir = "./models/neural_cbf/"
 	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_11/"
 
-	log_file = "checkpoints/epoch=119-step=153185.ckpt"  # specify the checkpoint file
+	log_file = "checkpoints/epoch=120-step=153185.ckpt"  # specify the checkpoint file
 
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
