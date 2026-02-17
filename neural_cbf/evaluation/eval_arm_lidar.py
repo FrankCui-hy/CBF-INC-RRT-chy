@@ -85,18 +85,41 @@ def init_val(path, args):
 	# If user provides an end-effector goal (xyz), use IK; otherwise choose a goal away from q0.
 	goal_xyz = getattr(args, "goal_xyz", None)
 	start_xyz = getattr(args, "start_xyz", None)
+	q0_ref = torch.tensor(robot.q0).float()
+
+	def _ik_with_distal_bias(target_xyz):
+		"""IK with q0 rest-pose and proximal-joint damping to favor distal motion."""
+		try:
+			ll = [float(v[0]) for v in robot.body_range]
+			ul = [float(v[1]) for v in robot.body_range]
+			jr = [u - l for l, u in zip(ll, ul)]
+			rp = [float(v) for v in q0_ref.tolist()]
+			ik = p.calculateInverseKinematics(
+				robot.robotId,
+				robot.body_joints[-1],
+				target_xyz,
+				lowerLimits=ll,
+				upperLimits=ul,
+				jointRanges=jr,
+				restPoses=rp,
+				maxNumIterations=100,
+				residualThreshold=1e-4,
+			)
+			q = torch.tensor(ik[:dynamics_model.n_dims]).float()
+			# Keep proximal joints close to nominal so motion is pushed to distal joints.
+			prox_keep = torch.tensor([0.15, 0.20, 0.25, 1.0, 1.0, 1.0, 1.0]).float()
+			q = prox_keep * q + (1.0 - prox_keep) * q0_ref[:dynamics_model.n_dims]
+			return q
+		except Exception:
+			return q0_ref[:dynamics_model.n_dims].clone()
+
 	if goal_xyz is not None:
 		goal_xyz = [float(goal_xyz[0]), float(goal_xyz[1]), float(goal_xyz[2])]
-		try:
-			ik = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
-			goal_state = torch.tensor(ik[:dynamics_model.n_dims]).float()
-		except Exception:
-			goal_state = torch.tensor(robot.q0).float()
+		goal_state = _ik_with_distal_bias(goal_xyz)
 	else:
 		# A fixed "reachable" IK target that is typically not equal to q0
 		try:
-			ik = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], [0.55, 0.0, 0.45])
-			goal_state = torch.tensor(ik[:dynamics_model.n_dims]).float()
+			goal_state = _ik_with_distal_bias([0.55, 0.0, 0.45])
 		except Exception:
 			goal_state = torch.tensor(robot.q0).float()
 	# Set and report goal
@@ -137,8 +160,7 @@ def init_val(path, args):
 	if start_xyz is not None:
 		start_xyz = [float(start_xyz[0]), float(start_xyz[1]), float(start_xyz[2])]
 		try:
-			ik0 = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], start_xyz)
-			start_x = torch.tensor(ik0[:dynamics_model.n_dims]).reshape(1, -1).float()
+			start_x = _ik_with_distal_bias(start_xyz).reshape(1, -1).float()
 			best_dist = torch.norm(start_x.squeeze(0) - goal_q).item()
 		except Exception:
 			start_x = None
@@ -1466,8 +1488,8 @@ if __name__ == "__main__":
 	# (if you trained with 64, set 64; if 1024, keep 1024).
 	# args.n_observation = 64
 	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
-	args.goal_xyz = [0.64, -0.08, 0.55]
-	args.start_xyz = [0.56, -0.20, 0.52]
+	args.goal_xyz = [0.72, 0.10, 0.72]
+	args.start_xyz = [0.48, -0.36, 0.66]
 	# Trigger CBF earlier by increasing distance threshold
 	args.dis_threshold = 0.15
 	# args.simulation_dt = 0.01
