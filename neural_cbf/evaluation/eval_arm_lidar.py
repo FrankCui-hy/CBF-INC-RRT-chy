@@ -1353,7 +1353,7 @@ if __name__ == "__main__":
 	# Evaluation-only tweak: move obstacle arm farther away to avoid blocking the goal
 	args.obstacle_robot_base_pos = (0.6, 0.35, 0.0)
 	# Force eval to match non-normal, no-qdot dataset
-	args.dataset_name = "ocbf_panda_nonnorm"
+	args.dataset_name = "ocbf_panda_plain"
 	force_nonnorm = True
 
 	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch

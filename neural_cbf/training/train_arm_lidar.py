@@ -250,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument('--obstacle_block_check_steps', type=int, default=20)
 
     # datamodule params
-    parser.add_argument('--dataset_name', type=str, default='ocbf_panda_nonnorm', help='[5dpoints, motor_control]')
+    parser.add_argument('--dataset_name', type=str, default='ocbf_panda_plain', help='[5dpoints, motor_control]')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--n_observation_dataset', type=int, default=1024, help='total points in ')
     parser.add_argument('--noise_level', type=float, default=0.3)

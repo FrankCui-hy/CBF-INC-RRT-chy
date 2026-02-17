@@ -22,7 +22,7 @@ def build_args() -> Namespace:
     parser.add_argument("--n_observation_dataset", type=int, default=512)
     # Keep point-velocity off by default; we now record obstacle joint velocities in aux.
     parser.add_argument("--include_point_velocity", action="store_true")
-    parser.add_argument("--dataset_name", type=str, default="ocbf_panda_nonnorm")
+    parser.add_argument("--dataset_name", type=str, default="ocbf_panda_plain")
 
     # datamodule
     parser.add_argument("--batch_size", type=int, default=128)
