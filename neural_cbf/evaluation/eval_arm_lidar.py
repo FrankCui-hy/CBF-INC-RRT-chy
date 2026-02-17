@@ -1366,9 +1366,9 @@ if __name__ == "__main__":
 	# Force eval to match non-normal, no-qdot dataset
 	args.dataset_name = "ocbf_panda_plain"
 	force_nonnorm = True
-	# No obstacle arm for this evaluation run
-	args.obstacle_robot_name = None
-	args.obstacle_traj_path = None
+	# Use obstacle arm for evaluation (double-arm avoidance)
+	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
+	args.obstacle_traj_path = getattr(args, "obstacle_traj_path", "data/obstacle_trajs/panda_trajs.npz")
 
 	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch
 	if not force_nonnorm:
@@ -1443,7 +1443,7 @@ if __name__ == "__main__":
 		print_every=120,
 		amp_range=(0.08, 0.20),
 		omega_range=(1.2, 3.0),
-		obstacle_mode="none",
+		obstacle_mode="arm",
 		obstacle_arm_seed=0,
 		obstacle_arm_base_xyz=(0.6, 0.35, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
