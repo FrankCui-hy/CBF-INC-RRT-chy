@@ -1386,9 +1386,9 @@ if __name__ == "__main__":
 	# Load the checkpoint file. This should include the experiment suite used during training.
 	robot_name = "panda"
 	log_dir = "./models/neural_cbf/"
-	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_11/"
+	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_12/"
 
-	log_file = "checkpoints/epoch=120-step=153185.ckpt"  # specify the checkpoint file
+	log_file = "checkpoints/epoch=19-step=151919.ckpt"  # specify the checkpoint file
 
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
