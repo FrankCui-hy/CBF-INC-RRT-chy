@@ -86,6 +86,38 @@ def _cone_dirs_local(num_rays: int, max_angle_deg: float) -> np.ndarray:
     return d
 
 
+def _robot_center_world(robot) -> np.ndarray:
+    """Approximate obstacle robot center by averaging base and body-link positions."""
+    pts = []
+    base_pos, _ = robot.p.getBasePositionAndOrientation(robot.robotId)
+    pts.append(np.asarray(base_pos, dtype=np.float32))
+    for link in robot.body_joints:
+        ls = robot.p.getLinkState(robot.robotId, int(link))
+        pts.append(np.asarray(ls[4], dtype=np.float32))
+    return np.mean(np.stack(pts, axis=0), axis=0).astype(np.float32)
+
+
+def _cone_dirs_world_towards_target(template_cone_dirs: np.ndarray, forward_world: np.ndarray) -> np.ndarray:
+    """Rotate +Z cone template to world forward direction."""
+    fwd = np.asarray(forward_world, dtype=np.float32)
+    fwd = fwd / (np.linalg.norm(fwd) + 1e-8)
+
+    # Pick a stable helper axis not parallel to forward.
+    helper = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    if abs(float(np.dot(fwd, helper))) > 0.95:
+        helper = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    x_axis = np.cross(helper, fwd)
+    x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-8)
+    y_axis = np.cross(fwd, x_axis)
+    y_axis = y_axis / (np.linalg.norm(y_axis) + 1e-8)
+
+    # Local template uses +Z as cone axis.
+    R = np.stack([x_axis, y_axis, fwd], axis=1).astype(np.float32)  # (3,3)
+    dirs = (R @ template_cone_dirs.T).T
+    dirs = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-8)
+    return dirs.astype(np.float32)
+
+
 def _joint_limits_from_cfg_or_robot(cfg: Dict[str, Any], robot, which: str, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     key = f"q_limits_{which}"
     if key in cfg["system"]:
@@ -200,8 +232,13 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
 
             origin, rot = _link_pose_world(ego_robot, sensor_link)
             ray_origin = np.repeat(origin[None, :], R, axis=0).astype(np.float32)
-            ray_dir_world = (rot @ ray_dirs_local.T).T
-            ray_dir_world = ray_dir_world / (np.linalg.norm(ray_dir_world, axis=1, keepdims=True) + 1e-8)
+            if ray_mode == "cone":
+                obs_center = _robot_center_world(obs_robot)
+                fwd = obs_center - origin
+                ray_dir_world = _cone_dirs_world_towards_target(ray_dirs_local, fwd)
+            else:
+                ray_dir_world = (rot @ ray_dirs_local.T).T
+                ray_dir_world = ray_dir_world / (np.linalg.norm(ray_dir_world, axis=1, keepdims=True) + 1e-8)
 
             p_gt, n_gt, m, hit_dist = _raycast_obstacle_robot(
                 env=env,
@@ -246,6 +283,7 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "backend": "pybullet_raycast",
         "sensor_link_mode": sensor_link_mode,
         "ray_mode": ray_mode,
+        "cone_axis_mode": "target_tracking" if ray_mode == "cone" else "sensor_frame",
         "cone_half_angle_deg": cone_half_angle_deg,
         "obstacle_robot_base_pos": obstacle_base_pos,
     }
