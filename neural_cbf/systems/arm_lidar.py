@@ -488,6 +488,15 @@ class ArmLidar(ArmDynamics):
                 )
             else:
                 x_next[i, : self.n_dims] = x[i, : self.n_dims] + xdot * self.dt * step
+                # Clamp to joint limits to avoid drifting beyond bounds during eval
+                try:
+                    ul, ll = self.state_limits
+                    x_next[i, : self.n_dims] = torch.max(
+                        torch.min(x_next[i, : self.n_dims], ul.to(x_next.device)),
+                        ll.to(x_next.device),
+                    )
+                except Exception:
+                    pass
                 self.robot.set_joint_position(self.robot.body_joints, x_next[i, : self.n_dims])
 
             if return_time:
