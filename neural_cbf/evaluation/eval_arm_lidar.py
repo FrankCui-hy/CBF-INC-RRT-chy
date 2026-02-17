@@ -1420,8 +1420,11 @@ if __name__ == "__main__":
 	args.goal_xyz = [0.55, 0.0, 0.45]
 	# args.simulation_dt = 0.01
 	# args.controller_period = 0.01
-	args.cbf_relaxation_penalty = 50000.
-	args.cbf_alpha = 20
+	# Soften CBF constraints for feasibility in dynamic obstacle cases
+	args.cbf_relaxation_penalty = 5000.
+	args.cbf_alpha = 2
+	args.safe_level = 0.2
+	args.unsafe_level = 0.2
 	# args.dis_threshold = 0.02
 	# args.observation_type = 'uniform_lidar'
 
