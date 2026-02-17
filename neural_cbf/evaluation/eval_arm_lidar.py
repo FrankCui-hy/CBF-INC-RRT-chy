@@ -1232,6 +1232,7 @@ def run_moving_obstacle_rollout(
 			lhs_ref = None
 			lhs_qp = None
 			cbf_active = None
+			u_delta = None
 		else:
 			# Also compute CBF activation diagnostics (constraint violation w.r.t. u_ref)
 			(u_qp, r_qp), _ = controller.solve_CLF_QP(x)
@@ -1245,10 +1246,12 @@ def run_moving_obstacle_rollout(
 				lhs_qp = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_qp.unsqueeze(2)).squeeze(2)) \
 					+ lambda_cbf * V.unsqueeze(1)
 				cbf_active = (lhs_ref > 1e-6).any().item()
+				u_delta = torch.norm(u_qp - u_ref, dim=1).mean().item()
 			except Exception:
 				lhs_ref = None
 				lhs_qp = None
 				cbf_active = None
+				u_delta = None
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# Conservative default clamp if the dynamics doesn't expose limits
@@ -1277,7 +1280,8 @@ def run_moving_obstacle_rollout(
 			else:
 				lref = float(lhs_ref[0].item()) if lhs_ref is not None else float("nan")
 				lqp = float(lhs_qp[0].item()) if lhs_qp is not None else float("nan")
-				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}")
+				ud = float(u_delta) if u_delta is not None else float("nan")
+				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}  ||u_qp-u_ref||={ud:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
@@ -1449,7 +1453,7 @@ if __name__ == "__main__":
 		obstacle_arm_amp_scale=1.4,
 		obstacle_arm_omega_scale=1.0,
 		pause_on_collision=True,
-		use_nominal_only=True,
+		use_nominal_only=False,
 	)
 
 	# If you still want the contour plot, uncomment:
