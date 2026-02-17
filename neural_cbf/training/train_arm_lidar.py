@@ -55,7 +55,6 @@ def main(args):
         point_dim=args.point_dim,
         add_normal=bool('norm' in args.dataset_name),
         include_point_velocity=False,
-        record_obstacle_qdot=True,
         point_in_dataset_pc = args.n_observation_dataset,
         list_sensor=robot.body_joints,
         env=environment,
@@ -86,27 +85,6 @@ def main(args):
         obstacle_block_dist=args.obstacle_block_dist,
         obstacle_block_check_steps=args.obstacle_block_check_steps,
     )
-
-    # Prepare data once to infer observation layout and log it
-    try:
-        data_module.prepare_data()
-        datax_sample = None
-        if hasattr(data_module, "x_training") and data_module.x_training is not None:
-            datax_sample = data_module.x_training[0]
-
-        if datax_sample is not None:
-            if not torch.is_tensor(datax_sample):
-                datax_sample = torch.as_tensor(datax_sample)
-            datax_sample = datax_sample.unsqueeze(0)
-            if hasattr(dynamics_model, "_infer_observation_from_datax"):
-                dynamics_model._infer_observation_from_datax(datax_sample)
-            print(
-                f"[dataset] inferred point_dims={dynamics_model.point_dims}, "
-                f"add_normal={dynamics_model.add_normal}, "
-                f"include_point_velocity={dynamics_model.include_point_velocity}"
-            )
-    except Exception as e:
-        print(f"[dataset] failed to infer observation layout: {e}")
 
 
     # Define the experiment suite
@@ -250,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument('--obstacle_block_check_steps', type=int, default=20)
 
     # datamodule params
-    parser.add_argument('--dataset_name', type=str, default='ocbf_panda_plain', help='[5dpoints, motor_control]')
+    parser.add_argument('--dataset_name', type=str, default='pino_motor_norm', help='[5dpoints, motor_control]')
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--n_observation_dataset', type=int, default=1024, help='total points in ')
     parser.add_argument('--noise_level', type=float, default=0.3)

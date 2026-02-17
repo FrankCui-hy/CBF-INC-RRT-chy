@@ -122,15 +122,9 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		returns:
 			h: bs x 1 tensor of BF values
 		"""
-		# Infer observation layout from datax so add_normal/include_point_velocity are consistent
-		if hasattr(self.dynamics_model, "_infer_observation_from_datax"):
-			self.dynamics_model._infer_observation_from_datax(datax)
 		x = self.dynamics_model.datax_to_x(datax)
 		bs = x.shape[0]
-		expected = self.dynamics_model.n_dims + self.dynamics_model.o_dims
-		if x.shape[1] != expected:
-			# update cached extended dims to match inferred observation layout
-			self.n_dims_extended = expected
+		assert x.shape[1] == self.n_dims_extended
 
 		state = x[:, :self.dynamics_model.n_dims]
 		z = self.encode_observation(x, datax)
@@ -177,28 +171,8 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			dq1 = dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dq2 = -dq_scale * torch.eye(self.dynamics_model.q_dims, device=datax.device).unsqueeze(0).expand(bs, -1, -1)
 			dqs = torch.cat([dq1, dq2], dim=1)
-			# Try to infer observation layout from datax if needed
-			if hasattr(self.dynamics_model, "_infer_observation_from_datax"):
-				self.dynamics_model._infer_observation_from_datax(datax)
-
-			expected = (
-				self.dynamics_model.n_dims
-				+ self.dynamics_model.o_dims_in_dataset
-				+ self.dynamics_model.state_aux_dims_in_dataset
-			)
-			if datax.shape[1] != expected:
-				# Try to infer obstacle_qdot_dim from datax shape
-				if hasattr(self.dynamics_model, "_infer_obstacle_qdot_dim_from_datax"):
-					self.dynamics_model._infer_obstacle_qdot_dim_from_datax(datax)
-					expected = (
-						self.dynamics_model.n_dims
-						+ self.dynamics_model.o_dims_in_dataset
-						+ self.dynamics_model.state_aux_dims_in_dataset
-					)
-				if datax.shape[1] != expected:
-					raise AssertionError(
-						f"datax dim mismatch: got {datax.shape[1]}, expected {expected}"
-					)
+			assert datax.shape[
+					   1] == self.dynamics_model.n_dims + self.dynamics_model.o_dims_in_dataset + self.dynamics_model.state_aux_dims_in_dataset
 
 			if torch.cuda.is_available():
 				torch.cuda.synchronize()

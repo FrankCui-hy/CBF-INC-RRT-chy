@@ -45,19 +45,7 @@ def init_val(path, args):
 	config_file = ''
 	# config_file = '../../models/env_file/panda_100_8_v1_refined.npz'
 	gui_flag = getattr(args, 'gui', 1)
-	obstacle_robot_name = getattr(args, "obstacle_robot_name", None)
-	obstacle_traj_path = getattr(args, "obstacle_traj_path", None)
-	obstacle_robot_base_pos = getattr(args, "obstacle_robot_base_pos", (0.3, 0.0, 0.0))
-	obstacle_robot_base_orn = getattr(args, "obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0))
-	environment = ArmEnv(
-		[args.robot_name],
-		GUI=gui_flag,
-		config_file=config_file,
-		obstacle_robot_name=obstacle_robot_name,
-		obstacle_traj_path=obstacle_traj_path,
-		obstacle_robot_base_pos=obstacle_robot_base_pos,
-		obstacle_robot_base_orn=obstacle_robot_base_orn,
-	)
+	environment = ArmEnv([args.robot_name], GUI=gui_flag, config_file=config_file)
 	robot = environment.robot_list[0]
 
 	# Define the dynamics model
@@ -74,7 +62,6 @@ def init_val(path, args):
 		env=environment,
 		robot=robot,
 		observation_type=args.observation_type,
-		record_obstacle_qdot=True,
 	)
 	dynamics_model.compute_linearized_controller(None)
 
@@ -84,42 +71,18 @@ def init_val(path, args):
 	# Define goal_state
 	# If user provides an end-effector goal (xyz), use IK; otherwise choose a goal away from q0.
 	goal_xyz = getattr(args, "goal_xyz", None)
-	start_xyz = getattr(args, "start_xyz", None)
-	q0_ref = torch.tensor(robot.q0).float()
-
-	def _ik_with_distal_bias(target_xyz):
-		"""IK with q0 rest-pose and proximal-joint damping to favor distal motion."""
-		try:
-			ll = [float(v[0]) for v in robot.body_range]
-			ul = [float(v[1]) for v in robot.body_range]
-			jr = [u - l for l, u in zip(ll, ul)]
-			rp = [float(v) for v in q0_ref.tolist()]
-			ik = p.calculateInverseKinematics(
-				robot.robotId,
-				robot.body_joints[-1],
-				target_xyz,
-				lowerLimits=ll,
-				upperLimits=ul,
-				jointRanges=jr,
-				restPoses=rp,
-				maxNumIterations=100,
-				residualThreshold=1e-4,
-			)
-			q = torch.tensor(ik[:dynamics_model.n_dims]).float()
-			# Keep proximal joints close to nominal so motion is pushed to distal joints.
-			prox_keep = torch.tensor([0.15, 0.20, 0.25, 1.0, 1.0, 1.0, 1.0]).float()
-			q = prox_keep * q + (1.0 - prox_keep) * q0_ref[:dynamics_model.n_dims]
-			return q
-		except Exception:
-			return q0_ref[:dynamics_model.n_dims].clone()
-
 	if goal_xyz is not None:
 		goal_xyz = [float(goal_xyz[0]), float(goal_xyz[1]), float(goal_xyz[2])]
-		goal_state = _ik_with_distal_bias(goal_xyz)
+		try:
+			ik = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
+			goal_state = torch.tensor(ik[:dynamics_model.n_dims]).float()
+		except Exception:
+			goal_state = torch.tensor(robot.q0).float()
 	else:
 		# A fixed "reachable" IK target that is typically not equal to q0
 		try:
-			goal_state = _ik_with_distal_bias([0.55, 0.0, 0.45])
+			ik = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], [0.55, 0.0, 0.45])
+			goal_state = torch.tensor(ik[:dynamics_model.n_dims]).float()
 		except Exception:
 			goal_state = torch.tensor(robot.q0).float()
 	# Set and report goal
@@ -157,27 +120,16 @@ def init_val(path, args):
 	# # start_x = dynamics_model.sample_boundary(1, data_collection=True)
 	ul, ll = dynamics_model.state_limits
 	goal_q = dynamics_model.goal_state[:dynamics_model.n_dims].detach().clone().float()
-	if start_xyz is not None:
-		start_xyz = [float(start_xyz[0]), float(start_xyz[1]), float(start_xyz[2])]
-		try:
-			start_x = _ik_with_distal_bias(start_xyz).reshape(1, -1).float()
-			best_dist = torch.norm(start_x.squeeze(0) - goal_q).item()
-		except Exception:
-			start_x = None
-	else:
-		start_x = None
-
-	if start_x is None:
-		# Fallback: try a few random starts and pick one far from the goal
-		best_q = None
-		best_dist = -1.0
-		for _ in range(50):
-			q_try = torch.lerp(ll, ul, torch.rand_like(ll)).reshape(1, -1).float()
-			d = torch.norm(q_try.squeeze(0) - goal_q).item()
-			if d > best_dist:
-				best_dist = d
-				best_q = q_try
-		start_x = best_q
+	# Try a few random starts and pick one far from the goal
+	best_q = None
+	best_dist = -1.0
+	for _ in range(50):
+		q_try = torch.lerp(ll, ul, torch.rand_like(ll)).reshape(1, -1).float()
+		d = torch.norm(q_try.squeeze(0) - goal_q).item()
+		if d > best_dist:
+			best_dist = d
+			best_q = q_try
+	start_x = best_q
 	start_x = dynamics_model.complete_sample_with_observations(start_x, num_samples=start_x.shape[0])
 	print(f"[START] start_q={start_x[0, :dynamics_model.n_dims].tolist()}  dist_to_goal={best_dist:.3f}")
 
@@ -666,19 +618,16 @@ def _min_distance_and_collision(env: ArmEnv, robot_id: int, obstacle_ids, distan
 
 
 # ---- Remove all obstacles helper ----
-def _remove_all_obstacles(env: ArmEnv, robot_id: int = None, keep_ids: list = None):
+def _remove_all_obstacles(env: ArmEnv, robot_id: int = None):
     """Remove all non-floor obstacles from the pybullet world.
 
     This is used when you want a clean, obstacle-free evaluation scene.
     """
     p_ = env.p
     obstacle_ids = _get_eval_obstacle_ids(env, robot_id)
-    keep_set = set(int(k) for k in (keep_ids or []))
     removed = []
     for oid in obstacle_ids:
         try:
-            if int(oid) in keep_set:
-                continue
             p_.removeBody(int(oid))
             removed.append(int(oid))
         except Exception:
@@ -839,7 +788,7 @@ def _spawn_obstacle_arm(
 
     # randomize center a bit so it is not exactly the same every run
     rng = np.random.default_rng(seed)
-    jitter = rng.uniform(low=-0.08, high=0.08, size=q_center.shape).astype(np.float32)
+    jitter = rng.uniform(low=-0.15, high=0.15, size=q_center.shape).astype(np.float32)
     q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
 
     # trajectory parameters: amplitude + frequency per joint
@@ -875,74 +824,6 @@ def _spawn_obstacle_arm(
         "omega": omega,
         "phase": phase,
         "base_xyz": np.array(base_xyz, dtype=np.float32),
-    }
-
-
-def _arm_spec_from_existing(
-    env: ArmEnv,
-    main_robot,
-    seed: int = 0,
-    amp_scale: float = 1.0,
-    omega_scale: float = 1.0,
-):
-    """Build an obstacle-arm spec using env.obstacle_robot (already loaded)."""
-    if env.obstacle_robot is None:
-        return None
-    p_ = env.p
-    arm_id = env.obstacle_robot.robotId
-    joint_indices = list(env.obstacle_robot.body_joints)
-
-    # joint limits
-    lower = []
-    upper = []
-    for j in joint_indices:
-        ji = p_.getJointInfo(arm_id, int(j))
-        lower.append(float(ji[8]))
-        upper.append(float(ji[9]))
-    lower = np.array(lower, dtype=np.float32)
-    upper = np.array(upper, dtype=np.float32)
-
-    # center pose
-    q0_main = None
-    try:
-        q0_main = np.array(getattr(main_robot, "q0"), dtype=np.float32)
-    except Exception:
-        q0_main = None
-    if q0_main is not None and q0_main.shape[0] >= len(joint_indices):
-        q_center = q0_main[: len(joint_indices)].copy()
-    else:
-        q_center = 0.5 * (lower + upper)
-
-    rng = np.random.default_rng(seed)
-    jitter = rng.uniform(low=-0.08, high=0.08, size=q_center.shape).astype(np.float32)
-    q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
-
-    amp = rng.uniform(low=0.10, high=0.45, size=q_center.shape).astype(np.float32)
-    amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
-    # Emphasize distal joints so interference is focused near end-effector workspace.
-    amp_profile = np.array([0.12, 0.12, 0.18, 0.45, 0.80, 1.00, 1.00], dtype=np.float32)
-    if amp_profile.shape[0] == amp.shape[0]:
-        amp = amp * amp_profile
-    amp = amp * float(amp_scale)
-    amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
-    amp = np.clip(amp, 0.03, 0.80)
-
-    omega = rng.uniform(low=0.6, high=2.2, size=q_center.shape).astype(np.float32)
-    omega = omega * float(omega_scale)
-    phase = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
-
-    # apply initial pose
-    for idx, j in enumerate(joint_indices):
-        p_.resetJointState(arm_id, int(j), targetValue=float(q_center[idx]))
-
-    return {
-        "arm_id": int(arm_id),
-        "joint_indices": joint_indices,
-        "q_center": q_center,
-        "amp": amp,
-        "omega": omega,
-        "phase": phase,
-        "base_xyz": np.array([0.0, 0.0, 0.0], dtype=np.float32),
     }
 
 
@@ -1073,7 +954,6 @@ def run_moving_obstacle_rollout(
     obstacle_arm_amp_scale: float = 1.4,
     obstacle_arm_omega_scale: float = 1.0,
 	pause_on_collision: bool = True,
-	use_nominal_only: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1115,27 +995,11 @@ def run_moving_obstacle_rollout(
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
-		# Disable obstacle trajectory stepping when obstacle mode is off.
-		# Keep obstacle_robot handle for fixed datax dimensionality
-		# (state_aux_dims_in_dataset may include qdot meta).
-		env.obstacle_traj = None
-		env.obstacle_traj_dt = None
-		if getattr(env, "obstacle_qdot", None) is None and getattr(env, "obstacle_robot", None) is not None:
-			try:
-				env.obstacle_qdot = np.zeros((env.obstacle_robot.body_dim,), dtype=np.float32)
-			except Exception:
-				pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode == "arm":
 		# User request: delete the original rigid/box obstacles, keep only the obstacle arm.
-		keep_ids = []
-		if getattr(env, "obstacle_robot", None) is not None:
-			try:
-				keep_ids.append(int(env.obstacle_robot.robotId))
-			except Exception:
-				pass
-		removed = _remove_all_obstacles(env, robot.robotId, keep_ids=keep_ids)
+		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode=arm -> removed {len(removed)} rigid obstacles: {removed}")
 
@@ -1201,41 +1065,28 @@ def run_moving_obstacle_rollout(
 	base = direction = omega = amp = None
 
 	if mode == "arm":
-		# Prefer using env.obstacle_robot so LiDAR sees it as the obstacle
+		# Spawn a second arm as the moving obstacle
 		try:
-			if env.obstacle_robot is not None:
-				obstacle_arm = _arm_spec_from_existing(
-					env,
-					main_robot=robot,
-					seed=int(obstacle_arm_seed),
-					amp_scale=float(obstacle_arm_amp_scale),
-					omega_scale=float(obstacle_arm_omega_scale),
-				)
-				if obstacle_arm is not None:
-					if obstacle_arm["arm_id"] not in obstacle_ids:
-						obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
-					print(f"[OBST_ARM] using env.obstacle_robot id={obstacle_arm['arm_id']}")
-			else:
-				# Spawn a second arm as the moving obstacle (LiDAR will not see it unless
-				# you also map it into env.obstacle_robot yourself)
-				if obstacle_arm_urdf is not None:
-					setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
-				obstacle_arm = _spawn_obstacle_arm(
-					env,
-					main_robot=robot,
-					base_xyz=tuple(obstacle_arm_base_xyz),
-					base_rpy=tuple(obstacle_arm_base_rpy),
-					seed=int(obstacle_arm_seed),
-					urdf_path=obstacle_arm_urdf,
-					use_fixed_base=True,
-					amp_scale=float(obstacle_arm_amp_scale),
-					omega_scale=float(obstacle_arm_omega_scale),
-				)
-				if obstacle_arm["arm_id"] not in obstacle_ids:
-					obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
-				print(f"[OBST_ARM] spawned id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
+			# allow passing an explicit URDF path
+			if obstacle_arm_urdf is not None:
+				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+			obstacle_arm = _spawn_obstacle_arm(
+				env,
+				main_robot=robot,
+				base_xyz=tuple(obstacle_arm_base_xyz),
+				base_rpy=tuple(obstacle_arm_base_rpy),
+				seed=int(obstacle_arm_seed),
+				urdf_path=obstacle_arm_urdf,
+				use_fixed_base=True,
+				amp_scale=float(obstacle_arm_amp_scale),
+				omega_scale=float(obstacle_arm_omega_scale),
+			)
+			# Make sure collision/distance checks include the obstacle arm
+			if obstacle_arm["arm_id"] not in obstacle_ids:
+				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+			print(f"[OBST_ARM] spawned id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
 		except Exception as e:
-			print(f"[OBST_ARM] ERROR initializing obstacle arm: {e}")
+			print(f"[OBST_ARM] ERROR spawning obstacle arm: {e}")
 			obstacle_arm = None
 
 	elif mode == "rigid":
@@ -1276,32 +1127,7 @@ def run_moving_obstacle_rollout(
 			# else: mode == "none" -> do nothing
 
 		# 2) Compute control using current datax (q + obs + aux)
-		if use_nominal_only:
-			u_ref = controller.u_reference(x)
-			u = u_ref[0]
-			lhs_ref = None
-			lhs_qp = None
-			cbf_active = None
-			u_delta = None
-		else:
-			# Also compute CBF activation diagnostics (constraint violation w.r.t. u_ref)
-			(u_qp, r_qp), _ = controller.solve_CLF_QP(x)
-			u = u_qp[0]
-			try:
-				u_ref = controller.u_reference(x)
-				V, Lf_V, Lg_V, _ = controller.V_with_lie_derivatives(x)
-				lambda_cbf = getattr(controller, "clf_lambda", 1.0)
-				lhs_ref = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_ref.unsqueeze(2)).squeeze(2)) \
-					+ lambda_cbf * V.unsqueeze(1)
-				lhs_qp = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_qp.unsqueeze(2)).squeeze(2)) \
-					+ lambda_cbf * V.unsqueeze(1)
-				cbf_active = (lhs_ref > 1e-6).any().item()
-				u_delta = torch.norm(u_qp - u_ref, dim=1).mean().item()
-			except Exception:
-				lhs_ref = None
-				lhs_qp = None
-				cbf_active = None
-				u_delta = None
+		u = controller.u(x)[0]
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# Conservative default clamp if the dynamics doesn't expose limits
@@ -1317,29 +1143,6 @@ def run_moving_obstacle_rollout(
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
 
-		# Debug: check how many lidar points likely hit the obstacle arm
-		if (k % max(int(print_every), 1)) == 0:
-			try:
-				with torch.no_grad():
-					datax = x
-					obs_all = datax[:, dm.n_dims : -dm.state_aux_dims_in_dataset]
-					point_dim = 3 + 3 * int(dm.include_point_velocity) + 3 * int(dm.add_normal)
-					pts = obs_all.reshape(-1, point_dim)[:, :3]
-					# Use closest distance to obstacle arm AABBs as a proxy for hits
-					hit_count = 0
-					if getattr(env, "obstacle_robot", None) is not None:
-						for link_id in range(env.obstacle_robot.n_joints):
-							aabb = p_.getAABB(env.obstacle_robot.robotId, link_id)
-							if aabb is None:
-								continue
-							low = torch.tensor(aabb[0], device=pts.device)
-							high = torch.tensor(aabb[1], device=pts.device)
-							inside = (pts >= low) & (pts <= high)
-							hit_count += int(inside.all(dim=1).sum().item())
-					print(f"[LIDAR] approx_hit_points={hit_count}")
-			except Exception:
-				pass
-
 		# Goal progress (in joint space)
 		q_now = x[0, :dm.n_dims]
 		d_goal = torch.norm(q_now - q_goal.to(q_now.device)).item()
@@ -1348,26 +1151,7 @@ def run_moving_obstacle_rollout(
 				md = min_dist_hist[-1]
 			else:
 				md = float("nan")
-			# diagnostics: u magnitude and joint limit proximity
-			try:
-				u_ref_norm = torch.norm(u_ref, dim=1).mean().item()
-			except Exception:
-				u_ref_norm = float("nan")
-			u_norm = torch.norm(u, dim=0).item()
-			q_now = x[0, :dm.n_dims]
-			try:
-				ul, ll = dm.state_limits
-				dist_to_limits = torch.min(torch.stack([q_now - ll, ul - q_now], dim=0)).item()
-			except Exception:
-				dist_to_limits = float("nan")
-
-			if cbf_active is None:
-				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  ||u||={u_norm:.4f}  ||u_ref||={u_ref_norm:.4f}  dist_to_limits={dist_to_limits:.4f}")
-			else:
-				lref = float(lhs_ref[0].item()) if lhs_ref is not None else float("nan")
-				lqp = float(lhs_qp[0].item()) if lhs_qp is not None else float("nan")
-				ud = float(u_delta) if u_delta is not None else float("nan")
-				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}  ||u_qp-u_ref||={ud:.4f}  ||u||={u_norm:.4f}  ||u_ref||={u_ref_norm:.4f}  dist_to_limits={dist_to_limits:.4f}")
+			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
@@ -1435,80 +1219,25 @@ if __name__ == "__main__":
 	# Load the checkpoint file. This should include the experiment suite used during training.
 	robot_name = "panda"
 	log_dir = "./models/neural_cbf/"
-	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_12/"
+	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_2/"
 
-	log_file = "checkpoints/epoch=119-step=151919.ckpt"  # specify the checkpoint file
+	log_file = "checkpoints/epoch=149-step=189899.ckpt"  # specify the checkpoint file
 
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
-	# Backward-compat: some old hparams.yaml files miss newer fields.
-	args.cbf_relaxation_penalty = getattr(args, "cbf_relaxation_penalty", 5000.0)
-	args.safe_level = getattr(args, "safe_level", 0.1)
-	args.unsafe_level = getattr(args, "unsafe_level", 0.1)
-	args.cbf_alpha = getattr(args, "cbf_alpha", 1.0)
-	args.feature_dim = getattr(args, "feature_dim", 32)
-	args.per_feature_dim = getattr(args, "per_feature_dim", 64)
-	args.learn_shape_epochs = getattr(args, "learn_shape_epochs", -1)
-	args.use_bn = getattr(args, "use_bn", False)
-	# Match evaluation params to training/sampling params
 	args.accelerator = 'cpu'
+	args.n_observation = 1024
 	args.gui = 1
-	# Ensure obstacle arm exists if training used it
-	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
-	# Position obstacle arm so its motion can interfere with the main arm path
-	args.obstacle_robot_base_pos = (0.62, 0.20, 0.0)
-	# Keep eval feature layout aligned with the checkpoint hparams by default.
-	force_nonnorm = False
-	# Use obstacle arm for evaluation (double-arm avoidance)
-	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
-	args.obstacle_traj_path = getattr(args, "obstacle_traj_path", "data/obstacle_trajs/panda_trajs.npz")
-
-	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch
-	if not force_nonnorm:
-		try:
-			ckpt_path = log_dir + git_version + log_file
-			ckpt_obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-			state_dict = ckpt_obj.get("state_dict", {})
-			w = state_dict.get("pc_head.backbone_nn.fc11.weight", None)
-			if w is not None:
-				input_channel = int(w.shape[1])
-				# point_dims candidates
-				candidates = [3, 6, 9]
-				# prefer a candidate that yields a reasonable num_sensor
-				best = None
-				for pd in candidates:
-					num_sensor = input_channel - pd
-					if num_sensor <= 0:
-						continue
-					# panda has 7 joints; prefer exact match if possible
-					if getattr(args, "robot_name", "") == "panda" and num_sensor == 7:
-						best = pd
-						break
-					if best is None:
-						best = pd
-				if best is not None:
-					# ensure dataset_name encodes normals if needed
-					if best in (6, 9) and "norm" not in str(args.dataset_name):
-						args.dataset_name = f"{args.dataset_name}_norm"
-		except Exception:
-			pass
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
 	# args.n_observation = 64
-	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
-	args.goal_xyz = [0.80, 0.28, 0.76]
-	args.start_xyz = [0.25, -0.62, 0.58]
-	# Trigger CBF earlier by increasing distance threshold
-	args.dis_threshold = 0.15
+	args.goal_xyz = [0.55, 0.0, 0.45]
 	# args.simulation_dt = 0.01
 	# args.controller_period = 0.01
-	# Keep CBF hyper-parameters from checkpoint unless you intentionally override.
-	# args.cbf_relaxation_penalty = 5000.
-	# args.cbf_alpha = 2
-	# args.safe_level = 0.2
-	# args.unsafe_level = 0.2
+	args.cbf_relaxation_penalty = 50000.
+	args.cbf_alpha = 20
 	# args.dis_threshold = 0.02
 	# args.observation_type = 'uniform_lidar'
 
@@ -1534,19 +1263,19 @@ if __name__ == "__main__":
 	run_moving_obstacle_rollout(
 		neural_controller,
 		t_sim=20.0,
-		move_obstacles=False,
+		move_obstacles=True,
 		seed=0,
 		realtime=True,
 		realtime_scale=1.0,
-		speed_scale=1.0,
+		speed_scale=1.8,
 		stop_on_goal=False,
 		goal_tol=0.10,
 		print_every=120,
 		amp_range=(0.08, 0.20),
 		omega_range=(1.2, 3.0),
-			obstacle_mode="none",
+		obstacle_mode="arm",
 		obstacle_arm_seed=0,
-		obstacle_arm_base_xyz=(0.62, 0.20, 0.0),
+		obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
 		obstacle_arm_strength=260.0,
 		pause_on_goal=True,
@@ -1554,7 +1283,6 @@ if __name__ == "__main__":
 		obstacle_arm_amp_scale=1.4,
 		obstacle_arm_omega_scale=1.0,
 		pause_on_collision=True,
-		use_nominal_only=False,
 	)
 
 	# If you still want the contour plot, uncomment:

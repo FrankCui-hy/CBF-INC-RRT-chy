@@ -48,7 +48,6 @@ class ArmEnv:
 		self.obstacle_traj_dt = None
 		self.obstacle_traj_idx = 0
 		self.obstacle_traj_step = 0
-		self.obstacle_traj_time_accum = 0.0
 		self.obstacle_qdot = None
 		self.obstacle_ids = []
 
@@ -215,13 +214,11 @@ class ArmEnv:
 		self.obstacle_traj_dt = float(data["dt"])
 		self.obstacle_traj_idx = 0
 		self.obstacle_traj_step = 0
-		self.obstacle_traj_time_accum = 0.0
 		self.obstacle_qdot = np.zeros_like(data["q_trajs"][0, 0, :], dtype=np.float32)
 
 	def set_obstacle_trajectory(self, traj_idx: int, step_idx: int = 0):
 		self.obstacle_traj_idx = traj_idx
 		self.obstacle_traj_step = step_idx
-		self.obstacle_traj_time_accum = 0.0
 		self.apply_obstacle_step(step_idx)
 
 	def apply_obstacle_step(self, step_idx: int):
@@ -236,25 +233,10 @@ class ArmEnv:
 		self.obstacle_qdot = qdot
 		self.obstacle_traj_step = step_idx
 
-	def step_obstacle(self, num_steps: int = 1, sim_dt: float = None):
-		"""Advance obstacle trajectory using real time.
-
-		If sim_dt is provided, accumulate time and advance trajectory only when
-		(trajectory_dt) is reached. This prevents speeding up obstacle motion when
-		simulation dt is smaller than trajectory dt.
-		"""
+	def step_obstacle(self, num_steps: int = 1):
 		if self.obstacle_robot is None or self.obstacle_traj is None:
 			return
-		if sim_dt is None or self.obstacle_traj_dt is None:
-			next_step = self.obstacle_traj_step + num_steps
-			self.apply_obstacle_step(next_step)
-			return
-		self.obstacle_traj_time_accum += float(sim_dt) * int(num_steps)
-		if self.obstacle_traj_time_accum < self.obstacle_traj_dt:
-			return
-		steps_to_advance = int(self.obstacle_traj_time_accum / self.obstacle_traj_dt)
-		self.obstacle_traj_time_accum -= steps_to_advance * self.obstacle_traj_dt
-		next_step = self.obstacle_traj_step + steps_to_advance
+		next_step = self.obstacle_traj_step + num_steps
 		self.apply_obstacle_step(next_step)
 
 	def get_obstacle_qdot(self):

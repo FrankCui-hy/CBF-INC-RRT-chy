@@ -22,7 +22,7 @@ def build_args() -> Namespace:
     parser.add_argument("--n_observation_dataset", type=int, default=512)
     # Keep point-velocity off by default; we now record obstacle joint velocities in aux.
     parser.add_argument("--include_point_velocity", action="store_true")
-    parser.add_argument("--dataset_name", type=str, default="ocbf_panda_plain")
+    parser.add_argument("--dataset_name", type=str, default="ocbf_panda_vel")
 
     # datamodule
     parser.add_argument("--batch_size", type=int, default=128)
@@ -66,9 +66,8 @@ def main() -> None:
         controller_dt=args.controller_period,
         n_obs=args.n_observation,
         point_dim=args.point_dim,
-        add_normal=bool("norm" in args.dataset_name),
+        add_normal=True,
         include_point_velocity=False,
-        record_obstacle_qdot=True,
         point_in_dataset_pc=args.n_observation_dataset,
         list_sensor=robot.body_joints,
         env=environment,

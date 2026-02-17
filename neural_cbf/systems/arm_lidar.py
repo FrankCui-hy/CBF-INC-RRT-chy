@@ -37,7 +37,6 @@ class ArmLidar(ArmDynamics):
         point_dim=4,
         add_normal=False,
         include_point_velocity: bool = False,
-        record_obstacle_qdot: bool = True,
         obstacle_horizon_s: float = 0.05,
     ):
         """
@@ -58,14 +57,13 @@ class ArmLidar(ArmDynamics):
 
         self.add_normal = add_normal
         self.include_point_velocity = include_point_velocity
-        self.record_obstacle_qdot = record_obstacle_qdot
         if self.include_point_velocity and point_dim != 3:
             raise ValueError("When include_point_velocity=True, point_dim must be 3 (cartesian).")
         self.point_dims = point_dim + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
         self.obstacle_horizon_s = obstacle_horizon_s
         self.obstacle_qdot_dim = (
             self.robot.body_dim
-            if self.record_obstacle_qdot and self.env is not None and self.env.obstacle_robot is not None
+            if self.env is not None and self.env.obstacle_robot is not None
             else 0
         )
 
@@ -106,58 +104,6 @@ class ArmLidar(ArmDynamics):
     @property
     def sensor_aux_dims(self) -> int:
         return len(self.list_sensor) * (3 + 9)
-
-    def _infer_observation_from_datax(self, datax: torch.Tensor) -> None:
-        """
-        Infer per-point observation dimension from datax shape and update flags.
-        Expected per-point dims:
-          3 -> position
-          6 -> position + normal
-          9 -> position + velocity + normal
-        """
-        total = datax.shape[1]
-        base = self.n_dims + self.sensor_aux_dims
-        extra = total - base
-        # remove obstacle meta if present
-        if self.obstacle_qdot_dim > 0:
-            extra -= (self.obstacle_qdot_dim + 2)
-        else:
-            # try to guess obstacle meta length (qdot_obs + traj_idx + step_idx)
-            guess_meta = self.robot.body_dim + 2
-            if extra - guess_meta > 0:
-                extra -= guess_meta
-        if extra <= 0:
-            return
-        point_dim_dataset = extra // self.point_in_dataset_pc
-        if point_dim_dataset == 3:
-            self.include_point_velocity = False
-            self.add_normal = False
-        elif point_dim_dataset == 6:
-            self.include_point_velocity = False
-            self.add_normal = True
-        elif point_dim_dataset == 9:
-            self.include_point_velocity = True
-            self.add_normal = True
-        else:
-            # Unknown layout; do not mutate
-            return
-        self.point_dims = 3 + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
-
-    def _infer_obstacle_qdot_dim_from_datax(self, datax: torch.Tensor) -> None:
-        """
-        Infer obstacle_qdot_dim from datax shape if not already set.
-        datax shape should be: n_dims + o_dims_in_dataset + (sensor_aux + qdot_obs + 2)
-        """
-        if not self.record_obstacle_qdot:
-            self.obstacle_qdot_dim = 0
-            return
-        if self.obstacle_qdot_dim > 0:
-            return
-        total = datax.shape[1]
-        base = self.n_dims + self.o_dims_in_dataset + self.sensor_aux_dims
-        extra = total - base
-        if extra >= 2:
-            self.obstacle_qdot_dim = extra - 2
 
     def _get_observation_with_state(self, state):
         if self.observation_type == "uniform_surface":
@@ -282,7 +228,7 @@ class ArmLidar(ArmDynamics):
             p_r = torch.tensor(x_fk[i][1], device=state.device)
             state_aux.append(torch.cat((p_p.reshape(1, -1), p_r.reshape(1, -1)), dim=1))
         aux = torch.cat(state_aux, dim=0).reshape(-1)
-        if self.record_obstacle_qdot and self.env is not None and self.env.obstacle_robot is not None:
+        if self.env is not None and self.env.obstacle_robot is not None:
             qdot_obs = self.env.get_obstacle_qdot()
             traj_idx = float(self.env.obstacle_traj_idx)
             step_idx = float(self.env.obstacle_traj_step)
@@ -330,7 +276,6 @@ class ArmLidar(ArmDynamics):
 
     def datax_to_x(self, x: torch.Tensor):
         # x: bs * (n_dim + o_dim_in_dataset + aux_dim_in_dataset)
-        self._infer_observation_from_datax(x)
         bs = x.shape[0]
         q = x[:, : self.n_dims]
         point_dim_dataset = 3 + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
@@ -388,8 +333,6 @@ class ArmLidar(ArmDynamics):
         return torch.cat((q, obs.reshape(bs, -1)), dim=1)
 
     def get_obstacle_meta_from_datax(self, datax: torch.Tensor):
-        self._infer_observation_from_datax(datax)
-        self._infer_obstacle_qdot_dim_from_datax(datax)
         if self.obstacle_qdot_dim == 0:
             return None, None, None
         meta = datax[:, -self.state_aux_dims_in_dataset :]
@@ -488,15 +431,6 @@ class ArmLidar(ArmDynamics):
                 )
             else:
                 x_next[i, : self.n_dims] = x[i, : self.n_dims] + xdot * self.dt * step
-                # Clamp to joint limits to avoid drifting beyond bounds during eval
-                try:
-                    ul, ll = self.state_limits
-                    x_next[i, : self.n_dims] = torch.max(
-                        torch.min(x_next[i, : self.n_dims], ul.to(x_next.device)),
-                        ll.to(x_next.device),
-                    )
-                except Exception:
-                    pass
                 self.robot.set_joint_position(self.robot.body_joints, x_next[i, : self.n_dims])
 
             if return_time:
@@ -504,7 +438,7 @@ class ArmLidar(ArmDynamics):
                 t0 = time.time()
 
             if self.env is not None and self.env.obstacle_robot is not None:
-                self.env.step_obstacle(step, sim_dt=float(self.dt))
+                self.env.step_obstacle(step)
 
             # observation
             if update_observation:
