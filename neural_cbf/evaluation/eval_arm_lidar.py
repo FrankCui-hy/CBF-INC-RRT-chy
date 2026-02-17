@@ -74,6 +74,7 @@ def init_val(path, args):
 		env=environment,
 		robot=robot,
 		observation_type=args.observation_type,
+		record_obstacle_qdot=False,
 	)
 	dynamics_model.compute_linearized_controller(None)
 
@@ -1351,6 +1352,8 @@ if __name__ == "__main__":
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
 	# Evaluation-only tweak: move obstacle arm farther away to avoid blocking the goal
 	args.obstacle_robot_base_pos = (0.6, 0.35, 0.0)
+	# Force eval to match non-normal, no-qdot dataset
+	args.dataset_name = "ocbf_panda_nonnorm"
 
 	# Infer point_dims from checkpoint weights to avoid dataset_name mismatch
 	try:
