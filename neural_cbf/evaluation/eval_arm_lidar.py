@@ -1115,6 +1115,13 @@ def run_moving_obstacle_rollout(
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
+		# Fully disable obstacle-arm stepping when obstacle mode is off.
+		# Otherwise closed_loop_dynamics may still call env.step_obstacle()
+		# with a stale obstacle_robot handle whose body has been removed.
+		env.obstacle_robot = None
+		env.obstacle_traj = None
+		env.obstacle_traj_dt = None
+		env.obstacle_qdot = None
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode == "arm":
