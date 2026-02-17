@@ -1268,6 +1268,29 @@ def run_moving_obstacle_rollout(
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
 
+		# Debug: check how many lidar points likely hit the obstacle arm
+		if (k % max(int(print_every), 1)) == 0:
+			try:
+				with torch.no_grad():
+					datax = x
+					obs_all = datax[:, dm.n_dims : -dm.state_aux_dims_in_dataset]
+					point_dim = 3 + 3 * int(dm.include_point_velocity) + 3 * int(dm.add_normal)
+					pts = obs_all.reshape(-1, point_dim)[:, :3]
+					# Use closest distance to obstacle arm AABBs as a proxy for hits
+					hit_count = 0
+					if getattr(env, "obstacle_robot", None) is not None:
+						for link_id in range(env.obstacle_robot.n_joints):
+							aabb = p_.getAABB(env.obstacle_robot.robotId, link_id)
+							if aabb is None:
+								continue
+							low = torch.tensor(aabb[0], device=pts.device)
+							high = torch.tensor(aabb[1], device=pts.device)
+							inside = (pts >= low) & (pts <= high)
+							hit_count += int(inside.all(dim=1).sum().item())
+					print(f"[LIDAR] approx_hit_points={hit_count}")
+			except Exception:
+				pass
+
 		# Goal progress (in joint space)
 		q_now = x[0, :dm.n_dims]
 		d_goal = torch.norm(q_now - q_goal.to(q_now.device)).item()
