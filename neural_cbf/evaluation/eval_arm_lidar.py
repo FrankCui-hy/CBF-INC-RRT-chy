@@ -1034,6 +1034,7 @@ def run_moving_obstacle_rollout(
     obstacle_arm_amp_scale: float = 1.4,
     obstacle_arm_omega_scale: float = 1.0,
 	pause_on_collision: bool = True,
+	use_nominal_only: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1226,22 +1227,28 @@ def run_moving_obstacle_rollout(
 			# else: mode == "none" -> do nothing
 
 		# 2) Compute control using current datax (q + obs + aux)
-		# Also compute CBF activation diagnostics (constraint violation w.r.t. u_ref)
-		(u_qp, r_qp), _ = controller.solve_CLF_QP(x)
-		u = u_qp[0]
-		try:
-			u_ref = controller.u_reference(x)
-			V, Lf_V, Lg_V, _ = controller.V_with_lie_derivatives(x)
-			lambda_cbf = getattr(controller, "clf_lambda", 1.0)
-			lhs_ref = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_ref.unsqueeze(2)).squeeze(2)) \
-				+ lambda_cbf * V.unsqueeze(1)
-			lhs_qp = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_qp.unsqueeze(2)).squeeze(2)) \
-				+ lambda_cbf * V.unsqueeze(1)
-			cbf_active = (lhs_ref > 1e-6).any().item()
-		except Exception:
+		if use_nominal_only:
+			u = controller.u_reference(x)[0]
 			lhs_ref = None
 			lhs_qp = None
 			cbf_active = None
+		else:
+			# Also compute CBF activation diagnostics (constraint violation w.r.t. u_ref)
+			(u_qp, r_qp), _ = controller.solve_CLF_QP(x)
+			u = u_qp[0]
+			try:
+				u_ref = controller.u_reference(x)
+				V, Lf_V, Lg_V, _ = controller.V_with_lie_derivatives(x)
+				lambda_cbf = getattr(controller, "clf_lambda", 1.0)
+				lhs_ref = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_ref.unsqueeze(2)).squeeze(2)) \
+					+ lambda_cbf * V.unsqueeze(1)
+				lhs_qp = (Lf_V[:, 0, :] + torch.bmm(Lg_V[:, 0, :].unsqueeze(1), u_qp.unsqueeze(2)).squeeze(2)) \
+					+ lambda_cbf * V.unsqueeze(1)
+				cbf_active = (lhs_ref > 1e-6).any().item()
+			except Exception:
+				lhs_ref = None
+				lhs_qp = None
+				cbf_active = None
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# Conservative default clamp if the dynamics doesn't expose limits
@@ -1442,6 +1449,7 @@ if __name__ == "__main__":
 		obstacle_arm_amp_scale=1.4,
 		obstacle_arm_omega_scale=1.0,
 		pause_on_collision=True,
+		use_nominal_only=True,
 	)
 
 	# If you still want the contour plot, uncomment:
