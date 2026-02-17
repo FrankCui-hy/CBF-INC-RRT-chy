@@ -1393,6 +1393,15 @@ if __name__ == "__main__":
 	# load arguments from yaml
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+	# Backward-compat: some old hparams.yaml files miss newer fields.
+	args.cbf_relaxation_penalty = getattr(args, "cbf_relaxation_penalty", 5000.0)
+	args.safe_level = getattr(args, "safe_level", 0.1)
+	args.unsafe_level = getattr(args, "unsafe_level", 0.1)
+	args.cbf_alpha = getattr(args, "cbf_alpha", 1.0)
+	args.feature_dim = getattr(args, "feature_dim", 32)
+	args.per_feature_dim = getattr(args, "per_feature_dim", 64)
+	args.learn_shape_epochs = getattr(args, "learn_shape_epochs", -1)
+	args.use_bn = getattr(args, "use_bn", False)
 	# Match evaluation params to training/sampling params
 	args.accelerator = 'cpu'
 	args.gui = 1
