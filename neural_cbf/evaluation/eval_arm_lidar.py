@@ -1115,13 +1115,16 @@ def run_moving_obstacle_rollout(
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
-		# Fully disable obstacle-arm stepping when obstacle mode is off.
-		# Otherwise closed_loop_dynamics may still call env.step_obstacle()
-		# with a stale obstacle_robot handle whose body has been removed.
-		env.obstacle_robot = None
+		# Disable obstacle trajectory stepping when obstacle mode is off.
+		# Keep obstacle_robot handle for fixed datax dimensionality
+		# (state_aux_dims_in_dataset may include qdot meta).
 		env.obstacle_traj = None
 		env.obstacle_traj_dt = None
-		env.obstacle_qdot = None
+		if getattr(env, "obstacle_qdot", None) is None and getattr(env, "obstacle_robot", None) is not None:
+			try:
+				env.obstacle_qdot = np.zeros((env.obstacle_robot.body_dim,), dtype=np.float32)
+			except Exception:
+				pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode == "arm":
