@@ -74,7 +74,7 @@ def init_val(path, args):
 		env=environment,
 		robot=robot,
 		observation_type=args.observation_type,
-		record_obstacle_qdot=False,
+		record_obstacle_qdot=True,
 	)
 	dynamics_model.compute_linearized_controller(None)
 
@@ -1400,9 +1400,8 @@ if __name__ == "__main__":
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
 	# Position obstacle arm so its motion can interfere with the main arm path
 	args.obstacle_robot_base_pos = (0.45, 0.10, 0.0)
-	# Force eval to match non-normal, no-qdot dataset
-	args.dataset_name = "ocbf_panda_plain"
-	force_nonnorm = True
+	# Keep eval feature layout aligned with the checkpoint hparams by default.
+	force_nonnorm = False
 	# Use obstacle arm for evaluation (double-arm avoidance)
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
 	args.obstacle_traj_path = getattr(args, "obstacle_traj_path", "data/obstacle_trajs/panda_trajs.npz")
@@ -1446,11 +1445,11 @@ if __name__ == "__main__":
 	args.dis_threshold = 0.15
 	# args.simulation_dt = 0.01
 	# args.controller_period = 0.01
-	# Soften CBF constraints for feasibility in dynamic obstacle cases
-	args.cbf_relaxation_penalty = 5000.
-	args.cbf_alpha = 2
-	args.safe_level = 0.2
-	args.unsafe_level = 0.2
+	# Keep CBF hyper-parameters from checkpoint unless you intentionally override.
+	# args.cbf_relaxation_penalty = 5000.
+	# args.cbf_alpha = 2
+	# args.safe_level = 0.2
+	# args.unsafe_level = 0.2
 	# args.dis_threshold = 0.02
 	# args.observation_type = 'uniform_lidar'
 
