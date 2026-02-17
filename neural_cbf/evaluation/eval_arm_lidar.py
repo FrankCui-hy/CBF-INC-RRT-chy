@@ -84,6 +84,7 @@ def init_val(path, args):
 	# Define goal_state
 	# If user provides an end-effector goal (xyz), use IK; otherwise choose a goal away from q0.
 	goal_xyz = getattr(args, "goal_xyz", None)
+	start_xyz = getattr(args, "start_xyz", None)
 	if goal_xyz is not None:
 		goal_xyz = [float(goal_xyz[0]), float(goal_xyz[1]), float(goal_xyz[2])]
 		try:
@@ -133,16 +134,28 @@ def init_val(path, args):
 	# # start_x = dynamics_model.sample_boundary(1, data_collection=True)
 	ul, ll = dynamics_model.state_limits
 	goal_q = dynamics_model.goal_state[:dynamics_model.n_dims].detach().clone().float()
-	# Try a few random starts and pick one far from the goal
-	best_q = None
-	best_dist = -1.0
-	for _ in range(50):
-		q_try = torch.lerp(ll, ul, torch.rand_like(ll)).reshape(1, -1).float()
-		d = torch.norm(q_try.squeeze(0) - goal_q).item()
-		if d > best_dist:
-			best_dist = d
-			best_q = q_try
-	start_x = best_q
+	if start_xyz is not None:
+		start_xyz = [float(start_xyz[0]), float(start_xyz[1]), float(start_xyz[2])]
+		try:
+			ik0 = p.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], start_xyz)
+			start_x = torch.tensor(ik0[:dynamics_model.n_dims]).reshape(1, -1).float()
+			best_dist = torch.norm(start_x.squeeze(0) - goal_q).item()
+		except Exception:
+			start_x = None
+	else:
+		start_x = None
+
+	if start_x is None:
+		# Fallback: try a few random starts and pick one far from the goal
+		best_q = None
+		best_dist = -1.0
+		for _ in range(50):
+			q_try = torch.lerp(ll, ul, torch.rand_like(ll)).reshape(1, -1).float()
+			d = torch.norm(q_try.squeeze(0) - goal_q).item()
+			if d > best_dist:
+				best_dist = d
+				best_q = q_try
+		start_x = best_q
 	start_x = dynamics_model.complete_sample_with_observations(start_x, num_samples=start_x.shape[0])
 	print(f"[START] start_q={start_x[0, :dynamics_model.n_dims].tolist()}  dist_to_goal={best_dist:.3f}")
 
@@ -804,7 +817,7 @@ def _spawn_obstacle_arm(
 
     # randomize center a bit so it is not exactly the same every run
     rng = np.random.default_rng(seed)
-    jitter = rng.uniform(low=-0.15, high=0.15, size=q_center.shape).astype(np.float32)
+    jitter = rng.uniform(low=-0.08, high=0.08, size=q_center.shape).astype(np.float32)
     q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
 
     # trajectory parameters: amplitude + frequency per joint
@@ -879,11 +892,15 @@ def _arm_spec_from_existing(
         q_center = 0.5 * (lower + upper)
 
     rng = np.random.default_rng(seed)
-    jitter = rng.uniform(low=-0.15, high=0.15, size=q_center.shape).astype(np.float32)
+    jitter = rng.uniform(low=-0.08, high=0.08, size=q_center.shape).astype(np.float32)
     q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
 
     amp = rng.uniform(low=0.10, high=0.45, size=q_center.shape).astype(np.float32)
     amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
+    # Emphasize distal joints so interference is focused near end-effector workspace.
+    amp_profile = np.array([0.12, 0.12, 0.18, 0.45, 0.80, 1.00, 1.00], dtype=np.float32)
+    if amp_profile.shape[0] == amp.shape[0]:
+        amp = amp * amp_profile
     amp = amp * float(amp_scale)
     amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
     amp = np.clip(amp, 0.03, 0.80)
@@ -1408,7 +1425,7 @@ if __name__ == "__main__":
 	# Ensure obstacle arm exists if training used it
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
 	# Position obstacle arm so its motion can interfere with the main arm path
-	args.obstacle_robot_base_pos = (0.45, 0.10, 0.0)
+	args.obstacle_robot_base_pos = (0.62, 0.20, 0.0)
 	# Keep eval feature layout aligned with the checkpoint hparams by default.
 	force_nonnorm = False
 	# Use obstacle arm for evaluation (double-arm avoidance)
@@ -1449,7 +1466,8 @@ if __name__ == "__main__":
 	# (if you trained with 64, set 64; if 1024, keep 1024).
 	# args.n_observation = 64
 	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
-	args.goal_xyz = [0.60, -0.40, 1.00]
+	args.goal_xyz = [0.68, -0.02, 0.56]
+	args.start_xyz = [0.46, -0.44, 0.50]
 	# Trigger CBF earlier by increasing distance threshold
 	args.dis_threshold = 0.15
 	# args.simulation_dt = 0.01
@@ -1496,7 +1514,7 @@ if __name__ == "__main__":
 		omega_range=(1.2, 3.0),
 		obstacle_mode="arm",
 		obstacle_arm_seed=0,
-		obstacle_arm_base_xyz=(0.45, 0.10, 0.0),
+		obstacle_arm_base_xyz=(0.62, 0.20, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
 		obstacle_arm_strength=260.0,
 		pause_on_goal=True,
