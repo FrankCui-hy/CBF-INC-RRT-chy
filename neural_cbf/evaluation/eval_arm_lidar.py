@@ -1499,7 +1499,7 @@ if __name__ == "__main__":
 	# args.n_observation = 64
 	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
 	args.goal_xyz = [0.72, 0.10, 0.72]
-	args.start_xyz = [0.48, -0.36, 0.66]
+	args.start_xyz = [0.34, -0.56, 0.62]
 	# Trigger CBF earlier by increasing distance threshold
 	args.dis_threshold = 0.15
 	# args.simulation_dt = 0.01
