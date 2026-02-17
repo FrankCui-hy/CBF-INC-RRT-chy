@@ -1442,6 +1442,8 @@ if __name__ == "__main__":
 	# args.n_observation = 64
 	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
 	args.goal_xyz = [0.60, -0.40, 1.00]
+	# Trigger CBF earlier by increasing distance threshold
+	args.dis_threshold = 0.15
 	# args.simulation_dt = 0.01
 	# args.controller_period = 0.01
 	# Soften CBF constraints for feasibility in dynamic obstacle cases
