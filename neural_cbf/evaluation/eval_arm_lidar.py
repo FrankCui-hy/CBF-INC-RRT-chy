@@ -1398,8 +1398,8 @@ if __name__ == "__main__":
 	args.gui = 1
 	# Ensure obstacle arm exists if training used it
 	args.obstacle_robot_name = getattr(args, "obstacle_robot_name", "panda")
-	# Evaluation-only tweak: move obstacle arm farther away to avoid blocking the goal
-	args.obstacle_robot_base_pos = (0.6, 0.35, 0.0)
+	# Position obstacle arm so its motion can interfere with the main arm path
+	args.obstacle_robot_base_pos = (0.45, 0.10, 0.0)
 	# Force eval to match non-normal, no-qdot dataset
 	args.dataset_name = "ocbf_panda_plain"
 	force_nonnorm = True
@@ -1440,7 +1440,8 @@ if __name__ == "__main__":
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
 	# args.n_observation = 64
-	args.goal_xyz = [0.55, 0.0, 0.45]
+	# Shift goal to avoid being directly between two arms and allow obstacle to interfere
+	args.goal_xyz = [0.60, -0.20, 0.45]
 	# args.simulation_dt = 0.01
 	# args.controller_period = 0.01
 	# Soften CBF constraints for feasibility in dynamic obstacle cases
@@ -1485,7 +1486,7 @@ if __name__ == "__main__":
 		omega_range=(1.2, 3.0),
 		obstacle_mode="arm",
 		obstacle_arm_seed=0,
-		obstacle_arm_base_xyz=(0.6, 0.35, 0.0),
+		obstacle_arm_base_xyz=(0.45, 0.10, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
 		obstacle_arm_strength=260.0,
 		pause_on_goal=True,
