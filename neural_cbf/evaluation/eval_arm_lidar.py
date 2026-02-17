@@ -1534,7 +1534,7 @@ if __name__ == "__main__":
 		print_every=120,
 		amp_range=(0.08, 0.20),
 		omega_range=(1.2, 3.0),
-		obstacle_mode="arm",
+			obstacle_mode="none",
 		obstacle_arm_seed=0,
 		obstacle_arm_base_xyz=(0.62, 0.20, 0.0),
 		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
