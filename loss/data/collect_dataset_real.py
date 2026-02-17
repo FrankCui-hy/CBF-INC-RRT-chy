@@ -68,6 +68,24 @@ def _raycast_obstacle_robot(
     return p_gt, n_gt, m, hit_dist
 
 
+def _cone_dirs_local(num_rays: int, max_angle_deg: float) -> np.ndarray:
+    """Generate local-frame unit rays within a cone around +Z."""
+    max_angle_rad = np.deg2rad(max(1e-3, float(max_angle_deg)))
+    cos_max = float(np.cos(max_angle_rad))
+    idx = np.arange(num_rays, dtype=np.float32)
+    golden = np.pi * (3.0 - np.sqrt(5.0))
+    theta = golden * idx
+    u = (idx + 0.5) / float(num_rays)
+    cos_phi = 1.0 - u * (1.0 - cos_max)
+    sin_phi = np.sqrt(np.clip(1.0 - cos_phi * cos_phi, 0.0, 1.0))
+    x = np.cos(theta) * sin_phi
+    y = np.sin(theta) * sin_phi
+    z = cos_phi
+    d = np.stack([x, y, z], axis=1).astype(np.float32)
+    d = d / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-8)
+    return d
+
+
 def _joint_limits_from_cfg_or_robot(cfg: Dict[str, Any], robot, which: str, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     key = f"q_limits_{which}"
     if key in cfg["system"]:
@@ -106,6 +124,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     obstacle_traj_path = real_cfg.get("obstacle_traj_path", None)
     gui = bool(real_cfg.get("gui", False))
     sensor_link_mode = str(real_cfg.get("sensor_link_mode", "ee"))
+    ray_mode = str(real_cfg.get("ray_mode", "sphere")).lower()
+    cone_half_angle_deg = float(real_cfg.get("cone_half_angle_deg", 35.0))
+    obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.0, 0.0)))
+    obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
 
     env = ArmEnv(
         [robot_name],
@@ -113,6 +135,8 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         config_file="",
         obstacle_robot_name=obstacle_robot_name,
         obstacle_traj_path=obstacle_traj_path,
+        obstacle_robot_base_pos=obstacle_base_pos,
+        obstacle_robot_base_orn=obstacle_base_orn,
     )
     ego_robot = env.robot_list[0]
     obs_robot = env.obstacle_robot
@@ -126,7 +150,12 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     ql_o_low, ql_o_high = _joint_limits_from_cfg_or_robot(cfg, obs_robot, "obs", device)
     assert ql_e_low.numel() == n_ego and ql_o_low.numel() == n_obs
 
-    ray_dirs_local = fibonacci_sphere_dirs(R, device=torch.device("cpu")).cpu().numpy().astype(np.float32)
+    if ray_mode == "cone":
+        ray_dirs_local = _cone_dirs_local(R, max_angle_deg=cone_half_angle_deg)
+    elif ray_mode == "sphere":
+        ray_dirs_local = fibonacci_sphere_dirs(R, device=torch.device("cpu")).cpu().numpy().astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported ray_mode={ray_mode}. Use 'sphere' or 'cone'.")
     if sensor_link_mode == "mid":
         sensor_link = int(ego_robot.body_joints[len(ego_robot.body_joints) // 2])
     else:
@@ -216,6 +245,9 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "dynamic_episode_ratio": ratio_dynamic,
         "backend": "pybullet_raycast",
         "sensor_link_mode": sensor_link_mode,
+        "ray_mode": ray_mode,
+        "cone_half_angle_deg": cone_half_angle_deg,
+        "obstacle_robot_base_pos": obstacle_base_pos,
     }
     return out
 
@@ -250,4 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

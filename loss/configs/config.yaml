@@ -34,6 +34,16 @@ data:
   ray:
     range_max: 2.5
     no_hit_point_fill: 0.0
+  real:
+    robot_name: panda
+    obstacle_robot_name: panda
+    obstacle_traj_path: data/obstacle_trajs/panda_trajs.npz
+    obstacle_robot_base_pos: [0.3, 0.0, 0.0]
+    obstacle_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
+    gui: false
+    sensor_link_mode: ee
+    ray_mode: cone
+    cone_half_angle_deg: 45.0
 
 model:
   g_phi:
