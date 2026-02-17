@@ -1228,7 +1228,8 @@ def run_moving_obstacle_rollout(
 
 		# 2) Compute control using current datax (q + obs + aux)
 		if use_nominal_only:
-			u = controller.u_reference(x)[0]
+			u_ref = controller.u_reference(x)
+			u = u_ref[0]
 			lhs_ref = None
 			lhs_qp = None
 			cbf_active = None
@@ -1275,13 +1276,26 @@ def run_moving_obstacle_rollout(
 				md = min_dist_hist[-1]
 			else:
 				md = float("nan")
+			# diagnostics: u magnitude and joint limit proximity
+			try:
+				u_ref_norm = torch.norm(u_ref, dim=1).mean().item()
+			except Exception:
+				u_ref_norm = float("nan")
+			u_norm = torch.norm(u, dim=0).item()
+			q_now = x[0, :dm.n_dims]
+			try:
+				ul, ll = dm.state_limits
+				dist_to_limits = torch.min(torch.stack([q_now - ll, ul - q_now], dim=0)).item()
+			except Exception:
+				dist_to_limits = float("nan")
+
 			if cbf_active is None:
-				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
+				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  ||u||={u_norm:.4f}  ||u_ref||={u_ref_norm:.4f}  dist_to_limits={dist_to_limits:.4f}")
 			else:
 				lref = float(lhs_ref[0].item()) if lhs_ref is not None else float("nan")
 				lqp = float(lhs_qp[0].item()) if lhs_qp is not None else float("nan")
 				ud = float(u_delta) if u_delta is not None else float("nan")
-				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}  ||u_qp-u_ref||={ud:.4f}")
+				print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}  cbf_active={cbf_active}  lhs_ref={lref:.4f}  lhs_qp={lqp:.4f}  ||u_qp-u_ref||={ud:.4f}  ||u||={u_norm:.4f}  ||u_ref||={u_ref_norm:.4f}  dist_to_limits={dist_to_limits:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
