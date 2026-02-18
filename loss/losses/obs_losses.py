@@ -18,6 +18,9 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
     """
     eps = float(cfg.get("eps", 1e-6))
     delta = float(cfg.get("huber_delta", 0.02))
+    unsigned_normal = bool(cfg.get("unsigned_normal", True))
+    use_hard_weight = bool(cfg.get("hard_example_weighting", False))
+    hard_w_max = float(cfg.get("hard_w_max", 5.0))
 
     p_hat = pred["p_hat"]  # (B, R, 3)
     n_hat = pred["n_hat"]  # (B, R, 3)
@@ -35,11 +38,19 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
 
     # Position loss (hit only): Huber
     l1 = F.smooth_l1_loss(p_hat, p_gt, beta=delta, reduction="none")
-    l_p = (m_col * l1).sum() / num_hit
+    if use_hard_weight:
+        pos_e = (p_hat - p_gt).norm(dim=-1, keepdim=True)
+        mean_e = (m_col * pos_e).sum() / num_hit
+        w = torch.clamp(pos_e / (mean_e + eps), min=1.0, max=hard_w_max)
+    else:
+        w = torch.ones_like(m_col)
+    l_p = (m_col * w * l1).sum() / num_hit
 
     # Normal cosine loss (hit only)
     n_gt_norm = F.normalize(n_gt, dim=-1, eps=1e-6)
-    cos = (n_gt_norm * n_hat).sum(dim=-1, keepdim=True)
+    cos = (n_gt_norm * n_hat).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
+    if unsigned_normal:
+        cos = cos.abs()
     l_n = (m_col * (1.0 - cos)).sum() / num_hit
 
     # Hit classification loss (optional)

@@ -116,13 +116,33 @@ def plot_sweep_curve(
     save_pdf: bool = False,
 ) -> None:
     fig, ax1 = plt.subplots(figsize=(10, 4))
-    ax1.plot(q_values, rmse_vals, label="RMSE(hit)", linewidth=1.4)
+    ax1.plot(
+        q_values,
+        rmse_vals,
+        label="RMSE(hit)",
+        linewidth=1.6,
+        color="tab:blue",
+        linestyle="-",
+        marker="o",
+        markersize=3.0,
+        markevery=max(1, len(q_values) // 20),
+    )
     ax1.set_xlabel(f"q_ego[{joint_idx}]")
     ax1.set_ylabel("RMSE")
     ax1.grid(True, alpha=0.25)
 
     ax2 = ax1.twinx()
-    ax2.plot(q_values, angle_vals, label="Angle Mean(hit)", linewidth=1.4)
+    ax2.plot(
+        q_values,
+        angle_vals,
+        label="Angle Mean(hit)",
+        linewidth=1.6,
+        color="tab:orange",
+        linestyle="--",
+        marker="s",
+        markersize=3.0,
+        markevery=max(1, len(q_values) // 20),
+    )
     ax2.set_ylabel("Angle (deg)")
 
     lines1, labels1 = ax1.get_legend_handles_labels()

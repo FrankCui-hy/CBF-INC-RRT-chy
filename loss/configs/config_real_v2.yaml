@@ -1,0 +1,112 @@
+seed: 42
+device: cuda
+
+paths:
+  output_root: loss/outputs_real_v2
+  dataset_path: loss/outputs_real_v2/datasets/raycast_dataset_real_v2.pt
+  g_phi_ckpt: loss/outputs_real_v2/checkpoints/g_phi_last.pt
+  h_theta_ckpt: loss/outputs_real_v2/checkpoints/h_theta_last.pt
+
+system:
+  n_ego: 7
+  n_obs: 7
+  rays: 256
+  dt: 0.0333333
+  q_limits_ego:
+    low: [-2.7, -1.7, -2.7, -3.0, -2.7, -0.1, -2.7]
+    high: [2.7, 1.7, 2.7, 0.0, 2.7, 3.7, 2.7]
+  q_limits_obs:
+    low: [-2.7, -1.7, -2.7, -3.0, -2.7, -0.1, -2.7]
+    high: [2.7, 1.7, 2.7, 0.0, 2.7, 3.7, 2.7]
+
+data:
+  n_episodes: 220
+  episode_len: 40
+  dynamic_episode_ratio: 0.7
+  sigma_dynamic: 0.06
+  sigma_static_obs: 0.07
+  sigma_static_ego: 0.00
+  train_split: 0.9
+  num_workers: 0
+  save_format: pt
+  safe_dist: 0.28
+  unsafe_dist: 0.16
+  ray_mode: cone
+  cone_half_angle_deg: 75.0
+  ray:
+    range_max: 5.0
+    no_hit_point_fill: 0.0
+  real:
+    robot_name: panda
+    obstacle_robot_name: panda
+    obstacle_traj_path: data/obstacle_trajs/panda_trajs.npz
+    obstacle_robot_base_pos: [0.18, 0.0, 0.0]
+    obstacle_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
+    gui: false
+    sensor_link_mode: ee
+    ray_mode: cone
+    cone_half_angle_deg: 75.0
+    near_episode_ratio: 0.3
+    near_obstacle_base_pos: [0.10, 0.0, 0.15]
+    near_obstacle_base_pos_jitter: [0.04, 0.05, 0.05]
+
+model:
+  g_phi:
+    hidden_dims: [256, 256, 256]
+    activation: silu
+    predict_hit_prob: true
+    norm_eps: 1.0e-6
+  h_theta:
+    encoder: pointnet
+    point_feat_dim: 64
+    global_feat_dim: 128
+    hidden_dims: [256, 256]
+    activation: silu
+    include_hit_prob: true
+
+loss:
+  obs:
+    huber_delta: 0.05
+    lambda_p: 1.0
+    lambda_n: 0.3
+    lambda_m: 1.0
+    lambda_r: 0.5
+    eps: 1.0e-6
+    unsigned_normal: true
+    hard_example_weighting: true
+    hard_w_max: 5.0
+  cbf:
+    alpha: 1.0
+    gamma_s: 0.2
+    gamma_u: -0.2
+    sign_mode: standard
+    w_cbf: 1.0
+    w_cls: 1.0
+
+train:
+  g_phi:
+    epochs: 150
+    batch_size: 128
+    lr: 1.0e-3
+    weight_decay: 1.0e-5
+    grad_clip_norm: 10.0
+    log_every: 50
+    use_tensorboard: false
+    resume: false
+  h_theta:
+    epochs: 150
+    batch_size: 64
+    lr: 5.0e-4
+    weight_decay: 1.0e-5
+    grad_clip_norm: 10.0
+    log_every: 50
+    use_tensorboard: false
+    freeze_g_phi: true
+    derivative_mode: composite_jvp
+    resume: false
+
+eval:
+  qp:
+    u_min: [-1.5, -1.5, -1.5, -1.5, -1.5, -1.5, -1.5]
+    u_max: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
+    alpha: 1.0

@@ -156,10 +156,14 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     obstacle_traj_path = real_cfg.get("obstacle_traj_path", None)
     gui = bool(real_cfg.get("gui", False))
     sensor_link_mode = str(real_cfg.get("sensor_link_mode", "ee"))
-    ray_mode = str(real_cfg.get("ray_mode", "sphere")).lower()
-    cone_half_angle_deg = float(real_cfg.get("cone_half_angle_deg", 35.0))
+    ray_mode = str(real_cfg.get("ray_mode", data_cfg.get("ray_mode", "sphere"))).lower()
+    cone_half_angle_deg = float(real_cfg.get("cone_half_angle_deg", data_cfg.get("cone_half_angle_deg", 35.0)))
     obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.0, 0.0)))
     obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
+    near_episode_ratio = float(real_cfg.get("near_episode_ratio", 0.0))
+    near_obstacle_base_pos = tuple(real_cfg.get("near_obstacle_base_pos", obstacle_base_pos))
+    near_obstacle_base_pos_jitter = tuple(real_cfg.get("near_obstacle_base_pos_jitter", (0.0, 0.0, 0.0)))
+    near_obstacle_base_orn = tuple(real_cfg.get("near_obstacle_base_orn", obstacle_base_orn))
 
     env = ArmEnv(
         [robot_name],
@@ -210,6 +214,20 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
 
     for ep in range(num_episodes):
         is_dynamic = ep < int(num_episodes * ratio_dynamic)
+        is_near = ep < int(num_episodes * near_episode_ratio)
+
+        if is_near:
+            jitter = np.random.uniform(low=-1.0, high=1.0, size=(3,)).astype(np.float32) * np.asarray(
+                near_obstacle_base_pos_jitter, dtype=np.float32
+            )
+            base_pos_ep = tuple((np.asarray(near_obstacle_base_pos, dtype=np.float32) + jitter).tolist())
+            base_orn_ep = near_obstacle_base_orn
+        else:
+            base_pos_ep = obstacle_base_pos
+            base_orn_ep = obstacle_base_orn
+        env.p.resetBasePositionAndOrientation(obs_robot.robotId, base_pos_ep, base_orn_ep)
+        env.p.performCollisionDetection()
+
         q_ego = _sample_uniform(ql_e_low, ql_e_high)
         q_obs = _sample_uniform(ql_o_low, ql_o_high)
 
@@ -286,6 +304,8 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "cone_axis_mode": "target_tracking" if ray_mode == "cone" else "sensor_frame",
         "cone_half_angle_deg": cone_half_angle_deg,
         "obstacle_robot_base_pos": obstacle_base_pos,
+        "near_episode_ratio": near_episode_ratio,
+        "near_obstacle_base_pos": near_obstacle_base_pos,
     }
     return out
 

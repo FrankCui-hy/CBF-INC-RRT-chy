@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from loss.metrics.obs_metrics import compute_obs_metrics
+from loss.utils.config import load_config
 from loss.utils.io import (
     iter_batches,
     load_g_phi_checkpoint,
@@ -46,17 +47,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _single_sample_errors(p_gt, n_gt, m, p_pred, n_pred) -> tuple[float, float]:
+def _single_sample_errors(p_gt, n_gt, m, p_pred, n_pred) -> tuple[float, float, float]:
     hit = m > 0.5
     if hit.sum() == 0:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), 0.0
     pos = (p_pred - p_gt).norm(dim=-1)
     rmse = torch.sqrt((pos[hit].pow(2)).mean()).item()
     n_gt = torch.nn.functional.normalize(n_gt, dim=-1, eps=1e-6)
     n_pred = torch.nn.functional.normalize(n_pred, dim=-1, eps=1e-6)
-    cos = (n_gt * n_pred).sum(dim=-1).clamp(-1.0, 1.0)
+    cos = (n_gt * n_pred).sum(dim=-1).clamp(-1.0, 1.0).abs()
     ang = torch.rad2deg(torch.acos(cos))[hit].mean().item()
-    return float(rmse), float(ang)
+    return float(rmse), float(ang), float(hit.float().mean().item())
 
 
 def run_sweep(
@@ -104,7 +105,7 @@ def run_sweep(
             p_pred_i = pred["p_hat"][0].cpu()
             n_pred_i = pred["n_hat"][0].cpu()
 
-            rmse_i, ang_i = _single_sample_errors(
+            rmse_i, ang_i, hit_ratio_i = _single_sample_errors(
                 p_gt[idx], n_gt[idx], m[idx].squeeze(-1) if m[idx].ndim == 2 else m[idx], p_pred_i, n_pred_i
             )
             rows.append(
@@ -113,6 +114,7 @@ def run_sweep(
                     "actual_q": float(q_ego[idx, joint_idx].item()),
                     "sample_idx": float(idx),
                     "qobs_l2_to_ref": float(qobs_dist[idx].item()),
+                    "hit_ratio": float(hit_ratio_i),
                     "rmse_hit": float(rmse_i),
                     "angle_mean_deg_hit": float(ang_i),
                 }
@@ -123,6 +125,7 @@ def run_sweep(
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
+    cfg = load_config(args.config)
 
     out_dir = Path(args.out_dir)
     fig_dir = out_dir / "figures"
@@ -174,6 +177,8 @@ def main() -> None:
     n_pred = torch.cat(all_n_pred, dim=0)
     m_pred = torch.cat(all_m_pred, dim=0) if len(all_m_pred) > 0 else None
 
+    unsigned_normal = bool(cfg.get("loss", {}).get("obs", {}).get("unsigned_normal", True))
+    huber_delta = float(cfg.get("loss", {}).get("obs", {}).get("huber_delta", 0.05))
     metric_out = compute_obs_metrics(
         p_gt=p_gt,
         n_gt=n_gt,
@@ -181,7 +186,8 @@ def main() -> None:
         p_pred=p_pred,
         n_pred=n_pred,
         m_pred=m_pred,
-        huber_delta=0.02,
+        huber_delta=huber_delta,
+        unsigned_normal=unsigned_normal,
     )
 
     save_json(out_dir / "summary.json", metric_out.summary)

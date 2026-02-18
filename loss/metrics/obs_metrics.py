@@ -52,6 +52,7 @@ def compute_obs_metrics(
     m_pred: torch.Tensor | None = None,
     huber_delta: float = 0.02,
     eps: float = 1e-6,
+    unsigned_normal: bool = True,
 ) -> ObsMetricOutputs:
     """Compute overall/per-ray/per-sample metrics.
 
@@ -82,6 +83,8 @@ def compute_obs_metrics(
     pos_abs = pos_diff.abs()  # (N, R, 3)
 
     cos = (n_gt * n_pred).sum(dim=-1).clamp(-1.0, 1.0)  # (N, R)
+    if unsigned_normal:
+        cos = cos.abs()
     angle_deg = torch.rad2deg(torch.acos(cos))
 
     if hit_count > 0:
