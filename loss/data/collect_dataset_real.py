@@ -161,9 +161,12 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.0, 0.0)))
     obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
     near_episode_ratio = float(real_cfg.get("near_episode_ratio", 0.0))
+    near_base_mode = str(real_cfg.get("near_base_mode", "fixed")).lower()
     near_obstacle_base_pos = tuple(real_cfg.get("near_obstacle_base_pos", obstacle_base_pos))
     near_obstacle_base_pos_jitter = tuple(real_cfg.get("near_obstacle_base_pos_jitter", (0.0, 0.0, 0.0)))
     near_obstacle_base_orn = tuple(real_cfg.get("near_obstacle_base_orn", obstacle_base_orn))
+    near_ego_offset_center = tuple(real_cfg.get("near_ego_offset_center", (0.15, 0.0, 0.0)))
+    near_ego_offset_jitter = tuple(real_cfg.get("near_ego_offset_jitter", (0.05, 0.05, 0.05)))
 
     env = ArmEnv(
         [robot_name],
@@ -216,7 +219,23 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         is_dynamic = ep < int(num_episodes * ratio_dynamic)
         is_near = ep < int(num_episodes * near_episode_ratio)
 
-        if is_near:
+        q_ego = _sample_uniform(ql_e_low, ql_e_high)
+        q_obs = _sample_uniform(ql_o_low, ql_o_high)
+
+        if not is_dynamic:
+            q_ego = _sample_uniform(ql_e_low, ql_e_high)
+
+        if is_near and near_base_mode == "around_ego":
+            ego_robot.set_joint_position(ego_robot.body_joints, q_ego.detach().cpu().numpy())
+            near_origin, _ = _link_pose_world(ego_robot, sensor_link)
+            off = np.asarray(near_ego_offset_center, dtype=np.float32)
+            off_j = (
+                np.random.uniform(low=-1.0, high=1.0, size=(3,)).astype(np.float32)
+                * np.asarray(near_ego_offset_jitter, dtype=np.float32)
+            )
+            base_pos_ep = tuple((near_origin + off + off_j).tolist())
+            base_orn_ep = near_obstacle_base_orn
+        elif is_near:
             jitter = np.random.uniform(low=-1.0, high=1.0, size=(3,)).astype(np.float32) * np.asarray(
                 near_obstacle_base_pos_jitter, dtype=np.float32
             )
@@ -227,12 +246,6 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
             base_orn_ep = obstacle_base_orn
         env.p.resetBasePositionAndOrientation(obs_robot.robotId, base_pos_ep, base_orn_ep)
         env.p.performCollisionDetection()
-
-        q_ego = _sample_uniform(ql_e_low, ql_e_high)
-        q_obs = _sample_uniform(ql_o_low, ql_o_high)
-
-        if not is_dynamic:
-            q_ego = _sample_uniform(ql_e_low, ql_e_high)
 
         for _ in range(T):
             if is_dynamic:
@@ -305,7 +318,9 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "cone_half_angle_deg": cone_half_angle_deg,
         "obstacle_robot_base_pos": obstacle_base_pos,
         "near_episode_ratio": near_episode_ratio,
+        "near_base_mode": near_base_mode,
         "near_obstacle_base_pos": near_obstacle_base_pos,
+        "near_ego_offset_center": near_ego_offset_center,
     }
     return out
 

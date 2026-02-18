@@ -46,7 +46,10 @@ data:
     sensor_link_mode: ee
     ray_mode: cone
     cone_half_angle_deg: 75.0
-    near_episode_ratio: 0.3
+    near_episode_ratio: 0.7
+    near_base_mode: around_ego
+    near_ego_offset_center: [0.15, 0.0, 0.05]
+    near_ego_offset_jitter: [0.08, 0.08, 0.08]
     near_obstacle_base_pos: [0.10, 0.0, 0.15]
     near_obstacle_base_pos_jitter: [0.04, 0.05, 0.05]
 
