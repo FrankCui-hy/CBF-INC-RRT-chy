@@ -23,6 +23,7 @@ from loss.viz.obs_viz import (
     plot_scatter_hit_points,
     plot_summary_metrics,
     plot_sweep_curve,
+    plot_sweep_hit_count,
 )
 
 
@@ -44,20 +45,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep_ref_index", type=int, default=0)
     p.add_argument("--sweep_pool", type=int, default=512)
     p.add_argument("--sweep_qobs_weight", type=float, default=0.2)
+    p.add_argument("--min_hit_count", type=int, default=128)
     return p.parse_args()
 
 
-def _single_sample_errors(p_gt, n_gt, m, p_pred, n_pred) -> tuple[float, float, float]:
+def _single_sample_errors(
+    p_gt: torch.Tensor,
+    n_gt: torch.Tensor,
+    m: torch.Tensor,
+    p_pred: torch.Tensor,
+    n_pred: torch.Tensor,
+) -> tuple[float, float, float, float, float, float, int]:
     hit = m > 0.5
-    if hit.sum() == 0:
-        return float("nan"), float("nan"), 0.0
-    pos = (p_pred - p_gt).norm(dim=-1)
-    rmse = torch.sqrt((pos[hit].pow(2)).mean()).item()
+    hit_count = int(hit.sum().item())
+    if hit_count == 0:
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), 0.0, 0
+    pos_vec = p_pred - p_gt
+    pos_l2 = pos_vec.norm(dim=-1)
+    rmse = torch.sqrt((pos_l2[hit].pow(2)).mean()).item()
+    mae = pos_vec[hit].abs().mean().item()
     n_gt = torch.nn.functional.normalize(n_gt, dim=-1, eps=1e-6)
     n_pred = torch.nn.functional.normalize(n_pred, dim=-1, eps=1e-6)
     cos = (n_gt * n_pred).sum(dim=-1).clamp(-1.0, 1.0).abs()
-    ang = torch.rad2deg(torch.acos(cos))[hit].mean().item()
-    return float(rmse), float(ang), float(hit.float().mean().item())
+    ang_all = torch.rad2deg(torch.acos(cos))[hit]
+    ang = ang_all.mean().item()
+    ang_p90 = torch.quantile(ang_all, 0.9).item()
+    ang_p95 = torch.quantile(ang_all, 0.95).item()
+    return float(rmse), float(mae), float(ang), float(ang_p90), float(ang_p95), float(hit.float().mean().item()), hit_count
 
 
 def run_sweep(
@@ -69,6 +83,7 @@ def run_sweep(
     ref_index: int,
     sweep_pool: int,
     qobs_weight: float,
+    min_hit_count: int,
 ) -> list[dict[str, float]]:
     q_ego = payload["q_ego"].float()
     q_obs = payload["q_obs"].float()
@@ -105,18 +120,29 @@ def run_sweep(
             p_pred_i = pred["p_hat"][0].cpu()
             n_pred_i = pred["n_hat"][0].cpu()
 
-            rmse_i, ang_i, hit_ratio_i = _single_sample_errors(
+            rmse_i, mae_i, ang_i, ang_p90_i, ang_p95_i, hit_ratio_i, hit_count_i = _single_sample_errors(
                 p_gt[idx], n_gt[idx], m[idx].squeeze(-1) if m[idx].ndim == 2 else m[idx], p_pred_i, n_pred_i
             )
+            if hit_count_i < int(min_hit_count):
+                rmse_i = float("nan")
+                mae_i = float("nan")
+                ang_i = float("nan")
+                ang_p90_i = float("nan")
+                ang_p95_i = float("nan")
             rows.append(
                 {
                     "target_q": float(t.item()),
                     "actual_q": float(q_ego[idx, joint_idx].item()),
                     "sample_idx": float(idx),
                     "qobs_l2_to_ref": float(qobs_dist[idx].item()),
+                    "hit_count": float(hit_count_i),
                     "hit_ratio": float(hit_ratio_i),
                     "rmse_hit": float(rmse_i),
+                    "pos_mae_hit": float(mae_i),
+                    "pos_rmse_hit": float(rmse_i),
                     "angle_mean_deg_hit": float(ang_i),
+                    "normal_angle_p90_deg_hit": float(ang_p90_i),
+                    "normal_angle_p95_deg_hit": float(ang_p95_i),
                 }
             )
     return rows
@@ -226,6 +252,7 @@ def main() -> None:
             ref_index=args.sweep_ref_index,
             sweep_pool=args.sweep_pool,
             qobs_weight=args.sweep_qobs_weight,
+            min_hit_count=args.min_hit_count,
         )
         save_csv(out_dir / f"sweep_joint_{args.joint_idx}.csv", sweep_rows)
         save_json(
@@ -234,12 +261,29 @@ def main() -> None:
                 "joint_idx": args.joint_idx,
                 "num_points": args.num_points,
                 "num_rows": len(sweep_rows),
+                "min_hit_count": int(args.min_hit_count),
             },
         )
         qv = np.array([r["actual_q"] for r in sweep_rows], dtype=np.float32)
         rv = np.array([r["rmse_hit"] for r in sweep_rows], dtype=np.float32)
         av = np.array([r["angle_mean_deg_hit"] for r in sweep_rows], dtype=np.float32)
-        plot_sweep_curve(qv, rv, av, args.joint_idx, fig_dir / f"sweep_joint_{args.joint_idx}.png", save_pdf=args.save_pdf)
+        hv = np.array([r["hit_count"] for r in sweep_rows], dtype=np.float32)
+        plot_sweep_curve(
+            qv,
+            rv,
+            av,
+            hv,
+            args.joint_idx,
+            fig_dir / f"sweep_joint_{args.joint_idx}.png",
+            save_pdf=args.save_pdf,
+        )
+        plot_sweep_hit_count(
+            qv,
+            hv,
+            args.joint_idx,
+            fig_dir / f"sweep_joint_{args.joint_idx}_hit_count.png",
+            save_pdf=args.save_pdf,
+        )
 
     print("[compare_obs_fit] Summary:")
     print(

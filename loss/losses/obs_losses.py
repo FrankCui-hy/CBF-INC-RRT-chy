@@ -21,6 +21,8 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
     unsigned_normal = bool(cfg.get("unsigned_normal", True))
     use_hard_weight = bool(cfg.get("hard_example_weighting", False))
     hard_w_max = float(cfg.get("hard_w_max", 5.0))
+    hard_residual_clip = float(cfg.get("hard_residual_clip", 0.0))
+    normal_loss_mode = str(cfg.get("normal_loss_mode", "dot2")).lower()
 
     p_hat = pred["p_hat"]  # (B, R, 3)
     n_hat = pred["n_hat"]  # (B, R, 3)
@@ -40,18 +42,28 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
     l1 = F.smooth_l1_loss(p_hat, p_gt, beta=delta, reduction="none")
     if use_hard_weight:
         pos_e = (p_hat - p_gt).norm(dim=-1, keepdim=True)
+        if hard_residual_clip > 0.0:
+            pos_e = torch.clamp(pos_e, max=hard_residual_clip)
         mean_e = (m_col * pos_e).sum() / num_hit
         w = torch.clamp(pos_e / (mean_e + eps), min=1.0, max=hard_w_max)
     else:
         w = torch.ones_like(m_col)
     l_p = (m_col * w * l1).sum() / num_hit
 
-    # Normal cosine loss (hit only)
+    # Normal loss (hit only), unsigned + smooth by default.
     n_gt_norm = F.normalize(n_gt, dim=-1, eps=1e-6)
     cos = (n_gt_norm * n_hat).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
     if unsigned_normal:
-        cos = cos.abs()
-    l_n = (m_col * (1.0 - cos)).sum() / num_hit
+        if normal_loss_mode == "dot2":
+            # Smooth unsigned alignment loss, equivalent minimum at dot=+-1.
+            n_term = 1.0 - cos.pow(2)
+        elif normal_loss_mode == "abs_cos":
+            n_term = 1.0 - cos.abs()
+        else:
+            raise ValueError(f"Unknown normal_loss_mode={normal_loss_mode}. Use 'dot2' or 'abs_cos'.")
+    else:
+        n_term = 1.0 - cos
+    l_n = (m_col * n_term).sum() / num_hit
 
     # Hit classification loss (optional)
     if m_hat is not None:

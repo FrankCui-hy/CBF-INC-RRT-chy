@@ -158,6 +158,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     sensor_link_mode = str(real_cfg.get("sensor_link_mode", "ee"))
     ray_mode = str(real_cfg.get("ray_mode", data_cfg.get("ray_mode", "sphere"))).lower()
     cone_half_angle_deg = float(real_cfg.get("cone_half_angle_deg", data_cfg.get("cone_half_angle_deg", 35.0)))
+    ray_mix_cfg = real_cfg.get("ray_mixture", {})
+    ray_mix_enabled = bool(ray_mix_cfg.get("enabled", False))
+    ray_mix_sphere_ratio = float(ray_mix_cfg.get("sphere_ratio", 0.7))
+    ray_mix_cone_ratio = 1.0 - ray_mix_sphere_ratio
     obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.0, 0.0)))
     obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
     near_episode_ratio = float(real_cfg.get("near_episode_ratio", 0.0))
@@ -189,12 +193,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     ql_o_low, ql_o_high = _joint_limits_from_cfg_or_robot(cfg, obs_robot, "obs", device)
     assert ql_e_low.numel() == n_ego and ql_o_low.numel() == n_obs
 
-    if ray_mode == "cone":
-        ray_dirs_local = _cone_dirs_local(R, max_angle_deg=cone_half_angle_deg)
-    elif ray_mode == "sphere":
-        ray_dirs_local = fibonacci_sphere_dirs(R, device=torch.device("cpu")).cpu().numpy().astype(np.float32)
-    else:
+    if ray_mode not in ("sphere", "cone"):
         raise ValueError(f"Unsupported ray_mode={ray_mode}. Use 'sphere' or 'cone'.")
+    sphere_dirs_local = fibonacci_sphere_dirs(R, device=torch.device("cpu")).cpu().numpy().astype(np.float32)
+    cone_dirs_local = _cone_dirs_local(R, max_angle_deg=cone_half_angle_deg)
     if sensor_link_mode == "mid":
         sensor_link = int(ego_robot.body_joints[len(ego_robot.body_joints) // 2])
     else:
@@ -218,6 +220,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     for ep in range(num_episodes):
         is_dynamic = ep < int(num_episodes * ratio_dynamic)
         is_near = ep < int(num_episodes * near_episode_ratio)
+        if ray_mix_enabled:
+            ray_mode_ep = "sphere" if np.random.rand() < ray_mix_sphere_ratio else "cone"
+        else:
+            ray_mode_ep = ray_mode
 
         q_ego = _sample_uniform(ql_e_low, ql_e_high)
         q_obs = _sample_uniform(ql_o_low, ql_o_high)
@@ -263,12 +269,12 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
 
             origin, rot = _link_pose_world(ego_robot, sensor_link)
             ray_origin = np.repeat(origin[None, :], R, axis=0).astype(np.float32)
-            if ray_mode == "cone":
+            if ray_mode_ep == "cone":
                 obs_center = _robot_center_world(obs_robot)
                 fwd = obs_center - origin
-                ray_dir_world = _cone_dirs_world_towards_target(ray_dirs_local, fwd)
+                ray_dir_world = _cone_dirs_world_towards_target(cone_dirs_local, fwd)
             else:
-                ray_dir_world = (rot @ ray_dirs_local.T).T
+                ray_dir_world = (rot @ sphere_dirs_local.T).T
                 ray_dir_world = ray_dir_world / (np.linalg.norm(ray_dir_world, axis=1, keepdims=True) + 1e-8)
 
             p_gt, n_gt, m, hit_dist = _raycast_obstacle_robot(
@@ -314,7 +320,11 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "backend": "pybullet_raycast",
         "sensor_link_mode": sensor_link_mode,
         "ray_mode": ray_mode,
+        "ray_mixture_enabled": ray_mix_enabled,
+        "ray_mixture_sphere_ratio": ray_mix_sphere_ratio,
+        "ray_mixture_cone_ratio": ray_mix_cone_ratio,
         "cone_axis_mode": "target_tracking" if ray_mode == "cone" else "sensor_frame",
+        "ray_mode_effective": "mixture" if ray_mix_enabled else ray_mode,
         "cone_half_angle_deg": cone_half_angle_deg,
         "obstacle_robot_base_pos": obstacle_base_pos,
         "near_episode_ratio": near_episode_ratio,

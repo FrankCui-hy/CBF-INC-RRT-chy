@@ -111,21 +111,29 @@ def plot_sweep_curve(
     q_values: np.ndarray,
     rmse_vals: np.ndarray,
     angle_vals: np.ndarray,
+    hit_counts: np.ndarray | None,
     joint_idx: int,
     out_path: Path,
     save_pdf: bool = False,
 ) -> None:
     fig, ax1 = plt.subplots(figsize=(10, 4))
+    rmse = np.asarray(rmse_vals, dtype=np.float32)
+    ang = np.asarray(angle_vals, dtype=np.float32)
+    qv = np.asarray(q_values, dtype=np.float32)
+
+    rmse_mask = np.isfinite(rmse)
+    ang_mask = np.isfinite(ang)
+
     ax1.plot(
-        q_values,
-        rmse_vals,
+        qv[rmse_mask],
+        rmse[rmse_mask],
         label="RMSE(hit)",
         linewidth=1.6,
         color="tab:blue",
         linestyle="-",
         marker="o",
         markersize=3.0,
-        markevery=max(1, len(q_values) // 20),
+        markevery=max(1, max(int(rmse_mask.sum()), 1) // 20),
     )
     ax1.set_xlabel(f"q_ego[{joint_idx}]")
     ax1.set_ylabel("RMSE")
@@ -133,20 +141,65 @@ def plot_sweep_curve(
 
     ax2 = ax1.twinx()
     ax2.plot(
-        q_values,
-        angle_vals,
+        qv[ang_mask],
+        ang[ang_mask],
         label="Angle Mean(hit)",
         linewidth=1.6,
         color="tab:orange",
         linestyle="--",
         marker="s",
         markersize=3.0,
-        markevery=max(1, len(q_values) // 20),
+        markevery=max(1, max(int(ang_mask.sum()), 1) // 20),
     )
     ax2.set_ylabel("Angle (deg)")
 
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+    lines = lines1 + lines2
+    labels = labels1 + labels2
+
+    if hit_counts is not None:
+        hc = np.asarray(hit_counts, dtype=np.float32)
+        ax3 = ax1.twinx()
+        ax3.spines["right"].set_position(("outward", 48))
+        ax3.plot(
+            qv,
+            hc,
+            label="Hit Count",
+            linewidth=1.2,
+            color="tab:green",
+            linestyle=":",
+            alpha=0.85,
+        )
+        ax3.set_ylabel("Hit Count")
+        l3, lb3 = ax3.get_legend_handles_labels()
+        lines += l3
+        labels += lb3
+
+    ax1.legend(lines, labels, loc="best")
     ax1.set_title("Sweep over q_ego joint")
+    _save(fig, out_path, save_pdf=save_pdf)
+
+
+def plot_sweep_hit_count(
+    q_values: np.ndarray,
+    hit_counts: np.ndarray,
+    joint_idx: int,
+    out_path: Path,
+    save_pdf: bool = False,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(
+        q_values,
+        hit_counts,
+        linewidth=1.5,
+        color="tab:green",
+        marker="^",
+        markersize=3.0,
+        markevery=max(1, len(q_values) // 20),
+    )
+    ax.set_xlabel(f"q_ego[{joint_idx}]")
+    ax.set_ylabel("Hit Count")
+    ax.set_title("Sweep Hit Count")
+    ax.grid(True, alpha=0.25)
     _save(fig, out_path, save_pdf=save_pdf)

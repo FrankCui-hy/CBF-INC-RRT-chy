@@ -31,7 +31,7 @@ data:
   save_format: pt
   safe_dist: 0.28
   unsafe_dist: 0.16
-  ray_mode: cone
+  ray_mode: sphere
   cone_half_angle_deg: 75.0
   ray:
     range_max: 5.0
@@ -44,12 +44,15 @@ data:
     obstacle_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
     gui: false
     sensor_link_mode: ee
-    ray_mode: cone
-    cone_half_angle_deg: 85.0
-    near_episode_ratio: 0.85
+    ray_mode: sphere
+    cone_half_angle_deg: 75.0
+    ray_mixture:
+      enabled: true
+      sphere_ratio: 0.7
+    near_episode_ratio: 0.4
     near_base_mode: around_ego
-    near_ego_offset_center: [0.12, 0.0, 0.03]
-    near_ego_offset_jitter: [0.10, 0.10, 0.10]
+    near_ego_offset_center: [0.14, 0.0, 0.05]
+    near_ego_offset_jitter: [0.07, 0.07, 0.07]
     near_obstacle_base_pos: [0.10, 0.0, 0.15]
     near_obstacle_base_pos_jitter: [0.04, 0.05, 0.05]
 
@@ -76,8 +79,10 @@ loss:
     lambda_r: 0.5
     eps: 1.0e-6
     unsigned_normal: true
-    hard_example_weighting: true
-    hard_w_max: 5.0
+    hard_example_weighting: false
+    hard_w_max: 3.0
+    hard_residual_clip: 0.20
+    normal_loss_mode: dot2
   cbf:
     alpha: 1.0
     gamma_s: 0.2
