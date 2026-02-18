@@ -203,3 +203,72 @@ def plot_sweep_hit_count(
     ax.set_title("Sweep Hit Count")
     ax.grid(True, alpha=0.25)
     _save(fig, out_path, save_pdf=save_pdf)
+
+
+def plot_sweep_with_bands(
+    q_values: np.ndarray,
+    rmse_mean: np.ndarray,
+    rmse_std: np.ndarray,
+    angle_mean: np.ndarray,
+    angle_std: np.ndarray,
+    hit_count_mean: np.ndarray,
+    accepted: np.ndarray,
+    trials_target: int,
+    joint_idx: int,
+    out_path: Path,
+    save_pdf: bool = False,
+) -> None:
+    q = np.asarray(q_values, dtype=np.float32)
+    rm_m = np.asarray(rmse_mean, dtype=np.float32)
+    rm_s = np.asarray(rmse_std, dtype=np.float32)
+    an_m = np.asarray(angle_mean, dtype=np.float32)
+    an_s = np.asarray(angle_std, dtype=np.float32)
+    hc_m = np.asarray(hit_count_mean, dtype=np.float32)
+    acc = np.asarray(accepted, dtype=np.float32)
+
+    rm_ok = np.isfinite(rm_m) & np.isfinite(rm_s)
+    an_ok = np.isfinite(an_m) & np.isfinite(an_s)
+    hc_ok = np.isfinite(hc_m)
+    insufficient = acc < float(trials_target)
+    empty = acc <= 0.0
+
+    fig, ax1 = plt.subplots(figsize=(11, 4.5))
+    if rm_ok.any():
+        ax1.plot(q[rm_ok], rm_m[rm_ok], color="tab:blue", linewidth=1.7, label="RMSE mean")
+        ax1.fill_between(q[rm_ok], rm_m[rm_ok] - rm_s[rm_ok], rm_m[rm_ok] + rm_s[rm_ok], color="tab:blue", alpha=0.2, label="RMSE ±std")
+    ax1.set_xlabel(f"q_ego[{joint_idx}]")
+    ax1.set_ylabel("RMSE")
+    ax1.grid(True, alpha=0.25)
+
+    ax2 = ax1.twinx()
+    if an_ok.any():
+        ax2.plot(q[an_ok], an_m[an_ok], color="tab:orange", linestyle="--", linewidth=1.7, label="Angle mean")
+        ax2.fill_between(q[an_ok], an_m[an_ok] - an_s[an_ok], an_m[an_ok] + an_s[an_ok], color="tab:orange", alpha=0.18, label="Angle ±std")
+    ax2.set_ylabel("Angle (deg)")
+
+    ax3 = ax1.twinx()
+    ax3.spines["right"].set_position(("outward", 52))
+    if hc_ok.any():
+        ax3.plot(q[hc_ok], hc_m[hc_ok], color="tab:green", linestyle=":", linewidth=1.4, label="Hit Count mean")
+    ax3.set_ylabel("Hit Count")
+
+    if insufficient.any():
+        idx = np.where(insufficient & hc_ok)[0]
+        if idx.size > 0:
+            ax3.scatter(q[idx], hc_m[idx], color="gray", s=18, marker="x", label="accepted<trials")
+    if empty.any():
+        idx = np.where(empty & hc_ok)[0]
+        if idx.size > 0:
+            ax3.scatter(q[idx], hc_m[idx], color="black", s=22, marker="x", label="accepted=0")
+
+    lines, labels = [], []
+    for ax in (ax1, ax2, ax3):
+        l, lb = ax.get_legend_handles_labels()
+        lines += l
+        labels += lb
+    if len(lines) > 0:
+        ax1.legend(lines, labels, loc="best", fontsize=8)
+
+    insufficient_count = int(np.sum(insufficient))
+    ax1.set_title(f"Sweep over q_ego joint (insufficient={insufficient_count}/{len(q)})")
+    _save(fig, out_path, save_pdf=save_pdf)

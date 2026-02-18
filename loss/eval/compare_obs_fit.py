@@ -22,8 +22,7 @@ from loss.viz.obs_viz import (
     plot_per_ray,
     plot_scatter_hit_points,
     plot_summary_metrics,
-    plot_sweep_curve,
-    plot_sweep_hit_count,
+    plot_sweep_with_bands,
 )
 
 
@@ -46,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep_pool", type=int, default=512)
     p.add_argument("--sweep_qobs_weight", type=float, default=0.2)
     p.add_argument("--min_hit_count", type=int, default=128)
+    p.add_argument("--sweep_trials_per_point", type=int, default=10)
+    p.add_argument("--max_attempts_per_point", type=int, default=200)
+    p.add_argument("--sweep_seed", type=int, default=0)
     return p.parse_args()
 
 
@@ -74,6 +76,139 @@ def _single_sample_errors(
     return float(rmse), float(mae), float(ang), float(ang_p90), float(ang_p95), float(hit.float().mean().item()), hit_count
 
 
+def _build_sweep_pool(
+    payload: dict[str, Any],
+    ref_index: int,
+    sweep_pool: int,
+):
+    q_ego = payload["q_ego"].float()
+    q_obs = payload["q_obs"].float()
+    N = q_ego.shape[0]
+    ref_index = int(np.clip(ref_index, 0, N - 1))
+    q_obs_ref = q_obs[ref_index]
+    qobs_dist = (q_obs - q_obs_ref.unsqueeze(0)).norm(dim=-1)
+    pool_k = min(int(sweep_pool), N)
+    pool_idx = torch.topk(-qobs_dist, k=pool_k).indices
+    return pool_idx, qobs_dist
+
+
+def sweep_collect_trials(
+    payload: dict[str, Any],
+    model,
+    device: torch.device,
+    joint_idx: int,
+    q_val: float,
+    pool_idx: torch.Tensor,
+    qobs_dist: torch.Tensor,
+    min_hit_count: int,
+    trials_per_point: int,
+    max_attempts_per_point: int,
+    qobs_weight: float,
+    rng: np.random.Generator,
+) -> list[dict[str, float]]:
+    q_ego = payload["q_ego"].float()
+    q_obs = payload["q_obs"].float()
+    p_gt = payload["p_gt"].float()
+    n_gt = payload["n_gt"].float()
+    m = payload["m"].float()
+
+    if pool_idx.numel() == 0:
+        return []
+
+    cand = pool_idx.cpu().numpy().astype(np.int64)
+    if qobs_weight > 0.0:
+        d = qobs_dist[pool_idx].cpu().numpy().astype(np.float64)
+        d = d - d.min()
+        prob = np.exp(-qobs_weight * d)
+        prob = prob / (prob.sum() + 1e-12)
+    else:
+        prob = None
+
+    trials: list[dict[str, float]] = []
+    attempts = 0
+    model.eval()
+    with torch.no_grad():
+        while len(trials) < int(trials_per_point) and attempts < int(max_attempts_per_point):
+            attempts += 1
+            idx = int(rng.choice(cand, p=prob))
+            hit = m[idx].squeeze(-1) if m[idx].ndim == 2 else m[idx]
+            hit_count = int((hit > 0.5).sum().item())
+            hit_ratio = float((hit > 0.5).float().mean().item())
+            if hit_count < int(min_hit_count):
+                continue
+
+            qe_mod = q_ego[idx].clone()
+            qe_mod[int(joint_idx)] = float(q_val)
+            qe_i = qe_mod.unsqueeze(0).to(device)
+            qo_i = q_obs[idx : idx + 1].to(device)
+            pred = model(qe_i, qo_i)
+            p_pred_i = pred["p_hat"][0].cpu()
+            n_pred_i = pred["n_hat"][0].cpu()
+
+            rmse_i, mae_i, ang_i, ang_p90_i, ang_p95_i, _, _ = _single_sample_errors(
+                p_gt[idx], n_gt[idx], hit, p_pred_i, n_pred_i
+            )
+            trials.append(
+                {
+                    "sample_idx": float(idx),
+                    "hit_count": float(hit_count),
+                    "hit_ratio": float(hit_ratio),
+                    "rmse_hit": float(rmse_i),
+                    "pos_mae_hit": float(mae_i),
+                    "angle_mean_deg_hit": float(ang_i),
+                    "normal_angle_p90_deg_hit": float(ang_p90_i),
+                    "normal_angle_p95_deg_hit": float(ang_p95_i),
+                }
+            )
+    # Keep attempts summary in a sentinel row if none accepted is handled by caller.
+    trials_meta = {"attempts": float(attempts)}
+    trials.append({"_meta_attempts_only": 1.0, **trials_meta})
+    return trials
+
+
+def sweep_aggregate_stats(
+    q_val: float,
+    trials: list[dict[str, float]],
+    trials_target: int,
+) -> dict[str, float]:
+    attempts = 0
+    valid = []
+    for t in trials:
+        if "_meta_attempts_only" in t:
+            attempts = int(t["attempts"])
+        else:
+            valid.append(t)
+    accepted = len(valid)
+    rejected = max(attempts - accepted, 0)
+
+    def _ms(key: str) -> tuple[float, float]:
+        if accepted == 0:
+            return float("nan"), float("nan")
+        arr = np.asarray([float(v[key]) for v in valid], dtype=np.float64)
+        return float(np.nanmean(arr)), float(np.nanstd(arr))
+
+    hit_m, hit_s = _ms("hit_count")
+    rm_m, rm_s = _ms("rmse_hit")
+    mae_m, mae_s = _ms("pos_mae_hit")
+    ang_m, ang_s = _ms("angle_mean_deg_hit")
+
+    return {
+        "q_val": float(q_val),
+        "accepted": float(accepted),
+        "attempts": float(attempts),
+        "rejected": float(rejected),
+        "insufficient": float(1 if accepted < int(trials_target) else 0),
+        "hit_count_mean": float(hit_m),
+        "hit_count_std": float(hit_s),
+        "rmse_mean": float(rm_m),
+        "rmse_std": float(rm_s),
+        "pos_mae_mean": float(mae_m),
+        "pos_mae_std": float(mae_s),
+        "angle_mean": float(ang_m),
+        "angle_std": float(ang_s),
+    }
+
+
 def run_sweep(
     payload: dict[str, Any],
     model,
@@ -84,67 +219,38 @@ def run_sweep(
     sweep_pool: int,
     qobs_weight: float,
     min_hit_count: int,
+    sweep_trials_per_point: int,
+    max_attempts_per_point: int,
+    sweep_seed: int,
 ) -> list[dict[str, float]]:
     q_ego = payload["q_ego"].float()
-    q_obs = payload["q_obs"].float()
-    p_gt = payload["p_gt"].float()
-    n_gt = payload["n_gt"].float()
-    m = payload["m"].float()
-
-    N, n = q_ego.shape
+    _, n = q_ego.shape
     assert 0 <= joint_idx < n
-    ref_index = int(np.clip(ref_index, 0, N - 1))
 
-    q_obs_ref = q_obs[ref_index]
-    qobs_dist = (q_obs - q_obs_ref.unsqueeze(0)).norm(dim=-1)
-    pool_k = min(int(sweep_pool), N)
-    pool_idx = torch.topk(-qobs_dist, k=pool_k).indices
-
+    pool_idx, qobs_dist = _build_sweep_pool(payload, ref_index=ref_index, sweep_pool=sweep_pool)
     q_min = q_ego[:, joint_idx].min().item()
     q_max = q_ego[:, joint_idx].max().item()
     targets = torch.linspace(q_min, q_max, steps=num_points)
 
+    rng = np.random.default_rng(int(sweep_seed))
     rows: list[dict[str, float]] = []
-    model.eval()
-    with torch.no_grad():
-        for t in targets:
-            cand_q = q_ego[pool_idx, joint_idx]
-            cand_obs_d = qobs_dist[pool_idx]
-            score = (cand_q - t).abs() + qobs_weight * cand_obs_d
-            sel_local = torch.argmin(score)
-            idx = int(pool_idx[sel_local].item())
-
-            qe_i = q_ego[idx : idx + 1].to(device)
-            qo_i = q_obs[idx : idx + 1].to(device)
-            pred = model(qe_i, qo_i)
-            p_pred_i = pred["p_hat"][0].cpu()
-            n_pred_i = pred["n_hat"][0].cpu()
-
-            rmse_i, mae_i, ang_i, ang_p90_i, ang_p95_i, hit_ratio_i, hit_count_i = _single_sample_errors(
-                p_gt[idx], n_gt[idx], m[idx].squeeze(-1) if m[idx].ndim == 2 else m[idx], p_pred_i, n_pred_i
-            )
-            if hit_count_i < int(min_hit_count):
-                rmse_i = float("nan")
-                mae_i = float("nan")
-                ang_i = float("nan")
-                ang_p90_i = float("nan")
-                ang_p95_i = float("nan")
-            rows.append(
-                {
-                    "target_q": float(t.item()),
-                    "actual_q": float(q_ego[idx, joint_idx].item()),
-                    "sample_idx": float(idx),
-                    "qobs_l2_to_ref": float(qobs_dist[idx].item()),
-                    "hit_count": float(hit_count_i),
-                    "hit_ratio": float(hit_ratio_i),
-                    "rmse_hit": float(rmse_i),
-                    "pos_mae_hit": float(mae_i),
-                    "pos_rmse_hit": float(rmse_i),
-                    "angle_mean_deg_hit": float(ang_i),
-                    "normal_angle_p90_deg_hit": float(ang_p90_i),
-                    "normal_angle_p95_deg_hit": float(ang_p95_i),
-                }
-            )
+    for t in targets:
+        q_val = float(t.item())
+        trials = sweep_collect_trials(
+            payload=payload,
+            model=model,
+            device=device,
+            joint_idx=joint_idx,
+            q_val=q_val,
+            pool_idx=pool_idx,
+            qobs_dist=qobs_dist,
+            min_hit_count=min_hit_count,
+            trials_per_point=sweep_trials_per_point,
+            max_attempts_per_point=max_attempts_per_point,
+            qobs_weight=qobs_weight,
+            rng=rng,
+        )
+        rows.append(sweep_aggregate_stats(q_val, trials, trials_target=sweep_trials_per_point))
     return rows
 
 
@@ -253,36 +359,50 @@ def main() -> None:
             sweep_pool=args.sweep_pool,
             qobs_weight=args.sweep_qobs_weight,
             min_hit_count=args.min_hit_count,
+            sweep_trials_per_point=args.sweep_trials_per_point,
+            max_attempts_per_point=args.max_attempts_per_point,
+            sweep_seed=args.sweep_seed,
         )
+        save_csv(out_dir / "sweep_stats.csv", sweep_rows)
         save_csv(out_dir / f"sweep_joint_{args.joint_idx}.csv", sweep_rows)
         save_json(
-            out_dir / f"sweep_joint_{args.joint_idx}.json",
+            out_dir / "sweep_stats.json",
             {
                 "joint_idx": args.joint_idx,
                 "num_points": args.num_points,
                 "num_rows": len(sweep_rows),
                 "min_hit_count": int(args.min_hit_count),
+                "sweep_trials_per_point": int(args.sweep_trials_per_point),
+                "max_attempts_per_point": int(args.max_attempts_per_point),
+                "sweep_seed": int(args.sweep_seed),
             },
         )
-        qv = np.array([r["actual_q"] for r in sweep_rows], dtype=np.float32)
-        rv = np.array([r["rmse_hit"] for r in sweep_rows], dtype=np.float32)
-        av = np.array([r["angle_mean_deg_hit"] for r in sweep_rows], dtype=np.float32)
-        hv = np.array([r["hit_count"] for r in sweep_rows], dtype=np.float32)
-        plot_sweep_curve(
+        qv = np.array([r["q_val"] for r in sweep_rows], dtype=np.float32)
+        rv_m = np.array([r["rmse_mean"] for r in sweep_rows], dtype=np.float32)
+        rv_s = np.array([r["rmse_std"] for r in sweep_rows], dtype=np.float32)
+        av_m = np.array([r["angle_mean"] for r in sweep_rows], dtype=np.float32)
+        av_s = np.array([r["angle_std"] for r in sweep_rows], dtype=np.float32)
+        hv_m = np.array([r["hit_count_mean"] for r in sweep_rows], dtype=np.float32)
+        acc = np.array([r["accepted"] for r in sweep_rows], dtype=np.float32)
+        plot_sweep_with_bands(
             qv,
-            rv,
-            av,
-            hv,
+            rv_m,
+            rv_s,
+            av_m,
+            av_s,
+            hv_m,
+            acc,
+            int(args.sweep_trials_per_point),
             args.joint_idx,
             fig_dir / f"sweep_joint_{args.joint_idx}.png",
             save_pdf=args.save_pdf,
         )
-        plot_sweep_hit_count(
-            qv,
-            hv,
-            args.joint_idx,
-            fig_dir / f"sweep_joint_{args.joint_idx}_hit_count.png",
-            save_pdf=args.save_pdf,
+        insufficient = int(np.sum(acc < float(args.sweep_trials_per_point)))
+        acc_min = float(np.nanmin(acc)) if acc.size > 0 else float("nan")
+        acc_max = float(np.nanmax(acc)) if acc.size > 0 else float("nan")
+        print(
+            f"[compare_obs_fit][sweep] accepted range={acc_min:.0f}..{acc_max:.0f}, "
+            f"insufficient_points={insufficient}/{len(sweep_rows)}"
         )
 
     print("[compare_obs_fit] Summary:")
