@@ -10,7 +10,7 @@ paths:
 system:
   n_ego: 7
   n_obs: 7
-  rays: 256
+  rays: 512
   dt: 0.0333333
   q_limits_ego:
     low: [-2.7, -1.7, -2.7, -3.0, -2.7, -0.1, -2.7]
@@ -45,11 +45,11 @@ data:
     gui: false
     sensor_link_mode: ee
     ray_mode: cone
-    cone_half_angle_deg: 75.0
-    near_episode_ratio: 0.7
+    cone_half_angle_deg: 85.0
+    near_episode_ratio: 0.85
     near_base_mode: around_ego
-    near_ego_offset_center: [0.15, 0.0, 0.05]
-    near_ego_offset_jitter: [0.08, 0.08, 0.08]
+    near_ego_offset_center: [0.12, 0.0, 0.03]
+    near_ego_offset_jitter: [0.10, 0.10, 0.10]
     near_obstacle_base_pos: [0.10, 0.0, 0.15]
     near_obstacle_base_pos_jitter: [0.04, 0.05, 0.05]
 
