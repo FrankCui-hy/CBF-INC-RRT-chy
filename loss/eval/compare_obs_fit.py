@@ -257,6 +257,21 @@ def _single_sample_errors(
     return float(rmse), float(mae), float(ang), float(ang_p90), float(ang_p95), float(hit.float().mean().item()), hit_count
 
 
+def _single_sample_rmse_nn(
+    p_gt: torch.Tensor,
+    m: torch.Tensor,
+    p_pred: torch.Tensor,
+) -> float:
+    hit = m > 0.5
+    if int(hit.sum().item()) == 0:
+        return float("nan")
+    gt = p_gt[hit]
+    pr = p_pred[hit]
+    dmat = torch.cdist(pr, gt)
+    nn_min = dmat.min(dim=1).values
+    return float(torch.sqrt((nn_min.pow(2)).mean()).item())
+
+
 def _build_sweep_pool(
     payload: dict[str, Any],
     ref_index: int,
@@ -329,12 +344,15 @@ def sweep_collect_trials(
             rmse_i, mae_i, ang_i, ang_p90_i, ang_p95_i, _, _ = _single_sample_errors(
                 p_gt[idx], n_gt[idx], hit, p_pred_i, n_pred_i
             )
+            rmse_nn_i = _single_sample_rmse_nn(p_gt[idx], hit, p_pred_i)
             trials.append(
                 {
                     "sample_idx": float(idx),
                     "hit_count": float(hit_count),
                     "hit_ratio": float(hit_ratio),
                     "rmse_hit": float(rmse_i),
+                    "rmse_index": float(rmse_i),
+                    "rmse_nn": float(rmse_nn_i),
                     "pos_mae_hit": float(mae_i),
                     "angle_mean_deg_hit": float(ang_i),
                     "normal_angle_p90_deg_hit": float(ang_p90_i),
@@ -370,6 +388,8 @@ def sweep_aggregate_stats(
 
     hit_m, hit_s = _ms("hit_count")
     rm_m, rm_s = _ms("rmse_hit")
+    rm_idx_m, rm_idx_s = _ms("rmse_index")
+    rm_nn_m, rm_nn_s = _ms("rmse_nn")
     mae_m, mae_s = _ms("pos_mae_hit")
     ang_m, ang_s = _ms("angle_mean_deg_hit")
 
@@ -383,6 +403,10 @@ def sweep_aggregate_stats(
         "hit_count_std": float(hit_s),
         "rmse_mean": float(rm_m),
         "rmse_std": float(rm_s),
+        "rmse_index_mean": float(rm_idx_m),
+        "rmse_index_std": float(rm_idx_s),
+        "rmse_nn_mean": float(rm_nn_m),
+        "rmse_nn_std": float(rm_nn_s),
         "pos_mae_mean": float(mae_m),
         "pos_mae_std": float(mae_s),
         "angle_mean": float(ang_m),
@@ -561,8 +585,10 @@ def main() -> None:
             },
         )
         qv = np.array([r["q_val"] for r in sweep_rows], dtype=np.float32)
-        rv_m = np.array([r["rmse_mean"] for r in sweep_rows], dtype=np.float32)
-        rv_s = np.array([r["rmse_std"] for r in sweep_rows], dtype=np.float32)
+        rv_m = np.array([r["rmse_index_mean"] for r in sweep_rows], dtype=np.float32)
+        rv_s = np.array([r["rmse_index_std"] for r in sweep_rows], dtype=np.float32)
+        rv_nn_m = np.array([r["rmse_nn_mean"] for r in sweep_rows], dtype=np.float32)
+        rv_nn_s = np.array([r["rmse_nn_std"] for r in sweep_rows], dtype=np.float32)
         av_m = np.array([r["angle_mean"] for r in sweep_rows], dtype=np.float32)
         av_s = np.array([r["angle_std"] for r in sweep_rows], dtype=np.float32)
         hv_m = np.array([r["hit_count_mean"] for r in sweep_rows], dtype=np.float32)
@@ -571,6 +597,8 @@ def main() -> None:
             qv,
             rv_m,
             rv_s,
+            rv_nn_m,
+            rv_nn_s,
             av_m,
             av_s,
             hv_m,

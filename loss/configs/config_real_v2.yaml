@@ -47,7 +47,7 @@ data:
     ray_mode: sphere
     cone_half_angle_deg: 75.0
     ray_mixture:
-      enabled: true
+      enabled: false
       sphere_ratio: 0.7
     near_episode_ratio: 0.4
     near_base_mode: around_ego

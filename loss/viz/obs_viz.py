@@ -207,8 +207,10 @@ def plot_sweep_hit_count(
 
 def plot_sweep_with_bands(
     q_values: np.ndarray,
-    rmse_mean: np.ndarray,
-    rmse_std: np.ndarray,
+    rmse_index_mean: np.ndarray,
+    rmse_index_std: np.ndarray,
+    rmse_nn_mean: np.ndarray,
+    rmse_nn_std: np.ndarray,
     angle_mean: np.ndarray,
     angle_std: np.ndarray,
     hit_count_mean: np.ndarray,
@@ -219,14 +221,17 @@ def plot_sweep_with_bands(
     save_pdf: bool = False,
 ) -> None:
     q = np.asarray(q_values, dtype=np.float32)
-    rm_m = np.asarray(rmse_mean, dtype=np.float32)
-    rm_s = np.asarray(rmse_std, dtype=np.float32)
+    rm_m = np.asarray(rmse_index_mean, dtype=np.float32)
+    rm_s = np.asarray(rmse_index_std, dtype=np.float32)
+    rm_nn_m = np.asarray(rmse_nn_mean, dtype=np.float32)
+    rm_nn_s = np.asarray(rmse_nn_std, dtype=np.float32)
     an_m = np.asarray(angle_mean, dtype=np.float32)
     an_s = np.asarray(angle_std, dtype=np.float32)
     hc_m = np.asarray(hit_count_mean, dtype=np.float32)
     acc = np.asarray(accepted, dtype=np.float32)
 
     rm_ok = np.isfinite(rm_m) & np.isfinite(rm_s)
+    rm_nn_ok = np.isfinite(rm_nn_m) & np.isfinite(rm_nn_s)
     an_ok = np.isfinite(an_m) & np.isfinite(an_s)
     hc_ok = np.isfinite(hc_m)
     insufficient = acc < float(trials_target)
@@ -234,8 +239,18 @@ def plot_sweep_with_bands(
 
     fig, ax1 = plt.subplots(figsize=(11, 4.5))
     if rm_ok.any():
-        ax1.plot(q[rm_ok], rm_m[rm_ok], color="tab:blue", linewidth=1.7, label="RMSE mean")
-        ax1.fill_between(q[rm_ok], rm_m[rm_ok] - rm_s[rm_ok], rm_m[rm_ok] + rm_s[rm_ok], color="tab:blue", alpha=0.2, label="RMSE ±std")
+        ax1.plot(q[rm_ok], rm_m[rm_ok], color="tab:blue", linewidth=1.7, label="RMSE index mean")
+        ax1.fill_between(q[rm_ok], rm_m[rm_ok] - rm_s[rm_ok], rm_m[rm_ok] + rm_s[rm_ok], color="tab:blue", alpha=0.18, label="RMSE index ±std")
+    if rm_nn_ok.any():
+        ax1.plot(q[rm_nn_ok], rm_nn_m[rm_nn_ok], color="tab:purple", linewidth=1.6, linestyle="--", label="RMSE NN mean")
+        ax1.fill_between(
+            q[rm_nn_ok],
+            rm_nn_m[rm_nn_ok] - rm_nn_s[rm_nn_ok],
+            rm_nn_m[rm_nn_ok] + rm_nn_s[rm_nn_ok],
+            color="tab:purple",
+            alpha=0.14,
+            label="RMSE NN ±std",
+        )
     ax1.set_xlabel(f"q_ego[{joint_idx}]")
     ax1.set_ylabel("RMSE")
     ax1.grid(True, alpha=0.25)
