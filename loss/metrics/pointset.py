@@ -13,6 +13,8 @@ class PointSetMetricsSingle:
     pred_count: int
     rmse_nn: float
     chamfer: float
+    chamfer_p2q: float
+    chamfer_q2p: float
     angle_unsigned_mean_deg: float
     angle_unsigned_p90_deg: float
     normal_absdot_mean: float
@@ -65,12 +67,19 @@ def one_way_nn_rmse_single(P: torch.Tensor, Q: torch.Tensor) -> float:
 
 
 def chamfer_l2_single(P: torch.Tensor, Q: torch.Tensor) -> float:
-    if P.shape[0] == 0 or Q.shape[0] == 0:
+    p2q, q2p = chamfer_l2_parts_single(P, Q)
+    if not torch.isfinite(torch.tensor(p2q)) or not torch.isfinite(torch.tensor(q2p)):
         return float("nan")
+    return float(p2q + q2p)
+
+
+def chamfer_l2_parts_single(P: torch.Tensor, Q: torch.Tensor) -> tuple[float, float]:
+    if P.shape[0] == 0 or Q.shape[0] == 0:
+        return float("nan"), float("nan")
     d = torch.cdist(P, Q)
     p2q = d.min(dim=1).values.pow(2).mean()
     q2p = d.min(dim=0).values.pow(2).mean()
-    return float((p2q + q2p).item())
+    return float(p2q.item()), float(q2p.item())
 
 
 def matched_absdot_loss_single(P: torch.Tensor, Q: torch.Tensor, NG: torch.Tensor, NQ: torch.Tensor) -> tuple[float, float, float]:
@@ -112,7 +121,8 @@ def compute_pointset_metrics_single(
         max_points=max_points,
     )
     rmse_nn = one_way_nn_rmse_single(P, Q)
-    chamfer = chamfer_l2_single(P, Q)
+    chamfer_p2q, chamfer_q2p = chamfer_l2_parts_single(P, Q)
+    chamfer = float(chamfer_p2q + chamfer_q2p) if (torch.isfinite(torch.tensor(chamfer_p2q)) and torch.isfinite(torch.tensor(chamfer_q2p))) else float("nan")
     _, ang_mean, ang_p90 = matched_absdot_loss_single(P, Q, NG, NQ)
     if P.shape[0] == 0 or Q.shape[0] == 0:
         absdot_mean = float("nan")
@@ -128,6 +138,8 @@ def compute_pointset_metrics_single(
         pred_count=int(Q.shape[0]),
         rmse_nn=float(rmse_nn),
         chamfer=float(chamfer),
+        chamfer_p2q=float(chamfer_p2q),
+        chamfer_q2p=float(chamfer_q2p),
         angle_unsigned_mean_deg=float(ang_mean),
         angle_unsigned_p90_deg=float(ang_p90),
         normal_absdot_mean=float(absdot_mean),

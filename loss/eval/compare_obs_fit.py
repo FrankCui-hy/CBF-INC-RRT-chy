@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -50,9 +51,57 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep_trials_per_point", type=int, default=10)
     p.add_argument("--max_attempts_per_point", type=int, default=200)
     p.add_argument("--sweep_seed", type=int, default=0)
+    p.add_argument("--pred_mask_mode", type=str, choices=["gt_hit", "pred_hit"], default="gt_hit")
+    p.add_argument("--pred_hit_tau", type=float, default=0.8)
     p.add_argument("--debug_one_sample", action="store_true")
     p.add_argument("--debug_index", type=int, default=-1)
     return p.parse_args()
+
+
+def _plot_sweep_chamfer_parts(
+    q_values: np.ndarray,
+    ch_total_mean: np.ndarray,
+    ch_total_std: np.ndarray,
+    ch_p2q_mean: np.ndarray,
+    ch_p2q_std: np.ndarray,
+    ch_q2p_mean: np.ndarray,
+    ch_q2p_std: np.ndarray,
+    joint_idx: int,
+    pred_mask_mode: str,
+    pred_hit_tau: float,
+    out_path: Path,
+    save_pdf: bool = False,
+) -> None:
+    q = np.asarray(q_values, dtype=np.float32)
+    tm = np.asarray(ch_total_mean, dtype=np.float32)
+    ts = np.asarray(ch_total_std, dtype=np.float32)
+    p2m = np.asarray(ch_p2q_mean, dtype=np.float32)
+    p2s = np.asarray(ch_p2q_std, dtype=np.float32)
+    q2m = np.asarray(ch_q2p_mean, dtype=np.float32)
+    q2s = np.asarray(ch_q2p_std, dtype=np.float32)
+
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ok_t = np.isfinite(tm) & np.isfinite(ts)
+    ok_p = np.isfinite(p2m) & np.isfinite(p2s)
+    ok_q = np.isfinite(q2m) & np.isfinite(q2s)
+    if ok_t.any():
+        ax.plot(q[ok_t], tm[ok_t], color="tab:purple", linewidth=1.8, label="Chamfer total")
+        ax.fill_between(q[ok_t], tm[ok_t] - ts[ok_t], tm[ok_t] + ts[ok_t], color="tab:purple", alpha=0.15)
+    if ok_p.any():
+        ax.plot(q[ok_p], p2m[ok_p], color="tab:blue", linewidth=1.5, linestyle="--", label="p2q")
+    if ok_q.any():
+        ax.plot(q[ok_q], q2m[ok_q], color="tab:orange", linewidth=1.5, linestyle="-.", label="q2p")
+    ax.set_xlabel(f"q_ego[{joint_idx}]")
+    ax.set_ylabel("Chamfer L2 (m^2)")
+    ax.set_title(f"Sweep Chamfer Parts ({pred_mask_mode}, tau={pred_hit_tau:.2f})")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    if save_pdf:
+        fig.savefig(out_path.with_suffix(".pdf"))
+    plt.close(fig)
 
 
 def _tensor_stats_1d(x: torch.Tensor) -> dict[str, float]:
@@ -345,6 +394,9 @@ def sweep_collect_trials(
             pred = model(qe_i, qo_i)
             p_pred_i = pred["p_hat"][0].cpu()
             n_pred_i = pred["n_hat"][0].cpu()
+            m_pred_i = pred.get("m_hat", None)
+            if m_pred_i is not None:
+                m_pred_i = m_pred_i[0].cpu()
 
             rmse_i, mae_i, ang_i, ang_p90_i, ang_p95_i, _, _ = _single_sample_errors(
                 p_gt[idx], n_gt[idx], hit, p_pred_i, n_pred_i
@@ -356,7 +408,7 @@ def sweep_collect_trials(
                 m_gt=hit,
                 p_pred=p_pred_i,
                 n_pred=n_pred_i,
-                m_pred=None,
+                m_pred=m_pred_i,
                 pred_mask_mode=pred_mask_mode,
                 pred_hit_tau=pred_hit_tau,
                 max_points=max_points,
@@ -370,6 +422,8 @@ def sweep_collect_trials(
                     "rmse_index": float(rmse_i),
                     "rmse_nn": float(rmse_nn_i),
                     "chamfer": float(psm.chamfer),
+                    "chamfer_p2q": float(psm.chamfer_p2q),
+                    "chamfer_q2p": float(psm.chamfer_q2p),
                     "pos_mae_hit": float(mae_i),
                     "angle_mean_deg_hit": float(ang_i),
                     "angle_unsigned_mean_deg": float(psm.angle_unsigned_mean_deg),
@@ -413,6 +467,8 @@ def sweep_aggregate_stats(
     mae_m, mae_s = _ms("pos_mae_hit")
     ang_m, ang_s = _ms("angle_unsigned_mean_deg")
     ch_m, ch_s = _ms("chamfer")
+    ch_p2q_m, ch_p2q_s = _ms("chamfer_p2q")
+    ch_q2p_m, ch_q2p_s = _ms("chamfer_q2p")
 
     return {
         "q_val": float(q_val),
@@ -430,6 +486,10 @@ def sweep_aggregate_stats(
         "rmse_nn_std": float(rm_nn_s),
         "chamfer_mean": float(ch_m),
         "chamfer_std": float(ch_s),
+        "chamfer_p2q_mean": float(ch_p2q_m),
+        "chamfer_p2q_std": float(ch_p2q_s),
+        "chamfer_q2p_mean": float(ch_q2p_m),
+        "chamfer_q2p_std": float(ch_q2p_s),
         "pos_mae_mean": float(mae_m),
         "pos_mae_std": float(mae_s),
         "angle_unsigned_mean": float(ang_m),
@@ -548,8 +608,8 @@ def main() -> None:
     unsigned_normal = bool(cfg.get("loss", {}).get("obs", {}).get("unsigned_normal", True))
     huber_delta = float(cfg.get("loss", {}).get("obs", {}).get("huber_delta", 0.05))
     obs_cfg = cfg.get("loss", {}).get("obs", {})
-    pred_mask_mode_eval = str(obs_cfg.get("pred_mask_mode", "gt_hit"))
-    pred_hit_tau_eval = float(obs_cfg.get("pred_hit_tau", 0.5))
+    pred_mask_mode_eval = str(args.pred_mask_mode or obs_cfg.get("pred_mask_mode", "gt_hit"))
+    pred_hit_tau_eval = float(args.pred_hit_tau if args.pred_hit_tau is not None else obs_cfg.get("pred_hit_tau", 0.5))
     max_points_eval = int(obs_cfg.get("max_points", 256))
     metric_out = compute_obs_metrics(
         p_gt=p_gt,
@@ -563,7 +623,7 @@ def main() -> None:
     )
 
     # Unordered point-set metrics (default report to avoid index-mismatch bias).
-    vals_rmse_nn, vals_ch, vals_ang_u, vals_absdot = [], [], [], []
+    vals_rmse_nn, vals_ch, vals_ch_p2q, vals_ch_q2p, vals_ang_u, vals_absdot = [], [], [], [], [], []
     N_eval = p_gt.shape[0]
     for i in range(N_eval):
         m_pred_i = None if m_pred is None else m_pred[i]
@@ -582,6 +642,10 @@ def main() -> None:
             vals_rmse_nn.append(ps.rmse_nn)
         if np.isfinite(ps.chamfer):
             vals_ch.append(ps.chamfer)
+        if np.isfinite(ps.chamfer_p2q):
+            vals_ch_p2q.append(ps.chamfer_p2q)
+        if np.isfinite(ps.chamfer_q2p):
+            vals_ch_q2p.append(ps.chamfer_q2p)
         if np.isfinite(ps.angle_unsigned_mean_deg):
             vals_ang_u.append(ps.angle_unsigned_mean_deg)
         if np.isfinite(ps.normal_absdot_mean):
@@ -591,6 +655,10 @@ def main() -> None:
         metric_out.summary["pos_rmse_nn_hit"] = float(np.mean(vals_rmse_nn))
     if len(vals_ch) > 0:
         metric_out.summary["pos_chamfer_hit"] = float(np.mean(vals_ch))
+    if len(vals_ch_p2q) > 0:
+        metric_out.summary["pos_chamfer_p2q_hit"] = float(np.mean(vals_ch_p2q))
+    if len(vals_ch_q2p) > 0:
+        metric_out.summary["pos_chamfer_q2p_hit"] = float(np.mean(vals_ch_q2p))
     if len(vals_ang_u) > 0:
         metric_out.summary["normal_angle_unsigned_mean_deg_hit"] = float(np.mean(vals_ang_u))
     if len(vals_absdot) > 0:
@@ -665,6 +733,10 @@ def main() -> None:
         acc = np.array([r["accepted"] for r in sweep_rows], dtype=np.float32)
         ch_m = np.array([r["chamfer_mean"] for r in sweep_rows], dtype=np.float32)
         ch_s = np.array([r["chamfer_std"] for r in sweep_rows], dtype=np.float32)
+        ch_p2q_m = np.array([r["chamfer_p2q_mean"] for r in sweep_rows], dtype=np.float32)
+        ch_p2q_s = np.array([r["chamfer_p2q_std"] for r in sweep_rows], dtype=np.float32)
+        ch_q2p_m = np.array([r["chamfer_q2p_mean"] for r in sweep_rows], dtype=np.float32)
+        ch_q2p_s = np.array([r["chamfer_q2p_std"] for r in sweep_rows], dtype=np.float32)
         plot_sweep_with_bands(
             qv,
             rv_m,
@@ -685,9 +757,23 @@ def main() -> None:
             y_mean=ch_m,
             y_std=ch_s,
             joint_idx=args.joint_idx,
-            title="Sweep Chamfer (unordered)",
+            title=f"Sweep Chamfer (unordered, {pred_mask_mode_eval}, tau={pred_hit_tau_eval:.2f})",
             ylabel="Chamfer L2",
             out_path=fig_dir / f"sweep_joint_{args.joint_idx}_chamfer.png",
+            save_pdf=args.save_pdf,
+        )
+        _plot_sweep_chamfer_parts(
+            q_values=qv,
+            ch_total_mean=ch_m,
+            ch_total_std=ch_s,
+            ch_p2q_mean=ch_p2q_m,
+            ch_p2q_std=ch_p2q_s,
+            ch_q2p_mean=ch_q2p_m,
+            ch_q2p_std=ch_q2p_s,
+            joint_idx=args.joint_idx,
+            pred_mask_mode=pred_mask_mode_eval,
+            pred_hit_tau=pred_hit_tau_eval,
+            out_path=fig_dir / f"sweep_joint_{args.joint_idx}_chamfer_parts.png",
             save_pdf=args.save_pdf,
         )
         insufficient = int(np.sum(acc < float(args.sweep_trials_per_point)))
@@ -715,6 +801,13 @@ def main() -> None:
                 metric_out.summary.get("hit_recall", float("nan")),
             )
         )
+    ch_p2q = metric_out.summary.get("pos_chamfer_p2q_hit", float("nan"))
+    ch_q2p = metric_out.summary.get("pos_chamfer_q2p_hit", float("nan"))
+    if np.isfinite(ch_p2q) and np.isfinite(ch_q2p):
+        if ch_q2p > 1.5 * ch_p2q:
+            print("[compare_obs_fit] q2p dominates: many predicted outliers (consider weighting/trim or pred_hit filtering)")
+        elif ch_p2q > 1.5 * ch_q2p:
+            print("[compare_obs_fit] p2q dominates: GT coverage/recall mismatch (consider improving coverage)")
     print(f"[compare_obs_fit] outputs saved to: {out_dir}")
 
 
