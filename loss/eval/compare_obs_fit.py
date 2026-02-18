@@ -48,7 +48,188 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep_trials_per_point", type=int, default=10)
     p.add_argument("--max_attempts_per_point", type=int, default=200)
     p.add_argument("--sweep_seed", type=int, default=0)
+    p.add_argument("--debug_one_sample", action="store_true")
+    p.add_argument("--debug_index", type=int, default=-1)
     return p.parse_args()
+
+
+def _tensor_stats_1d(x: torch.Tensor) -> dict[str, float]:
+    if x.numel() == 0:
+        return {"count": 0.0, "mean": float("nan"), "std": float("nan"), "p95": float("nan"), "min": float("nan"), "max": float("nan")}
+    return {
+        "count": float(x.numel()),
+        "mean": float(x.mean().item()),
+        "std": float(x.std(unbiased=False).item()),
+        "p95": float(torch.quantile(x, 0.95).item()),
+        "min": float(x.min().item()),
+        "max": float(x.max().item()),
+    }
+
+
+def _tensor_stats_xyz(x: torch.Tensor) -> dict[str, list[float]]:
+    # x: (M,3)
+    if x.numel() == 0:
+        nan3 = [float("nan"), float("nan"), float("nan")]
+        return {"min_xyz": nan3, "max_xyz": nan3, "mean_xyz": nan3}
+    return {
+        "min_xyz": [float(v) for v in x.min(dim=0).values.tolist()],
+        "max_xyz": [float(v) for v in x.max(dim=0).values.tolist()],
+        "mean_xyz": [float(v) for v in x.mean(dim=0).tolist()],
+    }
+
+
+def run_debug_one_sample(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    model,
+    device: torch.device,
+    out_dir: Path,
+) -> bool:
+    if not args.debug_one_sample and args.debug_index < 0:
+        return False
+
+    N = int(payload["q_ego"].shape[0])
+    idx = 0 if args.debug_one_sample else int(np.clip(args.debug_index, 0, N - 1))
+
+    qe = payload["q_ego"][idx : idx + 1].float().to(device)
+    qo = payload["q_obs"][idx : idx + 1].float().to(device)
+    p_gt = payload["p_gt"][idx].float().cpu()
+    n_gt = payload["n_gt"][idx].float().cpu()
+    m = payload["m"][idx].float().cpu()
+    if m.ndim == 2:
+        m = m.squeeze(-1)
+
+    with torch.no_grad():
+        pred = model(qe, qo)
+        p_pred = pred["p_hat"][0].float().cpu()
+        n_pred = torch.nn.functional.normalize(pred["n_hat"][0].float().cpu(), dim=-1, eps=1e-6)
+
+    hit = m > 0.5
+    hit_count = int(hit.sum().item())
+
+    # Step 1: range/scale checks.
+    p_gt_hit = p_gt[hit]
+    p_pred_hit = p_pred[hit]
+    n_gt_hit = n_gt[hit]
+    n_pred_hit = n_pred[hit]
+    e_hit = (p_pred_hit - p_gt_hit).norm(dim=-1) if hit_count > 0 else torch.zeros((0,))
+    pgt_norm = p_gt_hit.norm(dim=-1) if hit_count > 0 else torch.zeros((0,))
+    ppd_norm = p_pred_hit.norm(dim=-1) if hit_count > 0 else torch.zeros((0,))
+
+    step1 = {
+        "hit_count": float(hit_count),
+        "p_gt_xyz": _tensor_stats_xyz(p_gt_hit),
+        "p_pred_xyz": _tensor_stats_xyz(p_pred_hit),
+        "p_gt_norm": _tensor_stats_1d(pgt_norm),
+        "p_pred_norm": _tensor_stats_1d(ppd_norm),
+        "pos_error_norm": _tensor_stats_1d(e_hit),
+    }
+
+    # Step 2: normal diagnostics.
+    if hit_count > 0:
+        n_gt_n = torch.nn.functional.normalize(n_gt_hit, dim=-1, eps=1e-6)
+        dot = (n_pred_hit * n_gt_n).sum(dim=-1).clamp(-1.0, 1.0)
+        absdot = dot.abs()
+        angle_signed = torch.rad2deg(torch.acos(dot))
+        angle_unsigned = torch.rad2deg(torch.acos(absdot))
+    else:
+        dot = absdot = angle_signed = angle_unsigned = torch.zeros((0,))
+
+    step2 = {
+        "dot": _tensor_stats_1d(dot),
+        "absdot": _tensor_stats_1d(absdot),
+        "angle_signed_deg": _tensor_stats_1d(angle_signed),
+        "angle_unsigned_deg": _tensor_stats_1d(angle_unsigned),
+    }
+
+    # Step 3: index-vs-NN alignment.
+    if hit_count > 0:
+        rmse_index = float(torch.sqrt(((p_pred_hit - p_gt_hit).norm(dim=-1).pow(2)).mean()).item())
+        dmat = torch.cdist(p_pred_hit, p_gt_hit)  # (M, M)
+        nn_min = dmat.min(dim=1).values
+        rmse_nn = float(torch.sqrt((nn_min.pow(2)).mean()).item())
+    else:
+        rmse_index = float("nan")
+        rmse_nn = float("nan")
+
+    step3 = {
+        "rmse_index": rmse_index,
+        "rmse_nn": rmse_nn,
+        "rmse_nn_over_index": float(rmse_nn / (rmse_index + 1e-12)) if np.isfinite(rmse_index) else float("nan"),
+    }
+
+    # Step 4: no-hit sanity.
+    no_hit_idx = torch.where(~hit)[0]
+    sel = no_hit_idx[:5]
+    no_hit_preview = []
+    for j in sel.tolist():
+        no_hit_preview.append(
+            {
+                "ray_idx": float(j),
+                "p_gt": [float(v) for v in p_gt[j].tolist()],
+                "n_gt": [float(v) for v in n_gt[j].tolist()],
+                "m": float(m[j].item()),
+            }
+        )
+    step4 = {
+        "mask_shape": list(m.shape),
+        "mask_dtype": str(m.dtype),
+        "hit_count": float(hit_count),
+        "hit_count_recomputed": float((m > 0.5).sum().item()),
+        "no_hit_preview": no_hit_preview,
+        "single_sample_error_formula": "rmse = sqrt(mean(||p_pred-p_gt||^2 over hit rays only))",
+    }
+
+    # Step 5: conclusions.
+    reasons = []
+    pgt_mean = step1["p_gt_norm"]["mean"]
+    ppd_mean = step1["p_pred_norm"]["mean"]
+    scale_mismatch = np.isfinite(pgt_mean) and np.isfinite(ppd_mean) and (
+        (pgt_mean > 0.5 and ppd_mean < 0.2) or (ppd_mean > 0.5 and pgt_mean < 0.2) or (max(pgt_mean, ppd_mean) / (min(pgt_mean, ppd_mean) + 1e-12) > 3.0)
+    )
+    if scale_mismatch:
+        reasons.append("尺度/归一化或坐标系不一致（Top-1）")
+
+    nn_ratio = step3["rmse_nn_over_index"]
+    if np.isfinite(nn_ratio) and nn_ratio < 0.7:
+        reasons.append("ray 索引/排列不一致（Top-1/Top-2）")
+
+    ang_s = step2["angle_signed_deg"]["mean"]
+    ang_u = step2["angle_unsigned_deg"]["mean"]
+    if np.isfinite(ang_s) and np.isfinite(ang_u) and (ang_s - ang_u) > 10.0:
+        reasons.append("法向符号歧义明显（建议评估/训练统一无符号）")
+
+    if len(reasons) == 0:
+        reasons.append("更可能是坐标系旋转未对齐或模型拟合不足（需检查 world/sensor frame 一致性）")
+
+    frame_assumption = {
+        "p_gt": "world (from pybullet raycast)",
+        "n_gt": "world (from pybullet raycast)",
+        "p_pred": "assumed world for direct compare",
+        "n_pred": "assumed world for direct compare",
+        "fix_option_A_world": "若模型输出在sensor/ee系，先用 T_WE(q_ego) 变换 p_pred/n_pred 到 world 再评估",
+        "fix_option_B_sensor": "将 p_gt/n_gt 用 T_EW(q_ego) 变换到 sensor 再评估",
+        "needed_inputs": "FK 提供 T_WE（可从 environment robot fk 获取）",
+        "suggested_files": ["loss/eval/compare_obs_fit.py", "loss/data/collect_dataset_real.py"],
+    }
+
+    report = {
+        "debug_index": float(idx),
+        "meta": payload.get("meta", {}),
+        "step1_range_scale": step1,
+        "step2_normals": step2,
+        "step3_alignment": step3,
+        "step4_mask_nohit": step4,
+        "frame_assumption": frame_assumption,
+        "top_reasons": reasons[:2],
+    }
+
+    save_json(out_dir / "debug_report.json", report)
+    print("[compare_obs_fit][debug] saved:", out_dir / "debug_report.json")
+    print("[compare_obs_fit][debug] Top-1:", reasons[0])
+    if len(reasons) > 1:
+        print("[compare_obs_fit][debug] Top-2:", reasons[1])
+    return True
 
 
 def _single_sample_errors(
@@ -265,6 +446,8 @@ def main() -> None:
 
     payload = load_obs_dataset(args.data)
     model = load_g_phi_checkpoint(args.ckpt, device=device, config_path=args.config)
+    if run_debug_one_sample(args, payload, model, device, out_dir):
+        return
 
     all_p_gt = []
     all_n_gt = []
