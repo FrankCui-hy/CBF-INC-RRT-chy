@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from loss.metrics.obs_metrics import compute_obs_metrics
+from loss.metrics.pointset import compute_pointset_metrics_single
 from loss.utils.config import load_config
 from loss.utils.io import (
     iter_batches,
@@ -21,6 +22,7 @@ from loss.viz.obs_viz import (
     plot_hist,
     plot_per_ray,
     plot_scatter_hit_points,
+    plot_sweep_scalar_with_band,
     plot_summary_metrics,
     plot_sweep_with_bands,
 )
@@ -301,6 +303,9 @@ def sweep_collect_trials(
     max_attempts_per_point: int,
     qobs_weight: float,
     rng: np.random.Generator,
+    pred_mask_mode: str,
+    pred_hit_tau: float,
+    max_points: int,
 ) -> list[dict[str, float]]:
     q_ego = payload["q_ego"].float()
     q_obs = payload["q_obs"].float()
@@ -345,6 +350,17 @@ def sweep_collect_trials(
                 p_gt[idx], n_gt[idx], hit, p_pred_i, n_pred_i
             )
             rmse_nn_i = _single_sample_rmse_nn(p_gt[idx], hit, p_pred_i)
+            psm = compute_pointset_metrics_single(
+                p_gt=p_gt[idx],
+                n_gt=n_gt[idx],
+                m_gt=hit,
+                p_pred=p_pred_i,
+                n_pred=n_pred_i,
+                m_pred=None,
+                pred_mask_mode=pred_mask_mode,
+                pred_hit_tau=pred_hit_tau,
+                max_points=max_points,
+            )
             trials.append(
                 {
                     "sample_idx": float(idx),
@@ -353,10 +369,14 @@ def sweep_collect_trials(
                     "rmse_hit": float(rmse_i),
                     "rmse_index": float(rmse_i),
                     "rmse_nn": float(rmse_nn_i),
+                    "chamfer": float(psm.chamfer),
                     "pos_mae_hit": float(mae_i),
                     "angle_mean_deg_hit": float(ang_i),
+                    "angle_unsigned_mean_deg": float(psm.angle_unsigned_mean_deg),
                     "normal_angle_p90_deg_hit": float(ang_p90_i),
+                    "angle_unsigned_p90_deg": float(psm.angle_unsigned_p90_deg),
                     "normal_angle_p95_deg_hit": float(ang_p95_i),
+                    "normal_absdot_mean": float(psm.normal_absdot_mean),
                 }
             )
     # Keep attempts summary in a sentinel row if none accepted is handled by caller.
@@ -391,7 +411,8 @@ def sweep_aggregate_stats(
     rm_idx_m, rm_idx_s = _ms("rmse_index")
     rm_nn_m, rm_nn_s = _ms("rmse_nn")
     mae_m, mae_s = _ms("pos_mae_hit")
-    ang_m, ang_s = _ms("angle_mean_deg_hit")
+    ang_m, ang_s = _ms("angle_unsigned_mean_deg")
+    ch_m, ch_s = _ms("chamfer")
 
     return {
         "q_val": float(q_val),
@@ -407,10 +428,12 @@ def sweep_aggregate_stats(
         "rmse_index_std": float(rm_idx_s),
         "rmse_nn_mean": float(rm_nn_m),
         "rmse_nn_std": float(rm_nn_s),
+        "chamfer_mean": float(ch_m),
+        "chamfer_std": float(ch_s),
         "pos_mae_mean": float(mae_m),
         "pos_mae_std": float(mae_s),
-        "angle_mean": float(ang_m),
-        "angle_std": float(ang_s),
+        "angle_unsigned_mean": float(ang_m),
+        "angle_unsigned_std": float(ang_s),
     }
 
 
@@ -427,6 +450,9 @@ def run_sweep(
     sweep_trials_per_point: int,
     max_attempts_per_point: int,
     sweep_seed: int,
+    pred_mask_mode: str,
+    pred_hit_tau: float,
+    max_points: int,
 ) -> list[dict[str, float]]:
     q_ego = payload["q_ego"].float()
     _, n = q_ego.shape
@@ -454,6 +480,9 @@ def run_sweep(
             max_attempts_per_point=max_attempts_per_point,
             qobs_weight=qobs_weight,
             rng=rng,
+            pred_mask_mode=pred_mask_mode,
+            pred_hit_tau=pred_hit_tau,
+            max_points=max_points,
         )
         rows.append(sweep_aggregate_stats(q_val, trials, trials_target=sweep_trials_per_point))
     return rows
@@ -518,6 +547,10 @@ def main() -> None:
 
     unsigned_normal = bool(cfg.get("loss", {}).get("obs", {}).get("unsigned_normal", True))
     huber_delta = float(cfg.get("loss", {}).get("obs", {}).get("huber_delta", 0.05))
+    obs_cfg = cfg.get("loss", {}).get("obs", {})
+    pred_mask_mode_eval = str(obs_cfg.get("pred_mask_mode", "gt_hit"))
+    pred_hit_tau_eval = float(obs_cfg.get("pred_hit_tau", 0.5))
+    max_points_eval = int(obs_cfg.get("max_points", 256))
     metric_out = compute_obs_metrics(
         p_gt=p_gt,
         n_gt=n_gt,
@@ -528,6 +561,40 @@ def main() -> None:
         huber_delta=huber_delta,
         unsigned_normal=unsigned_normal,
     )
+
+    # Unordered point-set metrics (default report to avoid index-mismatch bias).
+    vals_rmse_nn, vals_ch, vals_ang_u, vals_absdot = [], [], [], []
+    N_eval = p_gt.shape[0]
+    for i in range(N_eval):
+        m_pred_i = None if m_pred is None else m_pred[i]
+        ps = compute_pointset_metrics_single(
+            p_gt=p_gt[i],
+            n_gt=n_gt[i],
+            m_gt=m[i],
+            p_pred=p_pred[i],
+            n_pred=n_pred[i],
+            m_pred=m_pred_i,
+            pred_mask_mode=pred_mask_mode_eval,
+            pred_hit_tau=pred_hit_tau_eval,
+            max_points=max_points_eval,
+        )
+        if np.isfinite(ps.rmse_nn):
+            vals_rmse_nn.append(ps.rmse_nn)
+        if np.isfinite(ps.chamfer):
+            vals_ch.append(ps.chamfer)
+        if np.isfinite(ps.angle_unsigned_mean_deg):
+            vals_ang_u.append(ps.angle_unsigned_mean_deg)
+        if np.isfinite(ps.normal_absdot_mean):
+            vals_absdot.append(ps.normal_absdot_mean)
+
+    if len(vals_rmse_nn) > 0:
+        metric_out.summary["pos_rmse_nn_hit"] = float(np.mean(vals_rmse_nn))
+    if len(vals_ch) > 0:
+        metric_out.summary["pos_chamfer_hit"] = float(np.mean(vals_ch))
+    if len(vals_ang_u) > 0:
+        metric_out.summary["normal_angle_unsigned_mean_deg_hit"] = float(np.mean(vals_ang_u))
+    if len(vals_absdot) > 0:
+        metric_out.summary["normal_absdot_mean_hit"] = float(np.mean(vals_absdot))
 
     save_json(out_dir / "summary.json", metric_out.summary)
     save_csv(out_dir / "per_ray.csv", metric_out.per_ray_rows)
@@ -569,6 +636,9 @@ def main() -> None:
             sweep_trials_per_point=args.sweep_trials_per_point,
             max_attempts_per_point=args.max_attempts_per_point,
             sweep_seed=args.sweep_seed,
+            pred_mask_mode=pred_mask_mode_eval,
+            pred_hit_tau=pred_hit_tau_eval,
+            max_points=max_points_eval,
         )
         save_csv(out_dir / "sweep_stats.csv", sweep_rows)
         save_csv(out_dir / f"sweep_joint_{args.joint_idx}.csv", sweep_rows)
@@ -589,10 +659,12 @@ def main() -> None:
         rv_s = np.array([r["rmse_index_std"] for r in sweep_rows], dtype=np.float32)
         rv_nn_m = np.array([r["rmse_nn_mean"] for r in sweep_rows], dtype=np.float32)
         rv_nn_s = np.array([r["rmse_nn_std"] for r in sweep_rows], dtype=np.float32)
-        av_m = np.array([r["angle_mean"] for r in sweep_rows], dtype=np.float32)
-        av_s = np.array([r["angle_std"] for r in sweep_rows], dtype=np.float32)
+        av_m = np.array([r["angle_unsigned_mean"] for r in sweep_rows], dtype=np.float32)
+        av_s = np.array([r["angle_unsigned_std"] for r in sweep_rows], dtype=np.float32)
         hv_m = np.array([r["hit_count_mean"] for r in sweep_rows], dtype=np.float32)
         acc = np.array([r["accepted"] for r in sweep_rows], dtype=np.float32)
+        ch_m = np.array([r["chamfer_mean"] for r in sweep_rows], dtype=np.float32)
+        ch_s = np.array([r["chamfer_std"] for r in sweep_rows], dtype=np.float32)
         plot_sweep_with_bands(
             qv,
             rv_m,
@@ -606,6 +678,16 @@ def main() -> None:
             int(args.sweep_trials_per_point),
             args.joint_idx,
             fig_dir / f"sweep_joint_{args.joint_idx}.png",
+            save_pdf=args.save_pdf,
+        )
+        plot_sweep_scalar_with_band(
+            q_values=qv,
+            y_mean=ch_m,
+            y_std=ch_s,
+            joint_idx=args.joint_idx,
+            title="Sweep Chamfer (unordered)",
+            ylabel="Chamfer L2",
+            out_path=fig_dir / f"sweep_joint_{args.joint_idx}_chamfer.png",
             save_pdf=args.save_pdf,
         )
         insufficient = int(np.sum(acc < float(args.sweep_trials_per_point)))

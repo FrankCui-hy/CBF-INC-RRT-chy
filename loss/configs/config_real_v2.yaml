@@ -78,6 +78,11 @@ loss:
     lambda_m: 1.0
     lambda_r: 0.5
     eps: 1.0e-6
+    match_mode: chamfer
+    pred_mask_mode: gt_hit
+    pred_hit_tau: 0.5
+    max_points: 256
+    normal_mode: matched_absdot
     unsigned_normal: true
     hard_example_weighting: false
     hard_w_max: 3.0

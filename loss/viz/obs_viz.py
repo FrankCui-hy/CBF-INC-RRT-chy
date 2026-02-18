@@ -287,3 +287,28 @@ def plot_sweep_with_bands(
     insufficient_count = int(np.sum(insufficient))
     ax1.set_title(f"Sweep over q_ego joint (insufficient={insufficient_count}/{len(q)})")
     _save(fig, out_path, save_pdf=save_pdf)
+
+
+def plot_sweep_scalar_with_band(
+    q_values: np.ndarray,
+    y_mean: np.ndarray,
+    y_std: np.ndarray,
+    joint_idx: int,
+    title: str,
+    ylabel: str,
+    out_path: Path,
+    save_pdf: bool = False,
+) -> None:
+    q = np.asarray(q_values, dtype=np.float32)
+    ym = np.asarray(y_mean, dtype=np.float32)
+    ys = np.asarray(y_std, dtype=np.float32)
+    ok = np.isfinite(ym) & np.isfinite(ys)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if ok.any():
+        ax.plot(q[ok], ym[ok], color="tab:purple", linewidth=1.6)
+        ax.fill_between(q[ok], ym[ok] - ys[ok], ym[ok] + ys[ok], color="tab:purple", alpha=0.2)
+    ax.set_xlabel(f"q_ego[{joint_idx}]")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.25)
+    _save(fig, out_path, save_pdf=save_pdf)
