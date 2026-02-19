@@ -19,13 +19,13 @@ def build_args() -> Namespace:
     parser.add_argument("--observation_type", type=str, default="uniform_lidar")
     parser.add_argument("--point_dim", type=int, default=3)
     parser.add_argument("--n_observation", type=int, default=256)
-    parser.add_argument("--n_observation_dataset", type=int, default=512)
+    parser.add_argument("--n_observation_dataset", type=int, default=256)
     # Keep point-velocity off by default; we now record obstacle joint velocities in aux.
     parser.add_argument("--include_point_velocity", action="store_true")
     parser.add_argument("--dataset_name", type=str, default="ocbf_panda_vel")
 
     # datamodule
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--noise_level", type=float, default=0.3)
     parser.add_argument("--safe_portion", type=float, default=0.8)
     parser.add_argument("--unsafe_portion", type=float, default=0.2)
@@ -34,7 +34,7 @@ def build_args() -> Namespace:
     parser.add_argument("--max_episode", type=int, default=100)
     parser.add_argument("--trajectories_per_episode", type=int, default=40)
     parser.add_argument("--trajectory_length", type=int, default=35)
-    parser.add_argument("--fixed_samples", type=int, default=400)
+    parser.add_argument("--fixed_samples", type=int, default=200)
     parser.add_argument("--skip_fixed_sampling", action="store_true")
 
     # obstacle robot

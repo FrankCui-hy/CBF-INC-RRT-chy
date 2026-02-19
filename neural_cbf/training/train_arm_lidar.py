@@ -234,8 +234,8 @@ if __name__ == "__main__":
 
     # datamodule params
     parser.add_argument('--dataset_name', type=str, default='pino_motor_norm', help='[5dpoints, motor_control]')
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--n_observation_dataset', type=int, default=1024, help='total points in ')
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--n_observation_dataset', type=int, default=256, help='total points in ')
     parser.add_argument('--noise_level', type=float, default=0.3)
     parser.add_argument('--safe_portion', type=float, default=0.8, help='portion of safe dps in dataset')
     parser.add_argument('--unsafe_portion', type=float, default=0.2, help='portion of unsafe dps in dataset')
@@ -244,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_episode', type=int, default=120)
     parser.add_argument('--trajectories_per_episode', type=int, default=40)
     parser.add_argument('--trajectory_length', type=int, default=35)
-    parser.add_argument('--fixed_samples', type=int, default=400)
+    parser.add_argument('--fixed_samples', type=int, default=200)
     parser.add_argument(
         '--ab_mode',
         type=str,
