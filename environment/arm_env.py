@@ -246,6 +246,14 @@ class ArmEnv:
 			return np.zeros((self.obstacle_robot.body_dim,), dtype=np.float32)
 		return self.obstacle_qdot
 
+	def get_obstacle_q(self):
+		if self.obstacle_robot is None:
+			return None
+		return np.array(
+			self.obstacle_robot.get_joint_position(self.obstacle_robot.body_joints),
+			dtype=np.float32,
+		)
+
 	def robots_within_distance(self, robot_a, robot_b, distance: float) -> bool:
 		# robot_a, robot_b are BasicRobot instances
 		self.p.performCollisionDetection()

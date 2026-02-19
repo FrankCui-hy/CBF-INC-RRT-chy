@@ -61,6 +61,11 @@ class ArmLidar(ArmDynamics):
             raise ValueError("When include_point_velocity=True, point_dim must be 3 (cartesian).")
         self.point_dims = point_dim + 3 * int(self.include_point_velocity) + 3 * int(self.add_normal)
         self.obstacle_horizon_s = obstacle_horizon_s
+        self.obstacle_q_dim = (
+            self.robot.body_dim
+            if self.env is not None and self.env.obstacle_robot is not None
+            else 0
+        )
         self.obstacle_qdot_dim = (
             self.robot.body_dim
             if self.env is not None and self.env.obstacle_robot is not None
@@ -94,7 +99,7 @@ class ArmLidar(ArmDynamics):
     @property
     def state_aux_dims_in_dataset(self) -> int:
         if self.obstacle_qdot_dim > 0:
-            return self.sensor_aux_dims + self.obstacle_qdot_dim + 2
+            return self.sensor_aux_dims + self.obstacle_q_dim + self.obstacle_qdot_dim + 2
         return self.sensor_aux_dims
 
     @property
@@ -229,12 +234,14 @@ class ArmLidar(ArmDynamics):
             state_aux.append(torch.cat((p_p.reshape(1, -1), p_r.reshape(1, -1)), dim=1))
         aux = torch.cat(state_aux, dim=0).reshape(-1)
         if self.env is not None and self.env.obstacle_robot is not None:
+            q_obs = self.env.get_obstacle_q()
             qdot_obs = self.env.get_obstacle_qdot()
             traj_idx = float(self.env.obstacle_traj_idx)
             step_idx = float(self.env.obstacle_traj_step)
             aux = torch.cat(
                 (
                     aux,
+                    torch.tensor(q_obs, device=state.device, dtype=aux.dtype),
                     torch.tensor(qdot_obs, device=state.device, dtype=aux.dtype),
                     torch.tensor([traj_idx, step_idx], device=state.device, dtype=aux.dtype),
                 ),
@@ -336,10 +343,27 @@ class ArmLidar(ArmDynamics):
         if self.obstacle_qdot_dim == 0:
             return None, None, None
         meta = datax[:, -self.state_aux_dims_in_dataset :]
-        qdot = meta[:, -(self.obstacle_qdot_dim + 2) : -2]
+        # Backward/forward compatible parsing:
+        # new layout: [sensor_aux, q_obs, qdot_obs, traj_idx, step_idx]
+        # old layout: [sensor_aux, qdot_obs, traj_idx, step_idx]
+        if meta.shape[1] >= self.sensor_aux_dims + self.obstacle_q_dim + self.obstacle_qdot_dim + 2:
+            qdot_start = self.sensor_aux_dims + self.obstacle_q_dim
+        else:
+            qdot_start = self.sensor_aux_dims
+        qdot = meta[:, qdot_start : qdot_start + self.obstacle_qdot_dim]
         traj_idx = meta[:, -2]
         step_idx = meta[:, -1]
         return qdot, traj_idx, step_idx
+
+    def get_obstacle_q_from_datax(self, datax: torch.Tensor):
+        if self.obstacle_q_dim == 0:
+            return None
+        meta = datax[:, -self.state_aux_dims_in_dataset :]
+        required = self.sensor_aux_dims + self.obstacle_q_dim + self.obstacle_qdot_dim + 2
+        if meta.shape[1] < required:
+            return None
+        q_start = self.sensor_aux_dims
+        return meta[:, q_start : q_start + self.obstacle_q_dim]
 
     def batch_lookahead(self, datax, dqs, data_jacobian):
         """

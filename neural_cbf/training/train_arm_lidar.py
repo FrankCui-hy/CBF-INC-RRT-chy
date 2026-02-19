@@ -150,6 +150,11 @@ def main(args):
                                               loss_config=loss_config,
                                               all_hparams=args,
                                               use_bn=args.use_bn,
+                                              ab_mode=args.ab_mode,
+                                              baseline=args.baseline,
+                                              obs_backend=args.obs_backend,
+                                              gphi_ckpt=args.gphi_ckpt,
+                                              train_use_fd=args.train_use_fd,
                                               use_neural_actor="RL" in version_name,)
 
     # Initialize the logger and trainer
@@ -240,6 +245,20 @@ if __name__ == "__main__":
     parser.add_argument('--trajectories_per_episode', type=int, default=40)
     parser.add_argument('--trajectory_length', type=int, default=35)
     parser.add_argument('--fixed_samples', type=int, default=400)
+    parser.add_argument(
+        '--ab_mode',
+        type=str,
+        default='B_with_normal',
+        choices=['A_no_normal', 'B_with_normal'],
+        help='A/B switch: A masks normal channels before encoder, B uses full observation.',
+    )
+    parser.add_argument('--baseline', action='store_true', help='Use legacy FD/simulated hdot chain.')
+    parser.add_argument('--obs_backend', type=str, default='gphi', choices=['gphi', 'raw'],
+                        help='Observation backend for training. Default uses gphi.')
+    parser.add_argument('--gphi_ckpt', type=str, default='loss/outputs_real_v2/checkpoints/g_phi_best.pt',
+                        help='Checkpoint path for loss.models.g_phi when obs_backend=gphi.')
+    parser.add_argument('--train_use_fd', action='store_true',
+                        help='Compute FD hdot in training (debug only, slower). Default: disabled.')
     # ## for debugging
     # parser.add_argument('--max_episode', type=int, default=2)
     # parser.add_argument('--trajectories_per_episode', type=int, default=5)

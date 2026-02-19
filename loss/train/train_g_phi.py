@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from copy import deepcopy
 
 import torch
 
@@ -93,13 +94,21 @@ def main() -> None:
 
     epochs = int(tcfg["epochs"])
     cfg_obs = cfg["loss"]["obs"]
+    use_lambda_n_schedule = bool(tcfg.get("use_lambda_n_schedule", False))
+    lambda_n_stage1 = float(tcfg.get("lambda_n_stage1", cfg_obs.get("lambda_n", 0.3)))
+    lambda_n_stage2 = float(tcfg.get("lambda_n_stage2", cfg_obs.get("lambda_n", 0.3)))
+    lambda_n_stage1_epochs = int(tcfg.get("lambda_n_stage1_epochs", 0))
 
     for epoch in range(start_epoch, epochs):
-        tr = run_epoch(model, data_bundle.train_loader, optimizer, cfg_obs, device, train=True)
-        va = run_epoch(model, data_bundle.val_loader, optimizer, cfg_obs, device, train=False)
+        cfg_obs_epoch = deepcopy(cfg_obs)
+        if use_lambda_n_schedule:
+            cfg_obs_epoch["lambda_n"] = lambda_n_stage1 if epoch < lambda_n_stage1_epochs else lambda_n_stage2
+        tr = run_epoch(model, data_bundle.train_loader, optimizer, cfg_obs_epoch, device, train=True)
+        va = run_epoch(model, data_bundle.val_loader, optimizer, cfg_obs_epoch, device, train=False)
 
         print(
             f"[g_phi][{epoch:03d}] "
+            f"lambda_n={float(cfg_obs_epoch.get('lambda_n', cfg_obs.get('lambda_n', 0.0))):.4f} "
             f"train total={tr['total']:.4f} p={tr['L_p']:.4f} n={tr['L_n']:.4f} m={tr['L_m']:.4f} ray={tr['L_ray']:.4f} | "
             f"val total={va['total']:.4f} p={va['L_p']:.4f} n={va['L_n']:.4f} m={va['L_m']:.4f} ray={va['L_ray']:.4f}"
         )

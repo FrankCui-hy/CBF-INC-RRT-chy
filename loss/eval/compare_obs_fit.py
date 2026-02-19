@@ -469,6 +469,10 @@ def sweep_aggregate_stats(
     ch_m, ch_s = _ms("chamfer")
     ch_p2q_m, ch_p2q_s = _ms("chamfer_p2q")
     ch_q2p_m, ch_q2p_s = _ms("chamfer_q2p")
+    if np.isfinite(ch_m):
+        ch_rms_m = float(np.sqrt(max(ch_m, 0.0) / 2.0))
+    else:
+        ch_rms_m = float("nan")
 
     return {
         "q_val": float(q_val),
@@ -490,6 +494,7 @@ def sweep_aggregate_stats(
         "chamfer_p2q_std": float(ch_p2q_s),
         "chamfer_q2p_mean": float(ch_q2p_m),
         "chamfer_q2p_std": float(ch_q2p_s),
+        "chamfer_rms_m": float(ch_rms_m),
         "pos_mae_mean": float(mae_m),
         "pos_mae_std": float(mae_s),
         "angle_unsigned_mean": float(ang_m),
@@ -655,6 +660,7 @@ def main() -> None:
         metric_out.summary["pos_rmse_nn_hit"] = float(np.mean(vals_rmse_nn))
     if len(vals_ch) > 0:
         metric_out.summary["pos_chamfer_hit"] = float(np.mean(vals_ch))
+        metric_out.summary["pos_chamfer_rms_m_hit"] = float(np.sqrt(max(metric_out.summary["pos_chamfer_hit"], 0.0) / 2.0))
     if len(vals_ch_p2q) > 0:
         metric_out.summary["pos_chamfer_p2q_hit"] = float(np.mean(vals_ch_p2q))
     if len(vals_ch_q2p) > 0:

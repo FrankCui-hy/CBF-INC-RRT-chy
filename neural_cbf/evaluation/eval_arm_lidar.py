@@ -1107,6 +1107,16 @@ def run_moving_obstacle_rollout(
 	min_dist_hist = []
 	collided = False
 	collide_step = None
+	qp_infeasible_count = 0
+	u_prev = None
+	u_jitter_hist = []
+	diag_hist = []
+	diag_bucket = {
+		"near": [],
+		"far": [],
+		"hit_low": [],
+		"hit_high": [],
+	}
 
 	for k in range(steps):
 		# Base time used for obstacle motion
@@ -1128,6 +1138,9 @@ def run_moving_obstacle_rollout(
 
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
+		if torch.isnan(u).any() or torch.isinf(u).any():
+			qp_infeasible_count += 1
+			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# Conservative default clamp if the dynamics doesn't expose limits
@@ -1136,6 +1149,25 @@ def run_moving_obstacle_rollout(
 			u = torch.max(torch.min(u, u_hi), u_lo)
 		except Exception:
 			u = torch.clamp(u, -2.5, 2.5)
+
+		if u_prev is not None:
+			u_jitter_hist.append(float(torch.norm(u - u_prev).item()))
+		u_prev = u.detach().clone()
+
+		diag = None
+		if hasattr(controller, "derivative_diagnostics"):
+			try:
+				diag = controller.derivative_diagnostics(x, u)
+			except Exception:
+				diag = None
+		if diag is not None:
+			diag_hist.append(diag)
+			# Bucketing by near/far and predicted hit count
+			hc = int(diag.get("hit_count_pred", 0))
+			if hc >= 128:
+				diag_bucket["hit_high"].append(diag)
+			else:
+				diag_bucket["hit_low"].append(diag)
 
 		# 3) Step dynamics with observation update
 		x = dm.closed_loop_dynamics(x, u, collect_dataset=False, use_motor_control=False, update_observation=True)
@@ -1171,6 +1203,8 @@ def run_moving_obstacle_rollout(
 		if mode != "none" and len(obstacle_ids) > 0:
 			min_d, hit = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
 			min_dist_hist.append(min_d)
+			if diag is not None:
+				(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
 			if hit:
 				collided = True
 				collide_step = k
@@ -1198,12 +1232,51 @@ def run_moving_obstacle_rollout(
 		"collided": collided,
 		"min_dist_min": float(np.min(min_dist_hist)) if len(min_dist_hist) else None,
 		"min_dist_mean": float(np.mean(min_dist_hist)) if len(min_dist_hist) else None,
+		"qp_infeasible_count": int(qp_infeasible_count),
+		"u_jitter_mean": float(np.mean(u_jitter_hist)) if len(u_jitter_hist) else None,
+		"diagnostic_samples": int(len(diag_hist)),
+		"odot_err_p": None,
+		"odot_err_n": None,
+		"odot_err_m": None,
+		"odot_jvp_p_meanabs": None,
+		"odot_jvp_n_meanabs": None,
+		"odot_jvp_m_meanabs": None,
+		"odot_fd_p_meanabs": None,
+		"odot_fd_n_meanabs": None,
+		"odot_fd_m_meanabs": None,
+		"hdot_auto_mean": None,
+		"hdot_fd_mean": None,
+		"hdot_err": None,
 	}
+	if len(diag_hist) > 0:
+		for k in [
+			"odot_err_p", "odot_err_n", "odot_err_m",
+			"odot_jvp_p_meanabs", "odot_jvp_n_meanabs", "odot_jvp_m_meanabs",
+			"odot_fd_p_meanabs", "odot_fd_n_meanabs", "odot_fd_m_meanabs",
+			"hdot_auto_mean", "hdot_fd_mean", "hdot_err"
+		]:
+			vals = [d[k] for d in diag_hist if k in d]
+			if len(vals) > 0:
+				result[k] = float(np.mean(vals))
+		for bk, blist in diag_bucket.items():
+			if len(blist) == 0:
+				continue
+			for k in [
+				"hdot_auto_mean", "hdot_fd_mean", "hdot_err",
+				"odot_err_p", "odot_err_n", "odot_err_m",
+				"odot_jvp_p_meanabs", "odot_jvp_n_meanabs", "odot_jvp_m_meanabs",
+				"odot_fd_p_meanabs", "odot_fd_n_meanabs", "odot_fd_m_meanabs",
+			]:
+				vals = [d[k] for d in blist if k in d]
+				if len(vals) > 0:
+					result[f"{k}_{bk}"] = float(np.mean(vals))
 	print("[ROLL] move_obstacles=", move_obstacles,
 			" seed=", seed,
 			" collided=", collided,
 			" steps=", result["steps_ran"],
-			" min_dist_min=", result["min_dist_min"])
+			" min_dist_min=", result["min_dist_min"],
+			" qp_infeasible=", result.get("qp_infeasible_count"),
+			" u_jitter_mean=", result.get("u_jitter_mean"))
 	# Best-effort cleanup to avoid BulletClient __del__ warnings on interpreter shutdown
 	try:
 		p_.disconnect()

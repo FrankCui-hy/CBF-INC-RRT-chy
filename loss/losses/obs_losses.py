@@ -7,9 +7,9 @@ import torch.nn.functional as F
 
 from loss.metrics.pointset import (
     _build_point_sets_single,
-    chamfer_l2_single,
-    matched_absdot_loss_single,
-    one_way_nn_rmse_single,
+    chamfer_l2_parts_tensor_single,
+    matched_absdot_loss_tensor_single,
+    one_way_nn_rmse_tensor_single,
 )
 
 
@@ -31,9 +31,13 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
     hard_residual_clip = float(cfg.get("hard_residual_clip", 0.0))
     normal_loss_mode = str(cfg.get("normal_loss_mode", "dot2")).lower()
     match_mode = str(cfg.get("match_mode", "index")).lower()
+    q2p_weight = float(cfg.get("chamfer_q2p_weight", 1.0))
+    p2q_weight = float(cfg.get("chamfer_p2q_weight", 1.0))
     pred_mask_mode = str(cfg.get("pred_mask_mode", "gt_hit")).lower()
     pred_hit_tau = float(cfg.get("pred_hit_tau", 0.5))
     max_points = int(cfg.get("max_points", 256))
+    normal_match_max_dist = float(cfg.get("normal_match_max_dist", 0.0))
+    normal_bidirectional = bool(cfg.get("normal_bidirectional", True))
     pointset_empty_as_zero = bool(cfg.get("pointset_empty_as_zero", True))
 
     p_hat = pred["p_hat"]  # (B, R, 3)
@@ -77,11 +81,11 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
                     vals.append(torch.zeros((), device=p_gt.device, dtype=p_gt.dtype))
                 continue
             if match_mode == "nn":
-                v = one_way_nn_rmse_single(P, Q)
-                vals.append(torch.tensor(v * v, device=p_gt.device, dtype=p_gt.dtype))
+                v = one_way_nn_rmse_tensor_single(P, Q)
+                vals.append(v * v)
             else:
-                v = chamfer_l2_single(P, Q)
-                vals.append(torch.tensor(v, device=p_gt.device, dtype=p_gt.dtype))
+                p2q, q2p = chamfer_l2_parts_tensor_single(P, Q)
+                vals.append(p2q_weight * p2q + q2p_weight * q2p)
         l_p = torch.stack(vals).mean() if len(vals) > 0 else torch.zeros((), device=p_gt.device, dtype=p_gt.dtype)
     else:
         raise ValueError(f"Unknown match_mode={match_mode}. Use 'index'|'nn'|'chamfer'.")
@@ -96,9 +100,16 @@ def compute_observation_losses(pred: Dict[str, torch.Tensor], batch: Dict[str, t
                 p_gt[b], p_hat[b], mb, mpb, n_gt[b], n_hat[b],
                 pred_mask_mode=pred_mask_mode, pred_hit_tau=pred_hit_tau, max_points=max_points
             )
-            loss_n, _, _ = matched_absdot_loss_single(P, Q, NG, NQ)
-            if torch.isfinite(torch.tensor(loss_n)):
-                vals_n.append(torch.tensor(loss_n, device=p_gt.device, dtype=p_gt.dtype))
+            loss_n, _, _ = matched_absdot_loss_tensor_single(
+                P,
+                Q,
+                NG,
+                NQ,
+                max_match_dist=(normal_match_max_dist if normal_match_max_dist > 0.0 else None),
+                bidirectional=normal_bidirectional,
+            )
+            if torch.isfinite(loss_n):
+                vals_n.append(loss_n)
             elif pointset_empty_as_zero:
                 vals_n.append(torch.zeros((), device=p_gt.device, dtype=p_gt.dtype))
         l_n = torch.stack(vals_n).mean() if len(vals_n) > 0 else torch.zeros((), device=p_gt.device, dtype=p_gt.dtype)

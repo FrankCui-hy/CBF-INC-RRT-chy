@@ -265,9 +265,11 @@ class EpisodicDataModule(pl.LightningDataModule):
 			list_sensor = self.model.list_sensor
 			ray_per_sensor_ds = self.model.point_in_dataset_pc
 			observation_type = self.model.observation_type
+			# Bump cache key when auxiliary layout changes (e.g., include obstacle q in aux).
+			aux_layout_ver = "auxv2" if getattr(self.model, "obstacle_q_dim", 0) > 0 else "auxv1"
 			dataset_path = dataset_path + f'{int(100 * self.model.dis_threshold)}_{self.model.env.obstacle_num}_' \
 										  f'{ray_per_sensor_ds}_{observation_type}_vel{int(self.model.include_point_velocity)}_' \
-										  f'{int(self.noise_level * 1e2)}_{self.max_episode}_{self.trajectories_per_episode}_{self.trajectory_length}_' \
+										  f'{aux_layout_ver}_{int(self.noise_level * 1e2)}_{self.max_episode}_{self.trajectories_per_episode}_{self.trajectory_length}_' \
 										  f'{self.fixed_samples}.pt'
 		elif "mindis" in str(self.model):
 			dataset_path = dataset_path + f'{int(100 * self.model.dis_threshold)}_{self.model.env.obstacle_num}_' \

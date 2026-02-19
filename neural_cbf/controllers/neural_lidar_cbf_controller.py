@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from torch.func import jvp
 
 import matplotlib.pyplot as plt
 
@@ -22,6 +23,11 @@ from neural_cbf.controllers import NeuralObsCBFController
 from neural_cbf.controllers.utils import PointNetfeat, PointNetVanillaEncoder
 from neural_cbf.datamodules.episodic_datamodule import EpisodicDataModule
 from neural_cbf.experiments import ExperimentSuite
+
+try:
+	from loss.models.g_phi import SurrogateObservationNet
+except Exception:
+	SurrogateObservationNet = None
 
 
 class NeuralLidarCBFController(NeuralObsCBFController):
@@ -98,6 +104,17 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		# Define the actor network, which we denote u
 		# ----------------------------------------------------------------------------
 		self.use_neural_actor = kwargs["use_neural_actor"]
+		self.ab_mode = kwargs.get("ab_mode", "B_with_normal")
+		if self.ab_mode not in ("A_no_normal", "B_with_normal"):
+			raise ValueError(f"Unknown ab_mode={self.ab_mode}. Use A_no_normal or B_with_normal.")
+		self.baseline = bool(kwargs.get("baseline", False))
+		self.obs_backend = kwargs.get("obs_backend", "gphi")
+		self.gphi_ckpt = kwargs.get("gphi_ckpt", "")
+		self.train_use_fd = bool(kwargs.get("train_use_fd", False))
+		self.use_gphi_chain = (not self.baseline) and self.obs_backend == "gphi"
+		self.g_phi = None
+		if self.use_gphi_chain:
+			self._init_g_phi()
 		if self.use_neural_actor:
 			# actor head
 			self.actor_layers: OrderedDict[str, nn.Module] = OrderedDict()
@@ -113,6 +130,172 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			self.actor_layers["output_clamp"] = nn.Sigmoid()
 			self.actor_nn = nn.Sequential(self.actor_layers)
 
+	def _init_g_phi(self):
+		if SurrogateObservationNet is None:
+			raise RuntimeError("loss.models.g_phi is not available. Cannot use obs_backend=gphi.")
+		if self.gphi_ckpt is None or self.gphi_ckpt == "":
+			raise ValueError("obs_backend=gphi requires --gphi_ckpt.")
+		ckpt = torch.load(self.gphi_ckpt, map_location="cpu")
+		model_cfg = ckpt.get("model_cfg", {})
+		sys_cfg = ckpt.get("system_cfg", {})
+		self.g_phi = SurrogateObservationNet(
+			n_ego=int(sys_cfg.get("n_ego", self.dynamics_model.n_dims)),
+			n_obs=int(sys_cfg.get("n_obs", self.dynamics_model.n_dims)),
+			rays=int(sys_cfg.get("rays", self.dynamics_model.point_in_dataset_pc)),
+			hidden_dims=list(model_cfg.get("hidden_dims", [256, 256, 256])),
+			activation=str(model_cfg.get("activation", "silu")),
+			predict_hit_prob=bool(model_cfg.get("predict_hit_prob", True)),
+			norm_eps=float(model_cfg.get("norm_eps", 1e-6)),
+		)
+		self.g_phi.load_state_dict(ckpt["model"])
+		self.g_phi.eval()
+		for p in self.g_phi.parameters():
+			p.requires_grad = False
+
+	def _reshape_gphi_to_dataset_obs(self, p_hat: torch.Tensor, n_hat: torch.Tensor) -> torch.Tensor:
+		"""
+		Map g_phi outputs to ArmLidar dataset observation layout:
+		(B, point_in_dataset_pc, point_dim_dataset), where point_dim_dataset is 3 or 6.
+		"""
+		target = int(self.dynamics_model.point_in_dataset_pc)
+		B, R, _ = p_hat.shape
+		idx = torch.linspace(0, max(R - 1, 0), steps=target, device=p_hat.device).round().long()
+		p_sel = p_hat[:, idx, :]
+		if self.dynamics_model.add_normal:
+			n_sel = n_hat[:, idx, :]
+			if self.ab_mode == "A_no_normal":
+				n_sel = torch.zeros_like(n_sel)
+			return torch.cat([p_sel, n_sel], dim=-1)
+		return p_sel
+
+	def _replace_datax_obs_with_gphi(self, datax: torch.Tensor) -> torch.Tensor:
+		if not self.use_gphi_chain:
+			return datax
+		qe = datax[:, : self.dynamics_model.n_dims]
+		qo = self.dynamics_model.get_obstacle_q_from_datax(datax)
+		if qo is None:
+			return datax
+		device = datax.device
+		if next(self.g_phi.parameters()).device != device:
+			self.g_phi = self.g_phi.to(device)
+		pred = self.g_phi(qe, qo)
+		obs_dataset = self._reshape_gphi_to_dataset_obs(pred["p_hat"], pred["n_hat"]).reshape(datax.shape[0], -1)
+		datax_new = datax.clone()
+		datax_new[:, self.dynamics_model.n_dims : -self.dynamics_model.state_aux_dims_in_dataset] = obs_dataset
+		return datax_new
+
+	def _compute_hdot_auto(self, data_x: torch.Tensor, u: torch.Tensor) -> Optional[torch.Tensor]:
+		if not self.use_gphi_chain:
+			return None
+		q_obs = self.dynamics_model.get_obstacle_q_from_datax(data_x)
+		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(data_x)
+		if q_obs is None or qdot_obs is None:
+			return None
+
+		hdot_vals = []
+		for i in range(data_x.shape[0]):
+			base = data_x[i].detach()
+			qe0 = data_x[i, : self.dynamics_model.n_dims]
+			qo0 = q_obs[i]
+			qde = u[i]
+			qdo = qdot_obs[i]
+
+			def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+				row = base.clone()
+				row[: self.dynamics_model.n_dims] = qe_s
+				# overwrite q_obs in aux (if present)
+				meta = row[-self.dynamics_model.state_aux_dims_in_dataset :]
+				if self.dynamics_model.obstacle_q_dim > 0:
+					q_start = self.dynamics_model.sensor_aux_dims
+					meta[q_start : q_start + self.dynamics_model.obstacle_q_dim] = qo_s
+				row[-self.dynamics_model.state_aux_dims_in_dataset :] = meta
+				row = self._replace_datax_obs_with_gphi(row.unsqueeze(0))
+				return self.h(row).squeeze()
+
+			_, hdot_i = jvp(H, (qe0, qo0), (qde, qdo), strict=False)
+			hdot_vals.append(hdot_i)
+		return torch.stack(hdot_vals).reshape(-1, 1)
+
+	def derivative_diagnostics(self, data_x: torch.Tensor, u: torch.Tensor, fd_eps: float = 1e-3):
+		"""
+		Compute odot_jvp vs odot_fd (p/m/n split) and hdot_auto vs hdot_fd.
+		Returns None when gphi chain is disabled or obstacle metadata is unavailable.
+		"""
+		if not self.use_gphi_chain:
+			return None
+		q_obs = self.dynamics_model.get_obstacle_q_from_datax(data_x)
+		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(data_x)
+		if q_obs is None or qdot_obs is None:
+			return None
+
+		qe = data_x[:, : self.dynamics_model.n_dims]
+		qde = u
+		device = data_x.device
+		if next(self.g_phi.parameters()).device != device:
+			self.g_phi = self.g_phi.to(device)
+		with torch.no_grad():
+			m_now = self.g_phi(qe, q_obs).get("m_hat", None)
+			if m_now is not None:
+				hit_count_pred = int((m_now.squeeze(-1) > 0.5).sum(dim=1).float().mean().item())
+			else:
+				hit_count_pred = 0
+
+		odot_jvp_list, odot_fd_list = [], []
+		for i in range(data_x.shape[0]):
+			def gflat(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+				out = self.g_phi(qe_s.unsqueeze(0), qo_s.unsqueeze(0))
+				p = out["p_hat"].reshape(-1)
+				n = out["n_hat"].reshape(-1)
+				m = out["m_hat"].reshape(-1) if out.get("m_hat", None) is not None else torch.zeros((out["p_hat"].numel() // 3,), device=qe_s.device, dtype=qe_s.dtype)
+				return torch.cat([p, n, m], dim=0)
+
+			_, odot_jvp_i = jvp(gflat, (qe[i], q_obs[i]), (qde[i], qdot_obs[i]), strict=False)
+			g0 = gflat(qe[i], q_obs[i])
+			g1 = gflat(qe[i] + fd_eps * qde[i], q_obs[i] + fd_eps * qdot_obs[i])
+			odot_fd_i = (g1 - g0) / fd_eps
+			odot_jvp_list.append(odot_jvp_i)
+			odot_fd_list.append(odot_fd_i)
+
+		odot_jvp = torch.stack(odot_jvp_list)
+		odot_fd = torch.stack(odot_fd_list)
+
+		# split by channels: [p(3R), n(3R), m(R)]
+		R = self.g_phi.rays
+		p_end = 3 * R
+		n_end = 6 * R
+		p_jvp = odot_jvp[:, :p_end]
+		n_jvp = odot_jvp[:, p_end:n_end]
+		m_jvp = odot_jvp[:, n_end:]
+		p_fd = odot_fd[:, :p_end]
+		n_fd = odot_fd[:, p_end:n_end]
+		m_fd = odot_fd[:, n_end:]
+		p_err = (p_jvp - p_fd).abs().mean()
+		n_err = (n_jvp - n_fd).abs().mean()
+		m_err = (m_jvp - m_fd).abs().mean()
+
+		hdot_auto = self._compute_hdot_auto(data_x, u)
+		if hdot_auto is None:
+			return None
+		datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.controller_dt, data_jacobian=())
+		hdot_fd = (self.h(datax_next) - self.h(data_x)) / self.dynamics_model.controller_dt
+		hdot_err = (hdot_auto - hdot_fd).abs().mean()
+
+		return {
+			"odot_err_p": float(p_err.detach().cpu()),
+			"odot_err_n": float(n_err.detach().cpu()),
+			"odot_err_m": float(m_err.detach().cpu()),
+			"odot_jvp_p_meanabs": float(p_jvp.abs().mean().detach().cpu()),
+			"odot_jvp_n_meanabs": float(n_jvp.abs().mean().detach().cpu()),
+			"odot_jvp_m_meanabs": float(m_jvp.abs().mean().detach().cpu()),
+			"odot_fd_p_meanabs": float(p_fd.abs().mean().detach().cpu()),
+			"odot_fd_n_meanabs": float(n_fd.abs().mean().detach().cpu()),
+			"odot_fd_m_meanabs": float(m_fd.abs().mean().detach().cpu()),
+			"hdot_auto_mean": float(hdot_auto.mean().detach().cpu()),
+			"hdot_fd_mean": float(hdot_fd.mean().detach().cpu()),
+			"hdot_err": float(hdot_err.detach().cpu()),
+			"hit_count_pred": hit_count_pred,
+		}
+
 	# @torch.autocast('cuda' if torch.cuda.is_available() else 'cpu')
 	def h(self, datax: torch.Tensor):
 		"""Return the CBF value for the observations o
@@ -122,12 +305,13 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		returns:
 			h: bs x 1 tensor of BF values
 		"""
-		x = self.dynamics_model.datax_to_x(datax)
+		datax_used = self._replace_datax_obs_with_gphi(datax)
+		x = self.dynamics_model.datax_to_x(datax_used)
 		bs = x.shape[0]
 		assert x.shape[1] == self.n_dims_extended
 
 		state = x[:, :self.dynamics_model.n_dims]
-		z = self.encode_observation(x, datax)
+		z = self.encode_observation(x, datax_used)
 		h = self.h_nn(torch.cat([state, z], dim=-1))
 
 		return h
@@ -139,6 +323,16 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		x is the state+observation tensor after datax_to_x.
 		"""
 		observation = x[:, self.dynamics_model.n_dims:]
+		if self.ab_mode == "A_no_normal" and getattr(self.dynamics_model, "add_normal", False):
+			# Keep network structure unchanged; mask normal channels only.
+			bs = observation.shape[0]
+			num_sensor = len(self.dynamics_model.list_sensor)
+			ray_per_sensor = self.dynamics_model.ray_per_sensor
+			point_dims = self.dynamics_model.point_dims
+			obs_view = observation.reshape(bs, num_sensor, ray_per_sensor, point_dims).clone()
+			# Normal channels are the last 3 dims in ArmLidar when add_normal=True.
+			obs_view[..., -3:] = 0.0
+			observation = obs_view.reshape(bs, -1)
 		feature = self.pc_head(observation)
 		encoded_obs = self.encoder(feature)
 		if self.obstacle_qdot_dim > 0:
@@ -270,11 +464,14 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			h = self.h(data_x)
 			u, u_residual = self.u(data_x, u_goal_reaching)
 
-			datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.dt,
-															 data_jacobian=data_jacobian)
-			hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.dt
-
-			hdot = hdot_simulated
+			hdot_auto = self._compute_hdot_auto(data_x, u)
+			if (hdot_auto is not None) and (not self.train_use_fd):
+				hdot_simulated = hdot_auto.detach()
+			else:
+				datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.dt,
+																 data_jacobian=data_jacobian)
+				hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.dt
+			hdot = hdot_auto if hdot_auto is not None else hdot_simulated
 			alpha = torch.where(h < 0, 10, self.clf_lambda).type_as(u)
 			qp_relaxation = F.relu(hdot + torch.multiply(alpha, h))
 
@@ -293,11 +490,14 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 
 			hdot_expected = (Lf_V.squeeze(1).squeeze(1) + torch.bmm(Lg_V, u.unsqueeze(2)).squeeze(1).squeeze(
 				1)).unsqueeze(1)
-			datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.controller_dt,
-															 data_jacobian=data_jacobian)
-			hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.controller_dt
-
-			hdot = hdot_simulated
+			hdot_auto = self._compute_hdot_auto(data_x, u)
+			if (hdot_auto is not None) and (not self.train_use_fd):
+				hdot_simulated = hdot_auto.detach()
+			else:
+				datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.controller_dt,
+																 data_jacobian=data_jacobian)
+				hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.controller_dt
+			hdot = hdot_auto if hdot_auto is not None else hdot_simulated
 			alpha = self.clf_lambda  # torch.where(h < 0, 2 * self.clf_lambda, self.clf_lambda).type_as(x)
 			# qp_relaxation = F.relu(hdot + torch.multiply(alpha, h + self.safe_level))
 			qp_relaxation = F.relu(hdot + torch.multiply(alpha, torch.minimum(h, 2 * self.unsafe_level * torch.ones(*h.shape).type_as(h))).detach())

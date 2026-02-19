@@ -1,0 +1,9 @@
+{
+  "joint_idx": 3,
+  "num_points": 50,
+  "num_rows": 50,
+  "min_hit_count": 64,
+  "sweep_trials_per_point": 10,
+  "max_attempts_per_point": 200,
+  "sweep_seed": 0
+}

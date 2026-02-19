@@ -10,7 +10,7 @@ paths:
 system:
   n_ego: 7
   n_obs: 7
-  rays: 512
+  rays: 2048
   dt: 0.0333333
   q_limits_ego:
     low: [-2.7, -1.7, -2.7, -3.0, -2.7, -0.1, -2.7]
@@ -31,8 +31,8 @@ data:
   save_format: pt
   safe_dist: 0.28
   unsafe_dist: 0.16
-  ray_mode: sphere
-  cone_half_angle_deg: 75.0
+  ray_mode: cone
+  cone_half_angle_deg: 85.0
   ray:
     range_max: 5.0
     no_hit_point_fill: 0.0
@@ -40,16 +40,17 @@ data:
     robot_name: panda
     obstacle_robot_name: panda
     obstacle_traj_path: data/obstacle_trajs/panda_trajs.npz
-    obstacle_robot_base_pos: [0.18, 0.0, 0.0]
+    obstacle_robot_base_pos: [0.33, 0.0, 0.0]
     obstacle_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
     gui: false
-    sensor_link_mode: ee
-    ray_mode: sphere
-    cone_half_angle_deg: 75.0
+    sensor_link_mode: mid
+    ray_mode: cone
+    cone_half_angle_deg: 85.0
+    cone_axis_mode: target_tracking
     ray_mixture:
       enabled: false
       sphere_ratio: 0.7
-    near_episode_ratio: 0.4
+    near_episode_ratio: 0.0
     near_base_mode: around_ego
     near_ego_offset_center: [0.14, 0.0, 0.05]
     near_ego_offset_jitter: [0.07, 0.07, 0.07]
@@ -74,16 +75,20 @@ loss:
   obs:
     huber_delta: 0.05
     lambda_p: 1.0
-    lambda_n: 0.3
-    lambda_m: 1.0
+    lambda_m: 3.0
     lambda_r: 0.5
     eps: 1.0e-6
     match_mode: chamfer
-    pred_mask_mode: gt_hit
-    pred_hit_tau: 0.5
-    max_points: 256
+    chamfer_p2q_weight: 1.0
+    chamfer_q2p_weight: 1.8
+    pred_mask_mode: pred_hit
+    pred_hit_tau: 0.8
+    max_points: 1024
     normal_mode: matched_absdot
     unsigned_normal: true
+    lambda_n: 1.2
+    normal_match_max_dist: 0.015
+    normal_bidirectional: true
     hard_example_weighting: false
     hard_w_max: 3.0
     hard_residual_clip: 0.20
@@ -98,7 +103,7 @@ loss:
 
 train:
   g_phi:
-    epochs: 150
+    epochs: 200
     batch_size: 128
     lr: 1.0e-3
     weight_decay: 1.0e-5
@@ -106,8 +111,12 @@ train:
     log_every: 50
     use_tensorboard: false
     resume: false
+    use_lambda_n_schedule: true
+    lambda_n_stage1: 0.2
+    lambda_n_stage2: 0.7
+    lambda_n_stage1_epochs: 80
   h_theta:
-    epochs: 150
+    epochs: 200
     batch_size: 64
     lr: 5.0e-4
     weight_decay: 1.0e-5
