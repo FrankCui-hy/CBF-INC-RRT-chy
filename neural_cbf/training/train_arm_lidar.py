@@ -241,7 +241,7 @@ if __name__ == "__main__":
     parser.add_argument('--unsafe_portion', type=float, default=0.2, help='portion of unsafe dps in dataset')
     parser.add_argument('--goal_portion', type=float, default=0.0, help='portion of goal dps in dataset')
     parser.add_argument('--val_split', type=float, default=0.1, help='portion of validation dps in dataset')
-    parser.add_argument('--max_episode', type=int, default=100)
+    parser.add_argument('--max_episode', type=int, default=120)
     parser.add_argument('--trajectories_per_episode', type=int, default=40)
     parser.add_argument('--trajectory_length', type=int, default=35)
     parser.add_argument('--fixed_samples', type=int, default=400)
