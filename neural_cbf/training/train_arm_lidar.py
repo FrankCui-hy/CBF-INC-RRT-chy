@@ -177,7 +177,7 @@ def main(args):
 
     # Train
     pl.seed_everything(args.seed)
-    torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(False)
     trainer.fit(cbf_controller)
 
 
