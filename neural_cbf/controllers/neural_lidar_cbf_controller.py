@@ -1,10 +1,12 @@
 import itertools
 import time
+import sys
 from functools import partial
 from typing import Tuple, List, Optional
 from collections import OrderedDict
 import random
 import tqdm
+from pathlib import Path
 
 import pybullet as p
 
@@ -27,7 +29,15 @@ from neural_cbf.experiments import ExperimentSuite
 try:
 	from loss.models.g_phi import SurrogateObservationNet
 except Exception:
-	SurrogateObservationNet = None
+	# Fallback when running scripts directly (e.g. python neural_cbf/training/train_arm_lidar.py),
+	# where repo root may not be on sys.path.
+	repo_root = str(Path(__file__).resolve().parents[2])
+	if repo_root not in sys.path:
+		sys.path.insert(0, repo_root)
+	try:
+		from loss.models.g_phi import SurrogateObservationNet
+	except Exception:
+		SurrogateObservationNet = None
 
 
 class NeuralLidarCBFController(NeuralObsCBFController):
