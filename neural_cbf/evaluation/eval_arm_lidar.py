@@ -1357,7 +1357,7 @@ def eval_metrics_offline(
 
         # h and one-step FD hdot
         h = controller.h(x).reshape(-1)
-        x_next = dm.batch_lookahead(x, u * dm.dt, data_jacobian=None)
+        x_next = dm.batch_lookahead(x, u * dm.dt, data_jacobian=())
         h_next = controller.h(x_next).reshape(-1)
         hdot = (h_next - h) / float(dm.dt)
 
