@@ -1306,6 +1306,7 @@ def eval_metrics_offline(
     seed: int = 0,
     alpha: float = None,
     u_clamp: float = 2.5,
+    near_ratio: float = 0.0,
 ):
     """Offline (no rollout) evaluation for A/B.
 
@@ -1314,6 +1315,8 @@ def eval_metrics_offline(
       - QP infeasible / NaN rate (from controller.u)
       - finite-difference hdot using one-step lookahead: (h(x_next)-h(x))/dt
       - relaxation term: relu(hdot + alpha*h)
+      - split terms: relu(hdot), relu(alpha*h)
+      - near/far bucket stats (near := boundary | unsafe)
 
     It avoids datamodule dependencies and does NOT run long rollouts.
     """
@@ -1330,6 +1333,8 @@ def eval_metrics_offline(
     # choose alpha
     if alpha is None:
         alpha = float(getattr(controller, "clf_lambda", 1.0))
+    dt_eval = float(getattr(dm, "controller_dt", dm.dt))
+    near_ratio = float(max(0.0, min(1.0, near_ratio)))
 
     n = int(num_samples)
     bs = int(batch_size)
@@ -1337,16 +1342,45 @@ def eval_metrics_offline(
     h_all = []
     hdot_all = []
     relax_all = []
+    relu_hdot_all = []
+    relu_ah_all = []
+    near_mask_all = []
     infeasible = 0
     total = 0
 
     for start in range(0, n, bs):
         cur_bs = min(bs, n - start)
-        u01 = torch.from_numpy(rng.random((cur_bs, ul_t.shape[1])).astype(np.float32))
-        q = ll_t + (ul_t - ll_t) * u01
+        near_target = int(round(cur_bs * near_ratio))
+        q_chunks = []
+        if near_target > 0:
+            near_collected = 0
+            tries = 0
+            max_tries = max(100, near_target * 30)
+            while near_collected < near_target and tries < max_tries:
+                tries += 1
+                cbs = min(64, near_target - near_collected)
+                u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
+                q_try = ll_t + (ul_t - ll_t) * u01
+                x_try = dm.complete_sample_with_observations(q_try, num_samples=cbs)
+                near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
+                if near_try.any():
+                    keep = q_try[near_try]
+                    take = min(near_target - near_collected, keep.shape[0])
+                    q_chunks.append(keep[:take])
+                    near_collected += take
+            if near_collected < near_target:
+                cbs = near_target - near_collected
+                u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
+                q_chunks.append(ll_t + (ul_t - ll_t) * u01)
+        far_target = cur_bs - sum(int(qc.shape[0]) for qc in q_chunks)
+        if far_target > 0:
+            u01 = torch.from_numpy(rng.random((far_target, ul_t.shape[1])).astype(np.float32))
+            q_chunks.append(ll_t + (ul_t - ll_t) * u01)
+        q = torch.cat(q_chunks, dim=0) if len(q_chunks) else torch.empty((0, ul_t.shape[1]))
 
         # build datax with observations/aux
         x = dm.complete_sample_with_observations(q, num_samples=cur_bs)
+        near_mask = dm.boundary_mask(x) | dm.unsafe_mask(x)
 
         # compute control
         u = controller.u(x)[0]
@@ -1357,27 +1391,49 @@ def eval_metrics_offline(
 
         # h and one-step FD hdot
         h = controller.h(x).reshape(-1)
-        x_next = dm.batch_lookahead(x, u * dm.dt, data_jacobian=())
+        x_next = dm.batch_lookahead(x, u * dt_eval, data_jacobian=())
         h_next = controller.h(x_next).reshape(-1)
-        hdot = (h_next - h) / float(dm.dt)
+        hdot = (h_next - h) / dt_eval
 
+        relu_hdot = F.relu(hdot)
+        relu_ah = F.relu(float(alpha) * h)
         relax = F.relu(hdot + float(alpha) * h)
 
         h_all.append(h.detach().cpu())
         hdot_all.append(hdot.detach().cpu())
+        relu_hdot_all.append(relu_hdot.detach().cpu())
+        relu_ah_all.append(relu_ah.detach().cpu())
         relax_all.append(relax.detach().cpu())
+        near_mask_all.append(near_mask.detach().cpu())
         total += int(cur_bs)
 
     h_all = torch.cat(h_all)
     hdot_all = torch.cat(hdot_all)
+    relu_hdot_all = torch.cat(relu_hdot_all)
+    relu_ah_all = torch.cat(relu_ah_all)
     relax_all = torch.cat(relax_all)
+    near_mask_all = torch.cat(near_mask_all).bool()
+    far_mask_all = ~near_mask_all
+
+    def _bucket_stats(mask: torch.Tensor):
+        if mask.sum().item() == 0:
+            return {"count": 0, "relax_mean": None, "relax_p95": None, "relax_zero_rate": None}
+        vals = relax_all[mask]
+        return {
+            "count": int(mask.sum().item()),
+            "relax_mean": float(vals.mean().item()),
+            "relax_p95": float(torch.quantile(vals, 0.95).item()),
+            "relax_zero_rate": float((vals <= 0).float().mean().item()),
+        }
 
     out = {
         "num_samples": int(total),
         "batch_size": int(bs),
         "seed": int(seed),
         "alpha": float(alpha),
-        "dt": float(dm.dt),
+        "dt": float(dt_eval),
+        "near_ratio_target": float(near_ratio),
+        "near_ratio_realized": float(near_mask_all.float().mean().item()),
         "infeasible_count": int(infeasible),
         "infeasible_rate": float(infeasible) / float(max(total, 1)),
         "h_mean": float(h_all.mean().item()),
@@ -1387,10 +1443,16 @@ def eval_metrics_offline(
         "h_p95": float(torch.quantile(h_all, 0.95).item()),
         "hdot_mean": float(hdot_all.mean().item()),
         "hdot_std": float(hdot_all.std(unbiased=False).item()),
+        "relu_hdot_mean": float(relu_hdot_all.mean().item()),
+        "relu_hdot_p95": float(torch.quantile(relu_hdot_all, 0.95).item()),
+        "relu_alpha_h_mean": float(relu_ah_all.mean().item()),
+        "relu_alpha_h_p95": float(torch.quantile(relu_ah_all, 0.95).item()),
         "relax_mean": float(relax_all.mean().item()),
         "relax_max": float(relax_all.max().item()),
         "relax_p95": float(torch.quantile(relax_all, 0.95).item()),
         "relax_zero_rate": float((relax_all <= 0).float().mean().item()),
+        "near": _bucket_stats(near_mask_all),
+        "far": _bucket_stats(far_mask_all),
     }
     return out
 
@@ -1420,6 +1482,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--alpha", type=float, default=None)
     parser.add_argument("--u_clamp", type=float, default=2.5)
+    parser.add_argument("--near_ratio", type=float, default=0.0, help="Target ratio of near samples in metrics mode.")
     parser.add_argument("--out", type=str, default=None, help="Write metrics JSON to this path")
 
     # Rollout options (only used when --mode rollout)
@@ -1473,6 +1536,7 @@ if __name__ == "__main__":
             seed=args_cli.seed,
             alpha=args_cli.alpha,
             u_clamp=args_cli.u_clamp,
+            near_ratio=args_cli.near_ratio,
         )
         print(json.dumps(metrics, indent=2))
         if args_cli.out is not None:
