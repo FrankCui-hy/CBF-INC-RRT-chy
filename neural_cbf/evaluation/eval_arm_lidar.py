@@ -45,7 +45,13 @@ def init_val(path, args):
 	config_file = ''
 	# config_file = '../../models/env_file/panda_100_8_v1_refined.npz'
 	gui_flag = getattr(args, 'gui', 1)
-	environment = ArmEnv([args.robot_name], GUI=gui_flag, config_file=config_file)
+	environment = ArmEnv(
+		[args.robot_name],
+		GUI=gui_flag,
+		config_file=config_file,
+		obstacle_robot_name=getattr(args, "obstacle_robot_name", "panda"),
+		obstacle_traj_path=getattr(args, "obstacle_traj_path", "data/obstacle_trajs/panda_trajs.npz"),
+	)
 	robot = environment.robot_list[0]
 
 	# Define the dynamics model
@@ -62,6 +68,8 @@ def init_val(path, args):
 		env=environment,
 		robot=robot,
 		observation_type=args.observation_type,
+		include_point_velocity=getattr(args, "include_point_velocity", False),
+		obstacle_horizon_s=getattr(args, "obstacle_horizon_s", 0.2),
 	)
 	dynamics_model.compute_linearized_controller(None)
 
@@ -1300,7 +1308,7 @@ if __name__ == "__main__":
 	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 	args.accelerator = 'cpu'
-	args.n_observation = 1024
+	# Keep n_observation from checkpoint hparams unless explicitly overridden.
 	args.gui = 0
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
