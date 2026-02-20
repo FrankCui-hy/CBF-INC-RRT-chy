@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 import contextlib
 
 import matplotlib.pyplot as plt
-import seaborn
+import json
 
 import pybullet as p
 
@@ -1296,75 +1296,215 @@ def run_moving_obstacle_rollout(
 	return result
 
 
+
+# ---- Offline metrics evaluation helper ----
+@torch.no_grad()
+def eval_metrics_offline(
+    controller: NeuralLidarCBFController,
+    num_samples: int = 2048,
+    batch_size: int = 256,
+    seed: int = 0,
+    alpha: float = None,
+    u_clamp: float = 2.5,
+):
+    """Offline (no rollout) evaluation for A/B.
+
+    This evaluates:
+      - h statistics
+      - QP infeasible / NaN rate (from controller.u)
+      - finite-difference hdot using one-step lookahead: (h(x_next)-h(x))/dt
+      - relaxation term: relu(hdot + alpha*h)
+
+    It avoids datamodule dependencies and does NOT run long rollouts.
+    """
+    controller.eval()
+    dm = controller.dynamics_model
+
+    rng = np.random.default_rng(int(seed))
+    # sample q uniformly in joint limits
+    ul, ll = dm.state_limits  # note: in this repo ul/ll ordering may be (high, low)
+    # ensure shapes are torch tensors
+    ul_t = ul.detach().clone().float().reshape(1, -1)
+    ll_t = ll.detach().clone().float().reshape(1, -1)
+
+    # choose alpha
+    if alpha is None:
+        alpha = float(getattr(controller, "clf_lambda", 1.0))
+
+    n = int(num_samples)
+    bs = int(batch_size)
+
+    h_all = []
+    hdot_all = []
+    relax_all = []
+    infeasible = 0
+    total = 0
+
+    for start in range(0, n, bs):
+        cur_bs = min(bs, n - start)
+        u01 = torch.from_numpy(rng.random((cur_bs, ul_t.shape[1])).astype(np.float32))
+        q = ll_t + (ul_t - ll_t) * u01
+
+        # build datax with observations/aux
+        x = dm.complete_sample_with_observations(q, num_samples=cur_bs)
+
+        # compute control
+        u = controller.u(x)[0]
+        bad = torch.isnan(u).any(dim=1) | torch.isinf(u).any(dim=1)
+        infeasible += int(bad.sum().item())
+        u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
+        u = torch.clamp(u, -float(u_clamp), float(u_clamp))
+
+        # h and one-step FD hdot
+        h = controller.h(x).reshape(-1)
+        x_next = dm.batch_lookahead(x, u * dm.dt, data_jacobian=None)
+        h_next = controller.h(x_next).reshape(-1)
+        hdot = (h_next - h) / float(dm.dt)
+
+        relax = F.relu(hdot + float(alpha) * h)
+
+        h_all.append(h.detach().cpu())
+        hdot_all.append(hdot.detach().cpu())
+        relax_all.append(relax.detach().cpu())
+        total += int(cur_bs)
+
+    h_all = torch.cat(h_all)
+    hdot_all = torch.cat(hdot_all)
+    relax_all = torch.cat(relax_all)
+
+    out = {
+        "num_samples": int(total),
+        "batch_size": int(bs),
+        "seed": int(seed),
+        "alpha": float(alpha),
+        "dt": float(dm.dt),
+        "infeasible_count": int(infeasible),
+        "infeasible_rate": float(infeasible) / float(max(total, 1)),
+        "h_mean": float(h_all.mean().item()),
+        "h_std": float(h_all.std(unbiased=False).item()),
+        "h_p05": float(torch.quantile(h_all, 0.05).item()),
+        "h_p50": float(torch.quantile(h_all, 0.50).item()),
+        "h_p95": float(torch.quantile(h_all, 0.95).item()),
+        "hdot_mean": float(hdot_all.mean().item()),
+        "hdot_std": float(hdot_all.std(unbiased=False).item()),
+        "relax_mean": float(relax_all.mean().item()),
+        "relax_max": float(relax_all.max().item()),
+        "relax_p95": float(torch.quantile(relax_all, 0.95).item()),
+        "relax_zero_rate": float((relax_all <= 0).float().mean().item()),
+    }
+    return out
+
+
 if __name__ == "__main__":
-	# Load the checkpoint file. This should include the experiment suite used during training.
-	robot_name = "panda"
-	log_dir = "./models/neural_cbf/"
-	git_version = f"Franka_Panda_lidar_Dynamics/multiple_seeds/version_2/"
+    parser = argparse.ArgumentParser()
 
-	log_file = "checkpoints/epoch=149-step=189899.ckpt"  # specify the checkpoint file
+    # Required
+    parser.add_argument("--ckpt", type=str, required=True, help="Path to Lightning .ckpt")
 
-	# load arguments from yaml
-	with open(log_dir + git_version + 'hparams.yaml', 'r') as f:
-		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
-	args.accelerator = 'cpu'
-	# Keep n_observation from checkpoint hparams unless explicitly overridden.
-	args.gui = 0
-	# Evaluation-only overrides
-	# Make sure we use the same observation count as the trained checkpoint expects
-	# (if you trained with 64, set 64; if 1024, keep 1024).
-	# args.n_observation = 64
-	args.goal_xyz = [0.55, 0.0, 0.45]
-	# args.simulation_dt = 0.01
-	# args.controller_period = 0.01
-	args.cbf_relaxation_penalty = 50000.
-	args.cbf_alpha = 20
-	# args.dis_threshold = 0.02
-	# args.observation_type = 'uniform_lidar'
+    # Optional overrides (will start from hparams.yaml next to ckpt unless provided)
+    parser.add_argument("--hparams", type=str, default=None, help="Path to hparams.yaml (optional)")
+    parser.add_argument("--robot_name", type=str, default="panda")
 
-	# args.use_bn = 0
+    # Modes
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="metrics",
+        choices=["metrics", "rollout", "contour"],
+        help="metrics=offline stats only (no rollout); rollout=run moving obstacle rollout; contour=plot BF contour",
+    )
 
-	# args.dataset_name = 'prob08_motor'
-	# args.max_episode=100
-	# args.trajectories_per_episode=40
-	# args.trajectory_length=35
+    # Metrics options
+    parser.add_argument("--num_samples", type=int, default=2048)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--u_clamp", type=float, default=2.5)
+    parser.add_argument("--out", type=str, default=None, help="Write metrics JSON to this path")
 
-	neural_controller = init_val(log_dir + git_version + log_file, args)
+    # Rollout options (only used when --mode rollout)
+    parser.add_argument("--t_sim", type=float, default=6.0)
+    parser.add_argument("--speed_scale", type=float, default=1.8)
+    parser.add_argument("--obstacle_mode", type=str, default="arm", choices=["none", "rigid", "arm"])
+    parser.add_argument("--pause_on_collision", action="store_true")
 
-	neural_controller.h_nn.eval()
-	neural_controller.encoder.eval()
-	neural_controller.pc_head.eval()
+    args_cli = parser.parse_args()
 
+    # Resolve hparams.yaml
+    ckpt_path = args_cli.ckpt
+    if args_cli.hparams is not None:
+        hparams_path = args_cli.hparams
+    else:
+        # default: sibling hparams.yaml in the same lightning version dir
+        hparams_path = os.path.join(os.path.dirname(os.path.dirname(ckpt_path)), "hparams.yaml")
+        if not os.path.exists(hparams_path):
+            # fallback: same directory
+            hparams_path = os.path.join(os.path.dirname(ckpt_path), "hparams.yaml")
 
-	# neural_controller.h_alpha=0.3
-	# vis_misclassification(neural_controller, log_path = log_dir+ git_version)
-	# vis_traj_rollout(neural_controller)
+    if not os.path.exists(hparams_path):
+        raise FileNotFoundError(f"hparams.yaml not found: {hparams_path}")
 
-	# 1) Moving obstacle-arm test (remove boxes, keep only obstacle arm)
-	run_moving_obstacle_rollout(
-		neural_controller,
-		t_sim=20.0,
-		move_obstacles=True,
-		seed=0,
-		realtime=True,
-		realtime_scale=1.0,
-		speed_scale=1.8,
-		stop_on_goal=False,
-		goal_tol=0.10,
-		print_every=120,
-		amp_range=(0.08, 0.20),
-		omega_range=(1.2, 3.0),
-		obstacle_mode="arm",
-		obstacle_arm_seed=0,
-		obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
-		obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
-		obstacle_arm_strength=260.0,
-		pause_on_goal=True,
-		goal_pause_tol=1e-4,
-		obstacle_arm_amp_scale=1.4,
-		obstacle_arm_omega_scale=1.0,
-		pause_on_collision=True,
-	)
+    with open(hparams_path, "r") as f:
+        base_args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 
-	# If you still want the contour plot, uncomment:
-	# vis_CBF_contour(neural_controller)
+    # Apply evaluation overrides
+    base_args.accelerator = "cpu"  # controller loads to cpu; your training uses GPU elsewhere
+    base_args.gui = 0
+    base_args.robot_name = args_cli.robot_name
+
+    # Load controller
+    neural_controller = init_val(ckpt_path, base_args)
+
+    # Ensure modules are in eval
+    try:
+        neural_controller.h_nn.eval()
+        neural_controller.encoder.eval()
+        neural_controller.pc_head.eval()
+    except Exception:
+        pass
+
+    mode = args_cli.mode
+
+    if mode == "metrics":
+        metrics = eval_metrics_offline(
+            neural_controller,
+            num_samples=args_cli.num_samples,
+            batch_size=args_cli.batch_size,
+            seed=args_cli.seed,
+            alpha=args_cli.alpha,
+            u_clamp=args_cli.u_clamp,
+        )
+        print(json.dumps(metrics, indent=2))
+        if args_cli.out is not None:
+            os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
+            with open(args_cli.out, "w") as f:
+                json.dump(metrics, f, indent=2)
+
+    elif mode == "contour":
+        vis_CBF_contour(neural_controller)
+
+    elif mode == "rollout":
+        run_moving_obstacle_rollout(
+            neural_controller,
+            t_sim=float(args_cli.t_sim),
+            move_obstacles=True,
+            seed=int(args_cli.seed),
+            realtime=False,
+            realtime_scale=1.0,
+            speed_scale=float(args_cli.speed_scale),
+            stop_on_goal=False,
+            goal_tol=0.10,
+            print_every=120,
+            amp_range=(0.08, 0.20),
+            omega_range=(1.2, 3.0),
+            obstacle_mode=str(args_cli.obstacle_mode),
+            obstacle_arm_seed=int(args_cli.seed),
+            obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
+            obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
+            obstacle_arm_strength=260.0,
+            pause_on_goal=False,
+            goal_pause_tol=1e-4,
+            obstacle_arm_amp_scale=1.4,
+            obstacle_arm_omega_scale=1.0,
+            pause_on_collision=bool(args_cli.pause_on_collision),
+        )
