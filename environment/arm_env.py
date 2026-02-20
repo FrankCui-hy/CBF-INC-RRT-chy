@@ -229,9 +229,28 @@ class ArmEnv:
 		step_idx = int(step_idx % q_trajs.shape[1])
 		q = q_trajs[self.obstacle_traj_idx, step_idx]
 		qdot = qdot_trajs[self.obstacle_traj_idx, step_idx]
-		self.obstacle_robot.set_joint_position(self.obstacle_robot.body_joints, q)
-		self.obstacle_qdot = qdot
-		self.obstacle_traj_step = step_idx
+		try:
+			nj = len(self.obstacle_robot.body_joints)
+			if q.shape[0] != nj:
+				# Handle traj-joint mismatch robustly (truncate/pad).
+				if q.shape[0] > nj:
+					q = q[:nj]
+					qdot = qdot[:nj]
+				else:
+					pad = nj - q.shape[0]
+					q = np.pad(q, (0, pad), mode="constant")
+					qdot = np.pad(qdot, (0, pad), mode="constant")
+			self.obstacle_robot.set_joint_position(self.obstacle_robot.body_joints, q)
+			self.obstacle_qdot = qdot
+			self.obstacle_traj_step = step_idx
+		except Exception:
+			# Obstacle body may have been removed/reloaded by eval logic.
+			if not hasattr(self, "_warned_obstacle_step_invalid"):
+				self._warned_obstacle_step_invalid = True
+				print("[WARN] obstacle trajectory step failed; disabling env obstacle trajectory updates.")
+			self.obstacle_robot = None
+			self.obstacle_traj = None
+			self.obstacle_qdot = None
 
 	def step_obstacle(self, num_steps: int = 1):
 		if self.obstacle_robot is None or self.obstacle_traj is None:
