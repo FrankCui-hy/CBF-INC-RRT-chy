@@ -1301,7 +1301,7 @@ if __name__ == "__main__":
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 	args.accelerator = 'cpu'
 	args.n_observation = 1024
-	args.gui = 1
+	args.gui = 0
 	# Evaluation-only overrides
 	# Make sure we use the same observation count as the trained checkpoint expects
 	# (if you trained with 64, set 64; if 1024, keep 1024).
