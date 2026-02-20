@@ -177,11 +177,11 @@ def init_val(path, args):
 	experiment_suite = ExperimentSuite([rollout_experiment, h_contour_experiment])
 
 	loss_config = {
-		"u_coef_in_training": args.u_coef_in_training,
-		"safe_classification_weight": args.safe_classification_weight,
-		"unsafe_classification_weight": args.unsafe_classification_weight,
-		"descent_violation_weight": args.descent_violation_weight,
-		"hdot_divergence_weight": args.hdot_divergence_weight,
+		"u_coef_in_training": getattr(args, "u_coef_in_training", 5e-1),
+		"safe_classification_weight": getattr(args, "safe_classification_weight", 20.0),
+		"unsafe_classification_weight": getattr(args, "unsafe_classification_weight", 20.0),
+		"descent_violation_weight": getattr(args, "descent_violation_weight", 2.0),
+		"hdot_divergence_weight": getattr(args, "hdot_divergence_weight", 2e-2),
 	}
 	# PyTorch >= 2.6 changed torch.load default to weights_only=True, which can break
 	# older Lightning .ckpt files that contain pickled training state. This checkpoint
@@ -203,15 +203,15 @@ def init_val(path, args):
 	with _torch_load_weights_only_false():
 		return NeuralLidarCBFController.load_from_checkpoint(path, dynamics_model=dynamics_model, scenarios=scenarios,
 														 datamodule=data_module, experiment_suite=experiment_suite,
-														 use_bn=args.use_bn,
-														 cbf_hidden_layers=args.cbf_hidden_layers,
-														 cbf_hidden_size=args.cbf_hidden_size,
-														 cbf_alpha=args.cbf_alpha,
-														 cbf_relaxation_penalty=args.cbf_relaxation_penalty,
-														 feature_dim=args.feature_dim,
-														 per_feature_dim=args.per_feature_dim,
+														 use_bn=getattr(args, "use_bn", False),
+														 cbf_hidden_layers=getattr(args, "cbf_hidden_layers", 2),
+														 cbf_hidden_size=getattr(args, "cbf_hidden_size", 48),
+														 cbf_alpha=getattr(args, "cbf_alpha", 1.0),
+														 cbf_relaxation_penalty=getattr(args, "cbf_relaxation_penalty", 5000.0),
+														 feature_dim=getattr(args, "feature_dim", 32),
+														 per_feature_dim=getattr(args, "per_feature_dim", 64),
 														 loss_config=loss_config,
-														 controller_period=args.controller_period,
+														 controller_period=getattr(args, "controller_period", 1 / 30),
 														 all_hparams=args,
 														 use_neural_actor=0,
 														 map_location='cpu')
