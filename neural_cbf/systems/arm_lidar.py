@@ -233,11 +233,28 @@ class ArmLidar(ArmDynamics):
             p_r = torch.tensor(x_fk[i][1], device=state.device)
             state_aux.append(torch.cat((p_p.reshape(1, -1), p_r.reshape(1, -1)), dim=1))
         aux = torch.cat(state_aux, dim=0).reshape(-1)
-        if self.env is not None and self.env.obstacle_robot is not None:
-            q_obs = self.env.get_obstacle_q()
-            qdot_obs = self.env.get_obstacle_qdot()
-            traj_idx = float(self.env.obstacle_traj_idx)
-            step_idx = float(self.env.obstacle_traj_step)
+        # Keep auxiliary layout length stable even when obstacle handles are invalid at eval time.
+        if self.obstacle_qdot_dim > 0:
+            q_obs = None
+            qdot_obs = None
+            traj_idx = 0.0
+            step_idx = 0.0
+            if self.env is not None:
+                try:
+                    q_obs = self.env.get_obstacle_q()
+                except Exception:
+                    q_obs = None
+                try:
+                    qdot_obs = self.env.get_obstacle_qdot()
+                except Exception:
+                    qdot_obs = None
+                traj_idx = float(getattr(self.env, "obstacle_traj_idx", 0))
+                step_idx = float(getattr(self.env, "obstacle_traj_step", 0))
+            if q_obs is None:
+                q_obs = np.zeros((self.obstacle_q_dim,), dtype=np.float32)
+            if qdot_obs is None:
+                qdot_obs = np.zeros((self.obstacle_qdot_dim,), dtype=np.float32)
+
             aux = torch.cat(
                 (
                     aux,
@@ -247,6 +264,17 @@ class ArmLidar(ArmDynamics):
                 ),
                 dim=0,
             )
+        # Final guard for any unexpected mismatch.
+        if aux.shape[0] != self.state_aux_dims_in_dataset:
+            if aux.shape[0] < self.state_aux_dims_in_dataset:
+                pad = torch.zeros(
+                    (self.state_aux_dims_in_dataset - aux.shape[0],),
+                    device=aux.device,
+                    dtype=aux.dtype,
+                )
+                aux = torch.cat((aux, pad), dim=0)
+            else:
+                aux = aux[: self.state_aux_dims_in_dataset]
         return aux
 
     def get_jacobian(self, state):
