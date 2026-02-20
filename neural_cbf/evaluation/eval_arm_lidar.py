@@ -1332,7 +1332,7 @@ def eval_metrics_offline(
 
     # choose alpha
     if alpha is None:
-        alpha = float(getattr(controller, "clf_lambda", 1.0))
+        alpha = float(getattr(controller, "cbf_alpha", getattr(controller, "clf_lambda", 1.0)))
     dt_eval = float(getattr(dm, "controller_dt", dm.dt))
     near_ratio = float(max(0.0, min(1.0, near_ratio)))
 
@@ -1345,38 +1345,49 @@ def eval_metrics_offline(
     relu_hdot_all = []
     relu_ah_all = []
     near_mask_all = []
+    diag_all = {
+        "odot_err_p": [],
+        "odot_err_n": [],
+        "odot_err_m": [],
+        "hdot_err": [],
+    }
     infeasible = 0
     total = 0
 
     for start in range(0, n, bs):
         cur_bs = min(bs, n - start)
         near_target = int(round(cur_bs * near_ratio))
-        q_chunks = []
-        if near_target > 0:
-            near_collected = 0
+        far_target = cur_bs - near_target
+
+        def _collect_q(target: int, want_near: bool) -> list[torch.Tensor]:
+            if target <= 0:
+                return []
+            chunks = []
+            collected = 0
             tries = 0
-            max_tries = max(100, near_target * 30)
-            while near_collected < near_target and tries < max_tries:
+            max_tries = max(120, target * 40)
+            while collected < target and tries < max_tries:
                 tries += 1
-                cbs = min(64, near_target - near_collected)
+                cbs = min(64, target - collected)
                 u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
                 q_try = ll_t + (ul_t - ll_t) * u01
                 x_try = dm.complete_sample_with_observations(q_try, num_samples=cbs)
                 near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
-                if near_try.any():
-                    keep = q_try[near_try]
-                    take = min(near_target - near_collected, keep.shape[0])
-                    q_chunks.append(keep[:take])
-                    near_collected += take
-            if near_collected < near_target:
-                cbs = near_target - near_collected
+                keep_mask = near_try if want_near else (~near_try)
+                if keep_mask.any():
+                    keep = q_try[keep_mask]
+                    take = min(target - collected, keep.shape[0])
+                    chunks.append(keep[:take])
+                    collected += take
+            if collected < target:
+                # fallback fill to keep batch size constant
+                cbs = target - collected
                 u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
-                q_chunks.append(ll_t + (ul_t - ll_t) * u01)
-        far_target = cur_bs - sum(int(qc.shape[0]) for qc in q_chunks)
-        if far_target > 0:
-            u01 = torch.from_numpy(rng.random((far_target, ul_t.shape[1])).astype(np.float32))
-            q_chunks.append(ll_t + (ul_t - ll_t) * u01)
-        q = torch.cat(q_chunks, dim=0) if len(q_chunks) else torch.empty((0, ul_t.shape[1]))
+                chunks.append(ll_t + (ul_t - ll_t) * u01)
+            return chunks
+
+        q_chunks = _collect_q(near_target, True) + _collect_q(far_target, False)
+        q = torch.cat(q_chunks, dim=0)
 
         # build datax with observations/aux
         x = dm.complete_sample_with_observations(q, num_samples=cur_bs)
@@ -1398,6 +1409,16 @@ def eval_metrics_offline(
         relu_hdot = F.relu(hdot)
         relu_ah = F.relu(float(alpha) * h)
         relax = F.relu(hdot + float(alpha) * h)
+
+        if hasattr(controller, "derivative_diagnostics"):
+            try:
+                d = controller.derivative_diagnostics(x, u)
+            except Exception:
+                d = None
+            if d is not None:
+                for k in diag_all.keys():
+                    if k in d and d[k] is not None:
+                        diag_all[k].append(float(d[k]))
 
         h_all.append(h.detach().cpu())
         hdot_all.append(hdot.detach().cpu())
@@ -1454,6 +1475,14 @@ def eval_metrics_offline(
         "near": _bucket_stats(near_mask_all),
         "far": _bucket_stats(far_mask_all),
     }
+    for k, vals in diag_all.items():
+        if len(vals) > 0:
+            arr = torch.tensor(vals, dtype=torch.float32)
+            out[f"{k}_mean"] = float(arr.mean().item())
+            out[f"{k}_p95"] = float(torch.quantile(arr, 0.95).item())
+        else:
+            out[f"{k}_mean"] = None
+            out[f"{k}_p95"] = None
     return out
 
 
