@@ -1307,6 +1307,7 @@ def eval_metrics_offline(
     alpha: float = None,
     u_clamp: float = 2.5,
     near_ratio: float = 0.0,
+    fd_eps_list: str = "1e-2,5e-3,1e-3",
 ):
     """Offline (no rollout) evaluation for A/B.
 
@@ -1345,6 +1346,21 @@ def eval_metrics_offline(
     relu_hdot_all = []
     relu_ah_all = []
     near_mask_all = []
+    hdot_auto_all = []
+    fd_eps_values = []
+    for token in str(fd_eps_list).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            val = float(token)
+            if val > 0:
+                fd_eps_values.append(val)
+        except Exception:
+            continue
+    fd_eps_values = sorted(set(fd_eps_values), reverse=True)
+    hdot_fd_scan = {eps: [] for eps in fd_eps_values}
+    hdot_auto_err_scan = {eps: [] for eps in fd_eps_values}
     diag_all = {
         "odot_err_p": [],
         "odot_err_n": [],
@@ -1405,6 +1421,23 @@ def eval_metrics_offline(
         x_next = dm.batch_lookahead(x, u * dt_eval, data_jacobian=())
         h_next = controller.h(x_next).reshape(-1)
         hdot = (h_next - h) / dt_eval
+        hdot_auto = None
+        if hasattr(controller, "_compute_hdot_auto"):
+            try:
+                hdot_auto = controller._compute_hdot_auto(x, u)
+            except Exception:
+                hdot_auto = None
+        if hdot_auto is not None:
+            hdot_auto = hdot_auto.reshape(-1)
+            hdot_auto_all.append(hdot_auto.detach().cpu())
+
+        for eps in fd_eps_values:
+            x_eps = dm.batch_lookahead(x, u * float(eps), data_jacobian=())
+            h_eps = controller.h(x_eps).reshape(-1)
+            hdot_fd_eps = (h_eps - h) / float(eps)
+            hdot_fd_scan[eps].append(hdot_fd_eps.detach().cpu())
+            if hdot_auto is not None:
+                hdot_auto_err_scan[eps].append((hdot_auto - hdot_fd_eps).abs().detach().cpu())
 
         relu_hdot = F.relu(hdot)
         relu_ah = F.relu(float(alpha) * h)
@@ -1435,6 +1468,8 @@ def eval_metrics_offline(
     relax_all = torch.cat(relax_all)
     near_mask_all = torch.cat(near_mask_all).bool()
     far_mask_all = ~near_mask_all
+    if len(hdot_auto_all) > 0:
+        hdot_auto_all = torch.cat(hdot_auto_all)
 
     def _bucket_stats(mask: torch.Tensor):
         if mask.sum().item() == 0:
@@ -1475,6 +1510,36 @@ def eval_metrics_offline(
         "near": _bucket_stats(near_mask_all),
         "far": _bucket_stats(far_mask_all),
     }
+    if isinstance(hdot_auto_all, torch.Tensor):
+        out["hdot_auto_mean"] = float(hdot_auto_all.mean().item())
+        out["hdot_auto_std"] = float(hdot_auto_all.std(unbiased=False).item())
+        out["hdot_auto_fd_dt_mae"] = float((hdot_auto_all - hdot_all).abs().mean().item())
+    else:
+        out["hdot_auto_mean"] = None
+        out["hdot_auto_std"] = None
+        out["hdot_auto_fd_dt_mae"] = None
+
+    fd_scan_out = {}
+    for eps in fd_eps_values:
+        vals = hdot_fd_scan.get(eps, [])
+        if len(vals) == 0:
+            continue
+        v = torch.cat(vals)
+        item = {
+            "hdot_fd_mean": float(v.mean().item()),
+            "hdot_fd_std": float(v.std(unbiased=False).item()),
+        }
+        errs = hdot_auto_err_scan.get(eps, [])
+        if len(errs) > 0:
+            e = torch.cat(errs)
+            item["mae_vs_hdot_auto"] = float(e.mean().item())
+            item["p95_vs_hdot_auto"] = float(torch.quantile(e, 0.95).item())
+        else:
+            item["mae_vs_hdot_auto"] = None
+            item["p95_vs_hdot_auto"] = None
+        fd_scan_out[f"{eps:g}"] = item
+    out["fd_eps_scan"] = fd_scan_out
+
     for k, vals in diag_all.items():
         if len(vals) > 0:
             arr = torch.tensor(vals, dtype=torch.float32)
@@ -1512,6 +1577,8 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=None)
     parser.add_argument("--u_clamp", type=float, default=2.5)
     parser.add_argument("--near_ratio", type=float, default=0.0, help="Target ratio of near samples in metrics mode.")
+    parser.add_argument("--fd_eps_list", type=str, default="1e-2,5e-3,1e-3",
+                        help="Comma-separated eps values for FD hdot scan, e.g. '1e-2,5e-3,1e-3'.")
     parser.add_argument("--out", type=str, default=None, help="Write metrics JSON to this path")
 
     # Rollout options (only used when --mode rollout)
@@ -1566,6 +1633,7 @@ if __name__ == "__main__":
             alpha=args_cli.alpha,
             u_clamp=args_cli.u_clamp,
             near_ratio=args_cli.near_ratio,
+            fd_eps_list=args_cli.fd_eps_list,
         )
         print(json.dumps(metrics, indent=2))
         if args_cli.out is not None:
