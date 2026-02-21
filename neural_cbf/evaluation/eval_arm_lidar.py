@@ -1370,44 +1370,95 @@ def eval_metrics_offline(
     infeasible = 0
     total = 0
 
+    ratio_warned = False
+
+    def _random_state(batch_n: int) -> torch.Tensor:
+        u01 = torch.from_numpy(rng.random((batch_n, ul_t.shape[1])).astype(np.float32))
+        q = ll_t + (ul_t - ll_t) * u01
+        return dm.complete_sample_with_observations(q, num_samples=batch_n)
+
+    def _collect_x(target: int, want_near: bool) -> torch.Tensor:
+        if target <= 0:
+            return torch.zeros((0, dm.n_dims + dm.o_dims_in_dataset + dm.state_aux_dims_in_dataset), dtype=torch.float32)
+        chunks = []
+        collected = 0
+        tries = 0
+        max_tries = max(200, target * 60)
+        while collected < target and tries < max_tries:
+            tries += 1
+            cbs = min(64, target - collected)
+            # Use task-aware samplers first to avoid near/far collapse.
+            if want_near:
+                if tries % 2 == 0:
+                    x_try = dm.sample_unsafe(cbs, max_tries=30)
+                else:
+                    x_try = dm.sample_boundary(cbs, max_tries=30)
+            else:
+                x_try = dm.sample_safe(cbs, max_tries=40)
+            near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
+            keep_mask = near_try if want_near else (~near_try)
+            if keep_mask.any():
+                keep = x_try[keep_mask]
+                take = min(target - collected, keep.shape[0])
+                chunks.append(keep[:take])
+                collected += take
+
+        # Last-resort random rejection sampling.
+        while collected < target and tries < (max_tries + 300):
+            tries += 1
+            cbs = min(128, target - collected)
+            x_try = _random_state(cbs)
+            near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
+            keep_mask = near_try if want_near else (~near_try)
+            if keep_mask.any():
+                keep = x_try[keep_mask]
+                take = min(target - collected, keep.shape[0])
+                chunks.append(keep[:take])
+                collected += take
+
+        if len(chunks) == 0:
+            return torch.zeros((0, dm.n_dims + dm.o_dims_in_dataset + dm.state_aux_dims_in_dataset), dtype=torch.float32)
+
+        x_cat = torch.cat(chunks, dim=0)
+        if x_cat.shape[0] < target:
+            pad_idx = torch.randint(low=0, high=x_cat.shape[0], size=(target - x_cat.shape[0],))
+            x_cat = torch.cat([x_cat, x_cat[pad_idx]], dim=0)
+        return x_cat[:target]
+
     for start in range(0, n, bs):
         cur_bs = min(bs, n - start)
         near_target = int(round(cur_bs * near_ratio))
         far_target = cur_bs - near_target
 
-        def _collect_q(target: int, want_near: bool) -> list[torch.Tensor]:
-            if target <= 0:
-                return []
-            chunks = []
-            collected = 0
-            tries = 0
-            max_tries = max(120, target * 40)
-            while collected < target and tries < max_tries:
-                tries += 1
-                cbs = min(64, target - collected)
-                u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
-                q_try = ll_t + (ul_t - ll_t) * u01
-                x_try = dm.complete_sample_with_observations(q_try, num_samples=cbs)
-                near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
-                keep_mask = near_try if want_near else (~near_try)
-                if keep_mask.any():
-                    keep = q_try[keep_mask]
-                    take = min(target - collected, keep.shape[0])
-                    chunks.append(keep[:take])
-                    collected += take
-            if collected < target:
-                # fallback fill to keep batch size constant
-                cbs = target - collected
-                u01 = torch.from_numpy(rng.random((cbs, ul_t.shape[1])).astype(np.float32))
-                chunks.append(ll_t + (ul_t - ll_t) * u01)
-            return chunks
+        x_near = _collect_x(near_target, True)
+        x_far = _collect_x(far_target, False)
 
-        q_chunks = _collect_q(near_target, True) + _collect_q(far_target, False)
-        q = torch.cat(q_chunks, dim=0)
+        # If one bucket is empty, fallback to random states to keep eval running.
+        if x_near.shape[0] == 0 and near_target > 0:
+            x_near = _random_state(near_target)
+        if x_far.shape[0] == 0 and far_target > 0:
+            x_far = _random_state(far_target)
 
-        # build datax with observations/aux
-        x = dm.complete_sample_with_observations(q, num_samples=cur_bs)
+        x = torch.cat([x_near, x_far], dim=0)
+        if x.shape[0] != cur_bs:
+            # final guard: trim/pad with random states
+            if x.shape[0] > cur_bs:
+                x = x[:cur_bs]
+            else:
+                x = torch.cat([x, _random_state(cur_bs - x.shape[0])], dim=0)
+
+        # shuffle batch so controller doesn't see ordered near/far chunks
+        perm = torch.randperm(x.shape[0])
+        x = x[perm]
         near_mask = dm.boundary_mask(x) | dm.unsafe_mask(x)
+        if (near_ratio > 0.0 and near_ratio < 1.0) and (not ratio_warned):
+            realized = float(near_mask.float().mean().item())
+            if abs(realized - near_ratio) > 0.15:
+                print(
+                    f"[metrics][WARN] near_ratio target={near_ratio:.3f}, realized_batch={realized:.3f}. "
+                    f"Try smaller batch_size or adjust near definition."
+                )
+                ratio_warned = True
 
         # compute control
         u = controller.u(x)[0]
