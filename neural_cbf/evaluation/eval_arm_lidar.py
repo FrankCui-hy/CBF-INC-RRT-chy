@@ -1388,13 +1388,23 @@ def eval_metrics_offline(
             tries += 1
             cbs = min(64, target - collected)
             # Use task-aware samplers first to avoid near/far collapse.
-            if want_near:
-                if tries % 2 == 0:
-                    x_try = dm.sample_unsafe(cbs, max_tries=30)
+            x_try = None
+            try:
+                if want_near:
+                    if tries % 2 == 0:
+                        x_try = dm.sample_unsafe(cbs, max_tries=30)
+                    else:
+                        x_try = dm.sample_boundary(cbs, max_tries=30)
                 else:
-                    x_try = dm.sample_boundary(cbs, max_tries=30)
-            else:
-                x_try = dm.sample_safe(cbs, max_tries=40)
+                    x_try = dm.sample_safe(cbs, max_tries=40)
+            except RuntimeWarning:
+                # Some samplers raise RuntimeWarning as exception when they can't
+                # collect enough points; fallback to random rejection sampling.
+                x_try = None
+            except Exception:
+                x_try = None
+            if x_try is None:
+                x_try = _random_state(cbs)
             near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
             keep_mask = near_try if want_near else (~near_try)
             if keep_mask.any():
