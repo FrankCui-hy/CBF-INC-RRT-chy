@@ -1308,6 +1308,7 @@ def eval_metrics_offline(
     u_clamp: float = 2.5,
     near_ratio: float = 0.0,
     fd_eps_list: str = "1e-2,5e-3,1e-3",
+    near_mode: str = "boundary_or_unsafe",
 ):
     """Offline (no rollout) evaluation for A/B.
 
@@ -1377,6 +1378,14 @@ def eval_metrics_offline(
         q = ll_t + (ul_t - ll_t) * u01
         return dm.complete_sample_with_observations(q, num_samples=batch_n)
 
+    def _near_mask(x_in: torch.Tensor) -> torch.Tensor:
+        mode = str(near_mode).lower()
+        if mode == "unsafe_only":
+            return dm.unsafe_mask(x_in)
+        if mode == "boundary_only":
+            return dm.boundary_mask(x_in)
+        return dm.boundary_mask(x_in) | dm.unsafe_mask(x_in)
+
     def _collect_x(target: int, want_near: bool) -> torch.Tensor:
         if target <= 0:
             return torch.zeros((0, dm.n_dims + dm.o_dims_in_dataset + dm.state_aux_dims_in_dataset), dtype=torch.float32)
@@ -1405,7 +1414,7 @@ def eval_metrics_offline(
                 x_try = None
             if x_try is None:
                 x_try = _random_state(cbs)
-            near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
+            near_try = _near_mask(x_try)
             keep_mask = near_try if want_near else (~near_try)
             if keep_mask.any():
                 keep = x_try[keep_mask]
@@ -1418,7 +1427,7 @@ def eval_metrics_offline(
             tries += 1
             cbs = min(128, target - collected)
             x_try = _random_state(cbs)
-            near_try = dm.boundary_mask(x_try) | dm.unsafe_mask(x_try)
+            near_try = _near_mask(x_try)
             keep_mask = near_try if want_near else (~near_try)
             if keep_mask.any():
                 keep = x_try[keep_mask]
@@ -1460,7 +1469,7 @@ def eval_metrics_offline(
         # shuffle batch so controller doesn't see ordered near/far chunks
         perm = torch.randperm(x.shape[0])
         x = x[perm]
-        near_mask = dm.boundary_mask(x) | dm.unsafe_mask(x)
+        near_mask = _near_mask(x)
         if (near_ratio > 0.0 and near_ratio < 1.0) and (not ratio_warned):
             realized = float(near_mask.float().mean().item())
             if abs(realized - near_ratio) > 0.15:
@@ -1551,6 +1560,7 @@ def eval_metrics_offline(
         "dt": float(dt_eval),
         "near_ratio_target": float(near_ratio),
         "near_ratio_realized": float(near_mask_all.float().mean().item()),
+        "near_mode": str(near_mode),
         "infeasible_count": int(infeasible),
         "infeasible_rate": float(infeasible) / float(max(total, 1)),
         "h_mean": float(h_all.mean().item()),
@@ -1638,8 +1648,21 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=None)
     parser.add_argument("--u_clamp", type=float, default=2.5)
     parser.add_argument("--near_ratio", type=float, default=0.0, help="Target ratio of near samples in metrics mode.")
+    parser.add_argument(
+        "--near_mode",
+        type=str,
+        default="boundary_or_unsafe",
+        choices=["boundary_or_unsafe", "unsafe_only", "boundary_only"],
+        help="Definition of near set for metrics sampling/bucketing.",
+    )
     parser.add_argument("--fd_eps_list", type=str, default="1e-2,5e-3,1e-3",
                         help="Comma-separated eps values for FD hdot scan, e.g. '1e-2,5e-3,1e-3'.")
+    parser.add_argument(
+        "--obstacle_horizon_s",
+        type=float,
+        default=None,
+        help="Override obstacle horizon (seconds) for safe/unsafe masks. Use 0 for current-step-only masks.",
+    )
     parser.add_argument("--out", type=str, default=None, help="Write metrics JSON to this path")
 
     # Rollout options (only used when --mode rollout)
@@ -1671,6 +1694,8 @@ if __name__ == "__main__":
     base_args.accelerator = "cpu"  # controller loads to cpu; your training uses GPU elsewhere
     base_args.gui = 0
     base_args.robot_name = args_cli.robot_name
+    if args_cli.obstacle_horizon_s is not None:
+        base_args.obstacle_horizon_s = float(args_cli.obstacle_horizon_s)
 
     # Load controller
     neural_controller = init_val(ckpt_path, base_args)
@@ -1694,6 +1719,7 @@ if __name__ == "__main__":
             alpha=args_cli.alpha,
             u_clamp=args_cli.u_clamp,
             near_ratio=args_cli.near_ratio,
+            near_mode=args_cli.near_mode,
             fd_eps_list=args_cli.fd_eps_list,
         )
         print(json.dumps(metrics, indent=2))

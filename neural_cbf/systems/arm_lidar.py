@@ -525,8 +525,6 @@ class ArmLidar(ArmDynamics):
             step_idx = torch.full((x.shape[0],), float(self.env.obstacle_traj_step), device=x.device)
         else:
             _, traj_idx, step_idx = self.get_obstacle_meta_from_datax(x)
-        horizon_steps = int(np.ceil(self.obstacle_horizon_s / self.env.obstacle_traj_dt))
-
         for i in range(x.shape[0]):
             self.robot.set_joint_position(self.robot.body_joints, x[i, : self.q_dims])
             if not self.robot.check_self_collision_free():
@@ -536,14 +534,11 @@ class ArmLidar(ArmDynamics):
             traj_i = int(traj_idx[i].item())
             step_i = int(step_idx[i].item())
             self.env.obstacle_traj_idx = traj_i
-
-            is_safe = True
-            for k in range(horizon_steps + 1):
-                self.env.apply_obstacle_step(step_i + k)
-                if self.env.robots_within_distance(self.robot, self.env.obstacle_robot, self.dis_threshold):
-                    is_safe = False
-                    break
-            safe_mask[i] = is_safe
+            # Standard-aligned criterion: check safety at current state only.
+            self.env.apply_obstacle_step(step_i)
+            safe_mask[i] = not self.env.robots_within_distance(
+                self.robot, self.env.obstacle_robot, self.dis_threshold
+            )
 
         return safe_mask
 
@@ -562,21 +557,14 @@ class ArmLidar(ArmDynamics):
             step_idx = torch.full((x.shape[0],), float(self.env.obstacle_traj_step), device=x.device)
         else:
             _, traj_idx, step_idx = self.get_obstacle_meta_from_datax(x)
-        horizon_steps = int(np.ceil(self.obstacle_horizon_s / self.env.obstacle_traj_dt))
-
         for i in range(x.shape[0]):
             self.robot.set_joint_position(self.robot.body_joints, x[i, : self.q_dims])
             traj_i = int(traj_idx[i].item())
             step_i = int(step_idx[i].item())
             self.env.obstacle_traj_idx = traj_i
-
-            is_unsafe = False
-            for k in range(horizon_steps + 1):
-                self.env.apply_obstacle_step(step_i + k)
-                if self.env.robots_in_contact(self.robot, self.env.obstacle_robot):
-                    is_unsafe = True
-                    break
-            unsafe_mask[i] = is_unsafe
+            # Standard-aligned criterion: check unsafety at current state only.
+            self.env.apply_obstacle_step(step_i)
+            unsafe_mask[i] = self.env.robots_in_contact(self.robot, self.env.obstacle_robot)
 
         return unsafe_mask
 
