@@ -1309,6 +1309,7 @@ def eval_metrics_offline(
     near_ratio: float = 0.0,
     fd_eps_list: str = "1e-2,5e-3,1e-3",
     near_mode: str = "boundary_or_unsafe",
+    fd_obs_source: str = "model",
 ):
     """Offline (no rollout) evaluation for A/B.
 
@@ -1344,6 +1345,8 @@ def eval_metrics_offline(
     h_all = []
     hdot_all = []
     relax_all = []
+    relax_auto_all = []
+    relax_fd_all = []
     relu_hdot_all = []
     relu_ah_all = []
     near_mask_all = []
@@ -1385,6 +1388,20 @@ def eval_metrics_offline(
         if mode == "boundary_only":
             return dm.boundary_mask(x_in)
         return dm.boundary_mask(x_in) | dm.unsafe_mask(x_in)
+
+    def _h_eval(x_in: torch.Tensor) -> torch.Tensor:
+        src = str(fd_obs_source).lower()
+        if src != "raw":
+            return controller.h(x_in).reshape(-1)
+        if not hasattr(controller, "use_gphi_chain"):
+            return controller.h(x_in).reshape(-1)
+        prev = bool(getattr(controller, "use_gphi_chain", False))
+        try:
+            # Evaluate h on raw observation (no gphi replacement).
+            controller.use_gphi_chain = False
+            return controller.h(x_in).reshape(-1)
+        finally:
+            controller.use_gphi_chain = prev
 
     def _collect_x(target: int, want_near: bool) -> torch.Tensor:
         if target <= 0:
@@ -1487,9 +1504,9 @@ def eval_metrics_offline(
         u = torch.clamp(u, -float(u_clamp), float(u_clamp))
 
         # h and one-step FD hdot
-        h = controller.h(x).reshape(-1)
+        h = _h_eval(x)
         x_next = dm.batch_lookahead(x, u * dt_eval, data_jacobian=())
-        h_next = controller.h(x_next).reshape(-1)
+        h_next = _h_eval(x_next)
         hdot = (h_next - h) / dt_eval
         hdot_auto = None
         if hasattr(controller, "_compute_hdot_auto"):
@@ -1512,6 +1529,10 @@ def eval_metrics_offline(
         relu_hdot = F.relu(hdot)
         relu_ah = F.relu(float(alpha) * h)
         relax = F.relu(hdot + float(alpha) * h)
+        if hdot_auto is not None:
+            relax_auto = F.relu(hdot_auto + float(alpha) * h)
+            relax_auto_all.append(relax_auto.detach().cpu())
+            relax_fd_all.append(relax.detach().cpu())
 
         if hasattr(controller, "derivative_diagnostics"):
             try:
@@ -1540,6 +1561,9 @@ def eval_metrics_offline(
     far_mask_all = ~near_mask_all
     if len(hdot_auto_all) > 0:
         hdot_auto_all = torch.cat(hdot_auto_all)
+    if len(relax_auto_all) > 0:
+        relax_auto_all = torch.cat(relax_auto_all)
+        relax_fd_all = torch.cat(relax_fd_all)
 
     def _bucket_stats(mask: torch.Tensor):
         if mask.sum().item() == 0:
@@ -1561,6 +1585,7 @@ def eval_metrics_offline(
         "near_ratio_target": float(near_ratio),
         "near_ratio_realized": float(near_mask_all.float().mean().item()),
         "near_mode": str(near_mode),
+        "fd_obs_source": str(fd_obs_source),
         "infeasible_count": int(infeasible),
         "infeasible_rate": float(infeasible) / float(max(total, 1)),
         "h_mean": float(h_all.mean().item()),
@@ -1585,10 +1610,24 @@ def eval_metrics_offline(
         out["hdot_auto_mean"] = float(hdot_auto_all.mean().item())
         out["hdot_auto_std"] = float(hdot_auto_all.std(unbiased=False).item())
         out["hdot_auto_fd_dt_mae"] = float((hdot_auto_all - hdot_all).abs().mean().item())
+        out["relax_auto_mean"] = float(relax_auto_all.mean().item())
+        out["relax_auto_p95"] = float(torch.quantile(relax_auto_all, 0.95).item())
+        out["relax_auto_zero_rate"] = float((relax_auto_all <= 0).float().mean().item())
+        out["relax_fd_mean_same_u"] = float(relax_fd_all.mean().item())
+        out["relax_fd_p95_same_u"] = float(torch.quantile(relax_fd_all, 0.95).item())
+        out["relax_fd_zero_rate_same_u"] = float((relax_fd_all <= 0).float().mean().item())
+        out["relax_auto_lt_fd_rate"] = float((relax_auto_all < relax_fd_all).float().mean().item())
     else:
         out["hdot_auto_mean"] = None
         out["hdot_auto_std"] = None
         out["hdot_auto_fd_dt_mae"] = None
+        out["relax_auto_mean"] = None
+        out["relax_auto_p95"] = None
+        out["relax_auto_zero_rate"] = None
+        out["relax_fd_mean_same_u"] = None
+        out["relax_fd_p95_same_u"] = None
+        out["relax_fd_zero_rate_same_u"] = None
+        out["relax_auto_lt_fd_rate"] = None
 
     fd_scan_out = {}
     for eps in fd_eps_values:
@@ -1658,6 +1697,13 @@ if __name__ == "__main__":
     parser.add_argument("--fd_eps_list", type=str, default="1e-2,5e-3,1e-3",
                         help="Comma-separated eps values for FD hdot scan, e.g. '1e-2,5e-3,1e-3'.")
     parser.add_argument(
+        "--fd_obs_source",
+        type=str,
+        default="model",
+        choices=["model", "raw"],
+        help="Observation source used when computing FD hdot. model=controller.h as-is; raw=temporarily disable gphi replacement for h eval.",
+    )
+    parser.add_argument(
         "--obstacle_horizon_s",
         type=float,
         default=None,
@@ -1721,6 +1767,7 @@ if __name__ == "__main__":
             near_ratio=args_cli.near_ratio,
             near_mode=args_cli.near_mode,
             fd_eps_list=args_cli.fd_eps_list,
+            fd_obs_source=args_cli.fd_obs_source,
         )
         print(json.dumps(metrics, indent=2))
         if args_cli.out is not None:
