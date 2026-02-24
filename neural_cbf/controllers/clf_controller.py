@@ -511,7 +511,7 @@ class CLFController(Controller):
 
 		# Figure out if we need to use a differentiable solver (determined by whether
 		# the input x requires a gradient or not)
-		if requires_grad:
+		if True:  # requires_grad
 			sol = self._solve_CLF_QP_cvxpylayers(
 				x, u_ref, V, Lf_V, Lg_V, relaxation_penalty
 			)
