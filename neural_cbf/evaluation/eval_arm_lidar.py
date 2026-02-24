@@ -970,6 +970,7 @@ def run_moving_obstacle_rollout(
 	require_clean_start: bool = True,
 	max_start_resample: int = 30,
 	start_min_clearance: float = 0.01,
+	start_q_override: np.ndarray = None,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1038,7 +1039,10 @@ def run_moving_obstacle_rollout(
 		if len(obstacle_ids) == 0:
 			print("[ROLL] WARNING: obstacle_ids is empty after filtering; obstacles will not move and collision checks will be skipped.")
 
-	if start_x is None:
+	if start_q_override is not None:
+		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
+		x = dm.complete_sample_with_observations(q0, num_samples=1)
+	elif start_x is None:
 		# Fallback: start near mid of limits
 		ul, ll = dm.state_limits
 		q0 = torch.lerp(ll, ul, 0.4 * torch.ones(ll.shape[-1]).double()).reshape(1, -1).float()
@@ -1062,6 +1066,8 @@ def run_moving_obstacle_rollout(
 			"skipped": True,
 			"skip_reason": "no_clean_start",
 			"seed": int(seed),
+			"start_q": start_q_override.tolist() if isinstance(start_q_override, np.ndarray) else None,
+			"clean_start": False,
 			"steps_ran": 0,
 			"min_dist_min": None,
 			"min_dist_mean": None,
@@ -1081,6 +1087,7 @@ def run_moving_obstacle_rollout(
 
 	# Ensure robot is in sync with x at t=0
 	q = x[0, :dm.n_dims]
+	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
@@ -1272,6 +1279,8 @@ def run_moving_obstacle_rollout(
 		"move_obstacles": move_obstacles,
 		"seed": seed,
 		"t_sim": t_sim,
+		"start_q": q.detach().cpu().tolist(),
+		"clean_start": True,
 		"steps_ran": (collide_step if collided else (k + 1)),
 		"collided": collided,
 		"min_dist_min": float(np.min(min_dist_hist)) if len(min_dist_hist) else None,
@@ -1753,6 +1762,12 @@ if __name__ == "__main__":
     parser.add_argument("--obstacle_mode", type=str, default="arm", choices=["none", "rigid", "arm"])
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
+        "--start_q",
+        type=str,
+        default=None,
+        help="Optional fixed start q as comma-separated values, e.g. '0.1,0.2,...' (length = q_dims).",
+    )
+    parser.add_argument(
         "--allow_dirty_start",
         action="store_true",
         help="Allow rollout to proceed even if a collision-free start cannot be found.",
@@ -1832,7 +1847,19 @@ if __name__ == "__main__":
         vis_CBF_contour(neural_controller)
 
     elif mode == "rollout":
-        run_moving_obstacle_rollout(
+        start_q_override = None
+        if args_cli.start_q is not None:
+            toks = [t.strip() for t in str(args_cli.start_q).split(",") if t.strip() != ""]
+            try:
+                vals = np.array([float(t) for t in toks], dtype=np.float32)
+            except Exception as e:
+                raise ValueError(f"Invalid --start_q: {args_cli.start_q}") from e
+            q_dims = int(neural_controller.dynamics_model.n_dims)
+            if vals.shape[0] != q_dims:
+                raise ValueError(f"--start_q length must be {q_dims}, got {vals.shape[0]}")
+            start_q_override = vals
+
+        rollout_result = run_moving_obstacle_rollout(
             neural_controller,
             t_sim=float(args_cli.t_sim),
             move_obstacles=True,
@@ -1858,4 +1885,9 @@ if __name__ == "__main__":
             require_clean_start=not bool(args_cli.allow_dirty_start),
             max_start_resample=int(args_cli.max_start_resample),
             start_min_clearance=float(args_cli.start_min_clearance),
+            start_q_override=start_q_override,
         )
+        if args_cli.out is not None:
+            os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
+            with open(args_cli.out, "w") as f:
+                json.dump(rollout_result, f, indent=2)
