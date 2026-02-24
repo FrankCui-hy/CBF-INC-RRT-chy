@@ -874,7 +874,8 @@ def _get_arm_ee_pos(body_id: int, ee_link_index: int = None) -> np.ndarray:
 def _ensure_noncolliding_start(controller: NeuralLidarCBFController,
                                x: torch.Tensor,
                                min_clearance: float = 0.01,
-                               max_tries: int = 30):
+                               max_tries: int = 30,
+                               abort_on_fail: bool = False):
     """Ensure the rollout starts collision-free.
 
     If the provided `x` is already in collision with any obstacle, resample a safe
@@ -929,7 +930,11 @@ def _ensure_noncolliding_start(controller: NeuralLidarCBFController,
             print(f"[ROLL] found collision-free start. min_d={min_d:.4f}")
             return x_try
 
-    # If we couldn't find one, return the refreshed original and let the caller see the failure
+    if abort_on_fail:
+        print("[ROLL] WARNING: could not find a collision-free start state. Aborting rollout.")
+        return None
+
+    # Backward-compatible fallback.
     print("[ROLL] WARNING: could not find a collision-free start state. Proceeding anyway.")
     return x0
 
@@ -959,9 +964,12 @@ def run_moving_obstacle_rollout(
 	obstacle_arm_urdf: str = None,
     pause_on_goal: bool = True,
     goal_pause_tol: float = 1e-4,
-    obstacle_arm_amp_scale: float = 1.4,
-    obstacle_arm_omega_scale: float = 1.0,
+	obstacle_arm_amp_scale: float = 1.4,
+	obstacle_arm_omega_scale: float = 1.0,
 	pause_on_collision: bool = True,
+	require_clean_start: bool = True,
+	max_start_resample: int = 30,
+	start_min_clearance: float = 0.01,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1041,7 +1049,35 @@ def run_moving_obstacle_rollout(
 		x = dm.complete_sample_with_observations(q0.reshape(1, -1), num_samples=1)
 
 	# Make sure we don't start in collision
-	x = _ensure_noncolliding_start(controller, x, min_clearance=0.01, max_tries=30)
+	x = _ensure_noncolliding_start(
+		controller,
+		x,
+		min_clearance=float(start_min_clearance),
+		max_tries=int(max_start_resample),
+		abort_on_fail=bool(require_clean_start),
+	)
+	if x is None:
+		result = {
+			"collided": None,
+			"skipped": True,
+			"skip_reason": "no_clean_start",
+			"seed": int(seed),
+			"steps_ran": 0,
+			"min_dist_min": None,
+			"min_dist_mean": None,
+			"qp_infeasible_count": 0,
+			"u_jitter_mean": None,
+			"diagnostic_samples": 0,
+		}
+		print("[ROLL] skipped=True reason=no_clean_start")
+		try:
+			p_.disconnect()
+		except Exception:
+			try:
+				p.disconnect()
+			except Exception:
+				pass
+		return result
 
 	# Ensure robot is in sync with x at t=0
 	q = x[0, :dm.n_dims]
@@ -1716,6 +1752,23 @@ if __name__ == "__main__":
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm", choices=["none", "rigid", "arm"])
     parser.add_argument("--pause_on_collision", action="store_true")
+    parser.add_argument(
+        "--allow_dirty_start",
+        action="store_true",
+        help="Allow rollout to proceed even if a collision-free start cannot be found.",
+    )
+    parser.add_argument(
+        "--max_start_resample",
+        type=int,
+        default=30,
+        help="Maximum attempts to resample a collision-free start.",
+    )
+    parser.add_argument(
+        "--start_min_clearance",
+        type=float,
+        default=0.01,
+        help="Minimum required start clearance from obstacles.",
+    )
 
     args_cli = parser.parse_args()
 
@@ -1802,4 +1855,7 @@ if __name__ == "__main__":
             obstacle_arm_amp_scale=1.4,
             obstacle_arm_omega_scale=1.0,
             pause_on_collision=bool(args_cli.pause_on_collision),
+            require_clean_start=not bool(args_cli.allow_dirty_start),
+            max_start_resample=int(args_cli.max_start_resample),
+            start_min_clearance=float(args_cli.start_min_clearance),
         )
