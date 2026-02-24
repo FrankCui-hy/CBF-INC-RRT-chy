@@ -595,9 +595,11 @@ def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None):
             continue
         kept.append(oid)
 
-    # If filtering removed everything, fall back to raw_ids excluding robot (better than nothing)
+    # If filtering removed everything, do NOT fall back to raw_ids.
+    # Falling back can accidentally re-introduce the floor/plane body, which makes the robot
+    # look "in collision" at step 0 and causes clean-start search to always fail.
     if not kept:
-        kept = [oid for oid in raw_ids if (robot_id is None or oid != robot_id)]
+        return []
 
     return kept
 
@@ -971,6 +973,10 @@ def run_moving_obstacle_rollout(
 	max_start_resample: int = 30,
 	start_min_clearance: float = 0.01,
 	start_q_override: np.ndarray = None,
+	use_motor_control: bool = True,
+	max_dq_per_step: float = 0.03,
+	pause_on_floor_penetration: bool = True,
+	floor_z_tol: float = -0.005,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1019,6 +1025,20 @@ def run_moving_obstacle_rollout(
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode=arm -> removed {len(removed)} rigid obstacles: {removed}")
+		# Also remove any stale built-in obstacle robot from ArmEnv to avoid
+		# contaminating clean-start checks before we spawn the rollout obstacle arm.
+		try:
+			obst = getattr(env, "obstacle_robot", None)
+			if obst is not None and hasattr(obst, "robotId"):
+				oid = int(obst.robotId)
+				try:
+					p_.removeBody(oid)
+					print(f"[ROLL] obstacle_mode=arm -> removed stale obstacle_robot id={oid}")
+				except Exception:
+					pass
+				env.obstacle_robot = None
+		except Exception:
+			pass
 
 	else:
 		# mode == "rigid": keep existing rigid obstacles (boxes/meshes)
@@ -1051,6 +1071,32 @@ def run_moving_obstacle_rollout(
 		# Only take q from the saved start state; recompute obs/aux for the current env
 		q0 = start_x[0, :dm.n_dims].detach().clone()
 		x = dm.complete_sample_with_observations(q0.reshape(1, -1), num_samples=1)
+
+	# If we are using a moving obstacle arm, spawn it BEFORE clean-start checks so
+	# collision/clearance is measured against the actual obstacle arm.
+	obstacle_arm = None
+	if mode == "arm":
+		try:
+			if obstacle_arm_urdf is not None:
+				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+			obstacle_arm = _spawn_obstacle_arm(
+				env,
+				main_robot=robot,
+				base_xyz=tuple(obstacle_arm_base_xyz),
+				base_rpy=tuple(obstacle_arm_base_rpy),
+				seed=int(obstacle_arm_seed),
+				urdf_path=obstacle_arm_urdf,
+				use_fixed_base=True,
+				amp_scale=float(obstacle_arm_amp_scale),
+				omega_scale=float(obstacle_arm_omega_scale),
+			)
+			# Include obstacle arm in collision checks
+			if obstacle_arm["arm_id"] not in obstacle_ids:
+				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+			print(f"[OBST_ARM] spawned (pre-start) id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
+		except Exception as e:
+			print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
+			obstacle_arm = None
 
 	# Make sure we don't start in collision
 	x = _ensure_noncolliding_start(
@@ -1111,34 +1157,20 @@ def run_moving_obstacle_rollout(
 	except Exception:
 		pass
 
+	# Physics stabilization parameters (best-effort)
+	try:
+		p_.setPhysicsEngineParameter(numSolverIterations=200)
+		p_.setPhysicsEngineParameter(numSubSteps=2)
+	except Exception:
+		pass
+
 	# --- moving obstacle source ---
-	obstacle_arm = None
 	base = direction = omega = amp = None
 
 	if mode == "arm":
-		# Spawn a second arm as the moving obstacle
-		try:
-			# allow passing an explicit URDF path
-			if obstacle_arm_urdf is not None:
-				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
-			obstacle_arm = _spawn_obstacle_arm(
-				env,
-				main_robot=robot,
-				base_xyz=tuple(obstacle_arm_base_xyz),
-				base_rpy=tuple(obstacle_arm_base_rpy),
-				seed=int(obstacle_arm_seed),
-				urdf_path=obstacle_arm_urdf,
-				use_fixed_base=True,
-				amp_scale=float(obstacle_arm_amp_scale),
-				omega_scale=float(obstacle_arm_omega_scale),
-			)
-			# Make sure collision/distance checks include the obstacle arm
-			if obstacle_arm["arm_id"] not in obstacle_ids:
-				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
-			print(f"[OBST_ARM] spawned id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
-		except Exception as e:
-			print(f"[OBST_ARM] ERROR spawning obstacle arm: {e}")
-			obstacle_arm = None
+		# Obstacle arm was spawned before the clean-start check above.
+		# Nothing to do here.
+		pass
 
 	elif mode == "rigid":
 		# Move existing rigid-body obstacles (sinusoidal base motion)
@@ -1194,6 +1226,12 @@ def run_moving_obstacle_rollout(
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
+
+		# Enforce a per-step max joint increment to avoid tunneling
+		dq_max = float(max_dq_per_step)
+		if dq_max > 0:
+			u = torch.clamp(u, -dq_max / float(dm.dt), dq_max / float(dm.dt))
+
 		# Conservative default clamp if the dynamics doesn't expose limits
 		try:
 			u_hi, u_lo = getattr(dm, "control_limits")
@@ -1221,10 +1259,31 @@ def run_moving_obstacle_rollout(
 				diag_bucket["hit_low"].append(diag)
 
 		# 3) Step dynamics with observation update
-		x = dm.closed_loop_dynamics(x, u, collect_dataset=False, use_motor_control=False, update_observation=True)
+		x = dm.closed_loop_dynamics(x, u, collect_dataset=False, use_motor_control=bool(use_motor_control), update_observation=True)
 
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
+
+		# Detect obvious floor penetration (debug)
+		if pause_on_floor_penetration:
+			try:
+				min_z = float("inf")
+				for j in robot.body_joints:
+					ls = p_.getLinkState(robot.robotId, int(j))
+					z = float(ls[4][2])
+					if z < min_z:
+						min_z = z
+				if min_z <= float(floor_z_tol):
+					print(f"[FLOOR] WARNING: link below floor: min_link_z={min_z:.6f} <= {float(floor_z_tol):.6f} at step {k}")
+					if pause_on_collision:
+						try:
+							p_.setRealTimeSimulation(0)
+						except Exception:
+							pass
+						while True:
+							time.sleep(0.1)
+			except Exception:
+				pass
 
 		# Goal progress (in joint space)
 		q_now = x[0, :dm.n_dims]
@@ -1784,6 +1843,9 @@ if __name__ == "__main__":
         default=0.01,
         help="Minimum required start clearance from obstacles.",
     )
+    parser.add_argument("--use_motor_control", action="store_true", help="Use pybullet motor control for the main robot (reduces floor tunneling).")
+    parser.add_argument("--max_dq_per_step", type=float, default=0.03, help="Max joint increment per step (rad) to avoid tunneling.")
+    parser.add_argument("--no_floor_pause", action="store_true", help="Disable pausing when a link penetrates below the floor tolerance.")
 
     args_cli = parser.parse_args()
 
@@ -1886,6 +1948,9 @@ if __name__ == "__main__":
             max_start_resample=int(args_cli.max_start_resample),
             start_min_clearance=float(args_cli.start_min_clearance),
             start_q_override=start_q_override,
+            use_motor_control=bool(args_cli.use_motor_control),
+            max_dq_per_step=float(args_cli.max_dq_per_step),
+            pause_on_floor_penetration=not bool(args_cli.no_floor_pause),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
