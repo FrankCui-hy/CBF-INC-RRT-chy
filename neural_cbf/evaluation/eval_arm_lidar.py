@@ -1774,6 +1774,7 @@ if __name__ == "__main__":
     # Optional overrides (will start from hparams.yaml next to ckpt unless provided)
     parser.add_argument("--hparams", type=str, default=None, help="Path to hparams.yaml (optional)")
     parser.add_argument("--robot_name", type=str, default="panda")
+    parser.add_argument("--gui", action="store_true", help="Enable pybullet GUI for visualization.")
 
     # Modes
     parser.add_argument(
@@ -1868,7 +1869,7 @@ if __name__ == "__main__":
 
     # Apply evaluation overrides
     base_args.accelerator = "cpu"  # controller loads to cpu; your training uses GPU elsewhere
-    base_args.gui = 0
+    base_args.gui = 1 if args_cli.gui else 0
     base_args.robot_name = args_cli.robot_name
     if args_cli.obstacle_horizon_s is not None:
         base_args.obstacle_horizon_s = float(args_cli.obstacle_horizon_s)
