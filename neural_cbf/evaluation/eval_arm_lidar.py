@@ -588,8 +588,11 @@ def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None):
         return False
 
     kept = []
+    table_id = getattr(env, "eval_table_id", None)
     for oid in raw_ids:
         if robot_id is not None and oid == robot_id:
+            continue
+        if table_id is not None and int(oid) == int(table_id):
             continue
         if _looks_like_plane_or_floor(oid):
             continue
@@ -672,6 +675,43 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return int(bid)
 	except Exception:
 		return -1
+
+
+def _add_table_and_place_main_arm(
+    env: ArmEnv,
+    main_robot,
+    table_center=(0.35, 0.0, 0.34),
+    table_half_extents=(0.55, 0.45, 0.04),
+    table_rgba=(0.72, 0.56, 0.40, 1.0),
+    main_base_xy=(0.05, -0.18),
+):
+    """Create a table and place the main arm base on its top surface."""
+    p_ = env.p
+    cshape = p_.createCollisionShape(
+        p_.GEOM_BOX,
+        halfExtents=[float(v) for v in table_half_extents],
+    )
+    vshape = p_.createVisualShape(
+        p_.GEOM_BOX,
+        halfExtents=[float(v) for v in table_half_extents],
+        rgbaColor=[float(v) for v in table_rgba],
+    )
+    table_id = p_.createMultiBody(
+        baseMass=0.0,
+        baseCollisionShapeIndex=cshape,
+        baseVisualShapeIndex=vshape,
+        basePosition=[float(v) for v in table_center],
+        baseOrientation=[0.0, 0.0, 0.0, 1.0],
+    )
+
+    table_top_z = float(table_center[2]) + float(table_half_extents[2])
+    main_base_xyz = [float(main_base_xy[0]), float(main_base_xy[1]), table_top_z]
+    p_.resetBasePositionAndOrientation(main_robot.robotId, main_base_xyz, [0.0, 0.0, 0.0, 1.0])
+
+    # Keep a handle for filtering and potential post-processing.
+    env.eval_table_id = int(table_id)
+    env.eval_table_top_z = float(table_top_z)
+    return int(table_id), float(table_top_z), main_base_xyz
 
 
 # ---- Moving obstacle = second robot arm (kinematic obstacle) ----
@@ -814,6 +854,12 @@ def _spawn_obstacle_arm(
     omega = omega * float(omega_scale)
     phase = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
 
+    # Phase-2 parameters for segmented trajectory.
+    amp2 = amp * rng.uniform(low=0.45, high=0.85, size=amp.shape).astype(np.float32)
+    amp2 = np.clip(amp2, 0.02, 0.60)
+    omega2 = omega * rng.uniform(low=1.30, high=2.00, size=omega.shape).astype(np.float32)
+    phase2 = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
+    phase2_harm = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
     # apply initial pose
     for idx, j in enumerate(joint_indices):
         p_.resetJointState(arm_id, j, targetValue=float(q_center[idx]))
@@ -833,11 +879,24 @@ def _spawn_obstacle_arm(
         "amp": amp,
         "omega": omega,
         "phase": phase,
+        "amp2": amp2,
+        "omega2": omega2,
+        "phase2": phase2,
+        "phase2_harm": phase2_harm,
+        "lower": lower,
+        "upper": upper,
         "base_xyz": np.array(base_xyz, dtype=np.float32),
     }
 
 
-def _update_obstacle_arm(env: ArmEnv, arm_spec: dict, t: float, strength: float = 200.0):
+def _update_obstacle_arm(
+    env: ArmEnv,
+    arm_spec: dict,
+    t: float,
+    strength: float = 200.0,
+    switch_time_s: float = None,
+    switch_blend_s: float = 1.0,
+):
     """Advance obstacle arm motion at time t (seconds)."""
     p_ = env.p
     arm_id = arm_spec["arm_id"]
@@ -846,8 +905,35 @@ def _update_obstacle_arm(env: ArmEnv, arm_spec: dict, t: float, strength: float 
     amp = arm_spec["amp"]
     omega = arm_spec["omega"]
     phase = arm_spec["phase"]
+    amp2 = arm_spec.get("amp2", amp * 0.7)
+    omega2 = arm_spec.get("omega2", omega * 1.6)
+    phase2 = arm_spec.get("phase2", np.zeros_like(amp))
+    phase2_harm = arm_spec.get("phase2_harm", np.zeros_like(amp))
+    lower = arm_spec.get("lower", None)
+    upper = arm_spec.get("upper", None)
 
-    q_des = q_center + amp * np.sin(omega * float(t) + phase)
+    t_now = float(t)
+    if switch_time_s is None:
+        q_des = q_center + amp * np.sin(omega * t_now + phase)
+    else:
+        ts = float(max(0.0, switch_time_s))
+        blend = float(max(1e-6, switch_blend_s))
+        # Phase-1: original trajectory.
+        q1 = q_center + amp * np.sin(omega * t_now + phase)
+        # Phase-2: anchored at switch time to keep continuity at t=ts.
+        q1_ts = q_center + amp * np.sin(omega * ts + phase)
+        q2_wave = 0.75 * amp2 * np.sin(omega2 * (t_now - ts) + phase2)
+        q2_wave += 0.25 * amp2 * np.sin(2.0 * omega2 * (t_now - ts) + phase2_harm)
+        q2_wave0 = 0.75 * amp2 * np.sin(phase2) + 0.25 * amp2 * np.sin(phase2_harm)
+        q2 = q1_ts + (q2_wave - q2_wave0)
+
+        # C1 smooth blend from phase-1 to phase-2 over [ts, ts + blend].
+        s = np.clip((t_now - ts) / blend, 0.0, 1.0)
+        w = s * s * (3.0 - 2.0 * s)  # smoothstep
+        q_des = (1.0 - w) * q1 + w * q2
+
+    if lower is not None and upper is not None:
+        q_des = np.clip(q_des, lower + 0.01, upper - 0.01)
 
     # Drive kinematically via POSITION_CONTROL
     p_.setJointMotorControlArray(
@@ -968,6 +1054,8 @@ def run_moving_obstacle_rollout(
     goal_pause_tol: float = 1e-4,
 	obstacle_arm_amp_scale: float = 1.4,
 	obstacle_arm_omega_scale: float = 1.0,
+	obstacle_arm_switch_ratio: float = 0.5,
+	obstacle_arm_switch_blend_s: float = 1.0,
 	pause_on_collision: bool = True,
 	require_clean_start: bool = True,
 	max_start_resample: int = 30,
@@ -1007,6 +1095,10 @@ def run_moving_obstacle_rollout(
 	except Exception:
 		# Some env implementations may not support reset; ignore
 		pass
+
+	# Build a simple tabletop setup and put the main arm on the table.
+	table_id, table_top_z, main_base_xyz = _add_table_and_place_main_arm(env, robot)
+	print(f"[SCENE] table_id={table_id} table_top_z={table_top_z:.3f} main_base={main_base_xyz}")
 
 	# Decide obstacle behavior
 	# obstacle_mode:
@@ -1079,10 +1171,14 @@ def run_moving_obstacle_rollout(
 		try:
 			if obstacle_arm_urdf is not None:
 				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+			obst_base = list(obstacle_arm_base_xyz)
+			# If z is left at/below ground, auto-place the obstacle arm on the tabletop.
+			if len(obst_base) >= 3 and float(obst_base[2]) <= 1e-6:
+				obst_base[2] = float(getattr(env, "eval_table_top_z", 0.0))
 			obstacle_arm = _spawn_obstacle_arm(
 				env,
 				main_robot=robot,
-				base_xyz=tuple(obstacle_arm_base_xyz),
+				base_xyz=tuple(obst_base),
 				base_rpy=tuple(obstacle_arm_base_rpy),
 				seed=int(obstacle_arm_seed),
 				urdf_path=obstacle_arm_urdf,
@@ -1166,6 +1262,7 @@ def run_moving_obstacle_rollout(
 
 	# --- moving obstacle source ---
 	base = direction = omega = amp = None
+	arm_switch_t = float(t_sim) * float(np.clip(obstacle_arm_switch_ratio, 0.0, 1.0))
 
 	if mode == "arm":
 		# Obstacle arm was spawned before the clean-start check above.
@@ -1210,7 +1307,14 @@ def run_moving_obstacle_rollout(
 		# 1) Move the obstacle(s) first (so observation sees the new positions)
 		if move_obstacles:
 			if mode == "arm" and obstacle_arm is not None:
-				_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
+				_update_obstacle_arm(
+					env,
+					obstacle_arm,
+					t_arm,
+					strength=float(obstacle_arm_strength),
+					switch_time_s=arm_switch_t,
+					switch_blend_s=float(obstacle_arm_switch_blend_s),
+				)
 				# optional tiny debug prints
 				if k < 3:
 					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
@@ -1820,6 +1924,18 @@ if __name__ == "__main__":
     parser.add_argument("--t_sim", type=float, default=6.0)
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm", choices=["none", "rigid", "arm"])
+    parser.add_argument(
+        "--obstacle_arm_switch_ratio",
+        type=float,
+        default=0.5,
+        help="Switch time ratio in [0,1] for obstacle arm segmented trajectory.",
+    )
+    parser.add_argument(
+        "--obstacle_arm_switch_blend_s",
+        type=float,
+        default=1.0,
+        help="Blend duration (seconds) for smooth trajectory switching.",
+    )
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -1937,13 +2053,15 @@ if __name__ == "__main__":
             omega_range=(1.2, 3.0),
             obstacle_mode=str(args_cli.obstacle_mode),
             obstacle_arm_seed=int(args_cli.seed),
-            obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
-            obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
+            obstacle_arm_base_xyz=(0.55, 0.18, 0.0),
+            obstacle_arm_base_rpy=(0.0, 0.0, 3.1415926),
             obstacle_arm_strength=260.0,
             pause_on_goal=False,
             goal_pause_tol=1e-4,
             obstacle_arm_amp_scale=1.4,
             obstacle_arm_omega_scale=1.0,
+            obstacle_arm_switch_ratio=float(args_cli.obstacle_arm_switch_ratio),
+            obstacle_arm_switch_blend_s=float(args_cli.obstacle_arm_switch_blend_s),
             pause_on_collision=bool(args_cli.pause_on_collision),
             require_clean_start=not bool(args_cli.allow_dirty_start),
             max_start_resample=int(args_cli.max_start_resample),
