@@ -1184,8 +1184,8 @@ def run_moving_obstacle_rollout(
 	block_x: float = 0.30,
 	block_y_off: float = 0.14,
 	block_z: float = 0.04,
-	main_base_y: float = -0.15,
-	obst_base_y: float = 0.15,
+	main_base_y: float = 0.0,
+	obst_base_y: float = 0.25,
 	cross_jitter_amp: float = 0.014,
 	cross_jitter_hz: float = 6.0,
 	cross_window_ratio: float = 0.12,
@@ -1222,7 +1222,7 @@ def run_moving_obstacle_rollout(
 
 	# Build a simple tabletop setup and put the main arm on the table.
 	table_id, table_top_z, main_base_xyz = _add_table_and_place_main_arm(
-		env, robot, main_base_xy=(0.05, float(main_base_y))
+		env, robot, main_base_xy=(0.0, float(main_base_y))
 	)
 	print(f"[SCENE] table_id={table_id} table_top_z={table_top_z:.3f} main_base={main_base_xyz}")
 
@@ -2143,8 +2143,8 @@ if __name__ == "__main__":
     parser.add_argument("--block_x", type=float, default=0.30)
     parser.add_argument("--block_y_off", type=float, default=0.14)
     parser.add_argument("--block_z", type=float, default=0.04)
-    parser.add_argument("--main_base_y", type=float, default=-0.15)
-    parser.add_argument("--obst_base_y", type=float, default=+0.15)
+    parser.add_argument("--main_base_y", type=float, default=0.0)
+    parser.add_argument("--obst_base_y", type=float, default=+0.25)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.014)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.12)
@@ -2277,8 +2277,8 @@ if __name__ == "__main__":
             omega_range=(1.2, 3.0),
             obstacle_mode=str(args_cli.obstacle_mode),
             obstacle_arm_seed=int(args_cli.seed),
-            obstacle_arm_base_xyz=(0.55, 0.18, 0.0),
-            obstacle_arm_base_rpy=(0.0, 0.0, 3.1415926),
+            obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
+            obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
             obstacle_arm_strength=260.0,
             pause_on_goal=False,
             goal_pause_tol=1e-4,
