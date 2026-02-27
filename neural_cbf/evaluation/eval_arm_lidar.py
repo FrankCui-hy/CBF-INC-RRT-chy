@@ -804,12 +804,8 @@ def _add_table_and_place_main_arm(
     table_rgba=(0.72, 0.56, 0.40, 1.0),
     main_base_xy=(0.05, -0.18),
 ):
-    """Create a table and place the main arm base on its top surface."""
+    """Create a visual-only table and place the main arm base on its top surface."""
     p_ = env.p
-    cshape = p_.createCollisionShape(
-        p_.GEOM_BOX,
-        halfExtents=[float(v) for v in table_half_extents],
-    )
     vshape = p_.createVisualShape(
         p_.GEOM_BOX,
         halfExtents=[float(v) for v in table_half_extents],
@@ -817,7 +813,7 @@ def _add_table_and_place_main_arm(
     )
     table_id = p_.createMultiBody(
         baseMass=0.0,
-        baseCollisionShapeIndex=cshape,
+        baseCollisionShapeIndex=-1,  # visual-only: excluded from raycast/collision observation
         baseVisualShapeIndex=vshape,
         basePosition=[float(v) for v in table_center],
         baseOrientation=[0.0, 0.0, 0.0, 1.0],
