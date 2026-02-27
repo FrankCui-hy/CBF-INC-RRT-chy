@@ -714,35 +714,53 @@ def _obstacle_ee_target_cross_pick(
     T: float,
     start_xyz,
     left_block_xyz,
+    left_safe_xyz,
     pregrasp_dz: float = 0.12,
     grasp_dz: float = 0.035,
+    safe_pregrasp_dz: float = 0.12,
+    safe_drop_dz: float = 0.035,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
 ):
-    """Obstacle-arm EE target: start -> left pregrasp -> left grasp, with non-smooth y jitter near crossing."""
+    """Obstacle-arm EE target: pick left block, then place at left-safe region, with non-smooth jitter near crossing."""
     T = max(float(T), 1e-6)
     s = float(np.clip(float(t) / T, 0.0, 1.0))
     p0 = np.array(start_xyz, dtype=np.float32)
     left = np.array(left_block_xyz, dtype=np.float32)
+    left_safe = np.array(left_safe_xyz, dtype=np.float32)
     pre = left.copy()
     pre[2] += float(pregrasp_dz)
     grasp = left.copy()
     grasp[2] += float(grasp_dz)
+    safe_pre = left_safe.copy()
+    safe_pre[2] += float(safe_pregrasp_dz)
+    safe_drop = left_safe.copy()
+    safe_drop[2] += float(safe_drop_dz)
 
-    if s < 0.55:
-        a = _smoothstep(s / 0.55)
+    if s < 0.30:
+        a = _smoothstep(s / 0.30)
         p_des = (1.0 - a) * p0 + a * pre
-    elif s < 0.85:
-        a = _smoothstep((s - 0.55) / 0.30)
+    elif s < 0.45:
+        a = _smoothstep((s - 0.30) / 0.15)
         p_des = (1.0 - a) * pre + a * grasp
-    else:
+    elif s < 0.58:
+        # brief hold to emulate grasping
         p_des = grasp.copy()
+    elif s < 0.82:
+        a = _smoothstep((s - 0.58) / 0.24)
+        p_des = (1.0 - a) * grasp + a * safe_pre
+    elif s < 0.95:
+        a = _smoothstep((s - 0.82) / 0.13)
+        p_des = (1.0 - a) * safe_pre + a * safe_drop
+    else:
+        p_des = safe_drop.copy()
 
-    # Inject non-smooth jitter around crossing (s ~= 0.5).
+    # Inject non-smooth jitter around crossing (s ~= 0.62).
     w = float(np.clip(cross_window_ratio, 1e-3, 1.0))
-    s0 = max(0.0, 0.5 - 0.5 * w)
-    s1 = min(1.0, 0.5 + 0.5 * w)
+    c = 0.62
+    s0 = max(0.0, c - 0.5 * w)
+    s1 = min(1.0, c + 0.5 * w)
     if s0 <= s <= s1:
         p_des[1] += np.sign(np.sin(2.0 * np.pi * float(cross_jitter_hz) * float(t))) * float(cross_jitter_amp)
 
@@ -1170,8 +1188,8 @@ def run_moving_obstacle_rollout(
 	block_x: float = 0.30,
 	block_y_off: float = 0.14,
 	block_z: float = 0.04,
-	main_base_y: float = -0.28,
-	obst_base_y: float = 0.28,
+	main_base_y: float = -0.15,
+	obst_base_y: float = 0.15,
 	cross_jitter_amp: float = 0.018,
 	cross_jitter_hz: float = 6.0,
 	cross_window_ratio: float = 0.35,
@@ -1344,20 +1362,43 @@ def run_moving_obstacle_rollout(
 
 	left_block_xyz = None
 	right_block_xyz = None
+	left_safe_xyz = None
+	right_safe_xyz = None
+	main_goal_pick_q = None
+	main_goal_place_q = None
+	main_goal_switched = False
+	main_goal_switch_t = 0.55 * float(t_sim)
 	if str(scene).lower() == "cross_pick":
 		left_block_xyz = np.array([float(block_x), -float(block_y_off), float(table_top_z) + float(block_z)], dtype=np.float32)
 		right_block_xyz = np.array([float(block_x), float(block_y_off), float(table_top_z) + float(block_z)], dtype=np.float32)
+		# symmetric safe places, farther from the center line
+		safe_y_off = max(float(block_y_off) + 0.10, 0.70 * max(abs(float(main_base_y)), abs(float(obst_base_y))))
+		safe_x = float(block_x) - 0.08
+		left_safe_xyz = np.array([safe_x, -safe_y_off, float(table_top_z) + float(block_z)], dtype=np.float32)
+		right_safe_xyz = np.array([safe_x, safe_y_off, float(table_top_z) + float(block_z)], dtype=np.float32)
+
 		_spawn_block(env, left_block_xyz.tolist(), rgba=(0.95, 0.35, 0.35, 1.0))
 		_spawn_block(env, right_block_xyz.tolist(), rgba=(0.35, 0.35, 0.95, 1.0))
-		print(f"[SCENE] blocks: left({left_block_xyz.tolist()}), right({right_block_xyz.tolist()})")
-		goal_xyz = [float(right_block_xyz[0]), float(right_block_xyz[1]), float(right_block_xyz[2] + 0.10)]
+		_spawn_block(env, left_safe_xyz.tolist(), rgba=(0.35, 0.85, 0.35, 0.85))
+		_spawn_block(env, right_safe_xyz.tolist(), rgba=(0.35, 0.85, 0.35, 0.85))
+		print(
+			f"[SCENE] blocks: left({left_block_xyz.tolist()}), right({right_block_xyz.tolist()})  "
+			f"safe_left({left_safe_xyz.tolist()}), safe_right({right_safe_xyz.tolist()})"
+		)
+
+		goal_pick_xyz = [float(right_block_xyz[0]), float(right_block_xyz[1]), float(right_block_xyz[2] + 0.08)]
+		goal_place_xyz = [float(left_safe_xyz[0]), float(left_safe_xyz[1]), float(left_safe_xyz[2] + 0.08)]
 		try:
-			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
-			goal_state = torch.tensor(ik[:dm.n_dims]).float()
+			ik_pick = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_pick_xyz)
+			main_goal_pick_q = torch.tensor(ik_pick[:dm.n_dims]).float()
+			ik_place = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_place_xyz)
+			main_goal_place_q = torch.tensor(ik_place[:dm.n_dims]).float()
 		except Exception:
-			goal_state = dm.goal_state[:dm.n_dims].detach().clone().float()
-		dm.set_goal(goal_state)
-		print(f"[GOAL][cross_pick] main_goal_xyz={goal_xyz} main_goal_q={goal_state.tolist()}")
+			main_goal_pick_q = dm.goal_state[:dm.n_dims].detach().clone().float()
+			main_goal_place_q = dm.goal_state[:dm.n_dims].detach().clone().float()
+		dm.set_goal(main_goal_pick_q)
+		print(f"[GOAL][cross_pick] main_pick_xyz={goal_pick_xyz} main_pick_q={main_goal_pick_q.tolist()}")
+		print(f"[GOAL][cross_pick] main_place_xyz={goal_place_xyz} main_place_q={main_goal_place_q.tolist()}")
 
 	# Ensure robot is in sync with x at t=0
 	q = x[0, :dm.n_dims]
@@ -1431,6 +1472,16 @@ def run_moving_obstacle_rollout(
 	}
 
 	for k in range(steps):
+		if (
+			str(scene).lower() == "cross_pick"
+			and main_goal_place_q is not None
+			and (not main_goal_switched)
+			and float(k * dm.dt) >= float(main_goal_switch_t)
+		):
+			dm.set_goal(main_goal_place_q)
+			main_goal_switched = True
+			print(f"[GOAL][cross_pick] switched main goal to place at t={k * dm.dt:.3f}s")
+
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
 		# Optionally speed up ONLY the obstacle arm (separate from rigid obstacles)
@@ -1452,12 +1503,13 @@ def run_moving_obstacle_rollout(
 					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
 			elif mode == "arm_task" and obstacle_arm is not None:
-				if str(scene).lower() == "cross_pick" and left_block_xyz is not None:
+				if str(scene).lower() == "cross_pick" and left_block_xyz is not None and right_safe_xyz is not None:
 					ee_tgt = _obstacle_ee_target_cross_pick(
 						t=float(k * dm.dt),
 						T=float(t_sim),
 						start_xyz=obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"])),
 						left_block_xyz=left_block_xyz,
+						left_safe_xyz=right_safe_xyz,
 						cross_jitter_amp=float(cross_jitter_amp),
 						cross_jitter_hz=float(cross_jitter_hz),
 						cross_window_ratio=float(cross_window_ratio),
@@ -1556,7 +1608,8 @@ def run_moving_obstacle_rollout(
 
 		# Goal progress (in joint space)
 		q_now = x[0, :dm.n_dims]
-		d_goal = torch.norm(q_now - q_goal.to(q_now.device)).item()
+		q_goal_now = dm.goal_state[:dm.n_dims].detach().clone().float().to(q_now.device)
+		d_goal = torch.norm(q_now - q_goal_now).item()
 		if (k % max(int(print_every), 1)) == 0:
 			if mode != "none" and len(min_dist_hist) > 0:
 				md = min_dist_hist[-1]
@@ -2093,8 +2146,8 @@ if __name__ == "__main__":
     parser.add_argument("--block_x", type=float, default=0.30)
     parser.add_argument("--block_y_off", type=float, default=0.14)
     parser.add_argument("--block_z", type=float, default=0.04)
-    parser.add_argument("--main_base_y", type=float, default=-0.28)
-    parser.add_argument("--obst_base_y", type=float, default=+0.28)
+    parser.add_argument("--main_base_y", type=float, default=-0.15)
+    parser.add_argument("--obst_base_y", type=float, default=+0.15)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
