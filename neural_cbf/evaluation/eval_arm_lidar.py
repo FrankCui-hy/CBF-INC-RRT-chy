@@ -1203,6 +1203,7 @@ def run_moving_obstacle_rollout(
 	left_block_id = None
 	right_block_id = None
 	obst_grasp_state = {"grabbed": False}
+	main_grasp_state = {"grabbed": False}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1259,6 +1260,7 @@ def run_moving_obstacle_rollout(
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
 		obst_grasp_state = {"grabbed": False}
+		main_grasp_state = {"grabbed": False}
 
 		# main arm goal = right block pregrasp
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
@@ -1614,6 +1616,21 @@ def run_moving_obstacle_rollout(
 
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
+		# Visual-only grasp for MAIN arm: attach the RIGHT block when close
+		if str(scene).lower() == "cross_pick":
+			try:
+				main_ee_link = int(robot.body_joints[-1])
+			except Exception:
+				main_ee_link = -1
+			_update_visual_grasp_block(
+				p_,
+				int(robot.robotId),
+				main_ee_link,
+				right_block_id,
+				main_grasp_state,
+				dist_thresh=0.05,
+				ee_z_offset=-0.035,
+			)
 
 		# Detect obvious floor penetration (debug)
 		if pause_on_floor_penetration:
