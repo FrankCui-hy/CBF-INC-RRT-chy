@@ -1113,11 +1113,11 @@ def run_moving_obstacle_rollout(
 	pause_on_floor_penetration: bool = True,
 	floor_z_tol: float = -0.005,
     scene: str = "plain",
-    block_x: float = 0.55,
-    block_y_off: float = 0.12,
+    block_x: float = 0.50,
+    block_y_off: float = 0.10,
     block_z: float = 0.03,
-    main_base_y: float = -0.18,
-    obst_base_y: float = +0.18,
+    main_base_y: float = -0.20,
+    obst_base_y: float = +0.20,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
@@ -1261,7 +1261,7 @@ def run_moving_obstacle_rollout(
 		obst_grasp_state = {"grabbed": False}
 
 		# main arm goal = right block pregrasp
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.12]
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
 		try:
 			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
 			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
@@ -2177,11 +2177,11 @@ if __name__ == "__main__":
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
-    parser.add_argument("--block_x", type=float, default=0.55)
-    parser.add_argument("--block_y_off", type=float, default=0.12)
+    parser.add_argument("--block_x", type=float, default=0.50)
+    parser.add_argument("--block_y_off", type=float, default=0.10)
     parser.add_argument("--block_z", type=float, default=0.03)
-    parser.add_argument("--main_base_y", type=float, default=-0.18)
-    parser.add_argument("--obst_base_y", type=float, default=+0.18)
+    parser.add_argument("--main_base_y", type=float, default=-0.20)
+    parser.add_argument("--obst_base_y", type=float, default=+0.20)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
