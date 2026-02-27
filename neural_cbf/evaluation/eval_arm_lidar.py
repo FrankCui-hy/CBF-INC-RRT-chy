@@ -498,7 +498,7 @@ def _update_obstacles(env: ArmEnv, obstacle_ids, t: float, base, direction, omeg
         p_.resetBasePositionAndOrientation(oid, pos.tolist(), orn)
 
 
-def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None):
+def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None, exclude_ids=None):
     """Return obstacle ids suitable for evaluation.
 
     Priority:
@@ -524,6 +524,9 @@ def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None):
             raw_ids = [p_.getBodyUniqueId(i) for i in range(n)]
         except Exception:
             raw_ids = []
+
+    # Exclude specific ids (e.g., scene blocks) if requested
+    exclude_set = set(int(x) for x in (exclude_ids or []) if x is not None)
 
     if not raw_ids:
         return []
@@ -589,6 +592,8 @@ def _get_eval_obstacle_ids(env: ArmEnv, robot_id: int = None):
 
     kept = []
     for oid in raw_ids:
+        if exclude_set and int(oid) in exclude_set:
+            continue
         if robot_id is not None and oid == robot_id:
             continue
         if _looks_like_plane_or_floor(oid):
@@ -673,6 +678,86 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 	except Exception:
 		return -1
 
+def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0):
+    p_ = env.p
+    cshape = p_.createCollisionShape(p_.GEOM_BOX, halfExtents=[half, half, half])
+    vshape = p_.createVisualShape(p_.GEOM_BOX, halfExtents=[half, half, half], rgbaColor=list(rgba))
+    bid = p_.createMultiBody(
+        baseMass=float(mass),
+        baseCollisionShapeIndex=cshape,
+        baseVisualShapeIndex=vshape,
+        basePosition=[float(pos_xyz[0]), float(pos_xyz[1]), float(pos_xyz[2])],
+        baseOrientation=[0, 0, 0, 1],
+    )
+    return int(bid)
+
+def _smoothstep(s: float) -> float:
+    s = float(np.clip(s, 0.0, 1.0))
+    return s * s * (3.0 - 2.0 * s)
+
+def _obstacle_ee_target_cross_pick(
+    t: float,
+    T: float,
+    start_xyz,
+    left_block_xyz,
+    cross_jitter_amp: float = 0.018,
+    cross_jitter_hz: float = 6.0,
+    cross_window_ratio: float = 0.35,
+):
+    # start -> pregrasp -> descend -> hold
+    t = float(np.clip(t, 0.0, T))
+    s = t / max(T, 1e-6)
+
+    pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
+    grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.03], dtype=np.float32)
+
+    if s <= 0.55:
+        w = _smoothstep(s / 0.55)
+        xyz = (1 - w) * np.array(start_xyz, dtype=np.float32) + w * pre
+    elif s <= 0.75:
+        w = _smoothstep((s - 0.55) / 0.20)
+        xyz = (1 - w) * pre + w * grasp
+    else:
+        xyz = grasp.copy()
+
+    # non-smooth jitter window centered at s=0.5 (attacks FD stability)
+    hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
+    if abs(s - 0.5) <= hw:
+        sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
+        xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
+
+    return xyz
+
+def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_index: int = None, strength: float = 260.0):
+    p_ = env.p
+    if ee_link_index is None:
+        ee_link_index = p_.getNumJoints(arm_id) - 1
+
+    ik = p_.calculateInverseKinematics(
+        arm_id,
+        ee_link_index,
+        targetPosition=[float(ee_target_xyz[0]), float(ee_target_xyz[1]), float(ee_target_xyz[2])],
+        maxNumIterations=80,
+        residualThreshold=1e-4,
+    )
+
+    joints = []
+    q_des = []
+    for j in range(p_.getNumJoints(arm_id)):
+        ji = p_.getJointInfo(arm_id, j)
+        if ji[2] == p_.JOINT_REVOLUTE:
+            joints.append(j)
+            q_des.append(float(ik[len(q_des)]))
+
+    p_.setJointMotorControlArray(
+        bodyUniqueId=arm_id,
+        jointIndices=joints,
+        controlMode=p_.POSITION_CONTROL,
+        targetPositions=q_des,
+        forces=[float(strength)] * len(joints),
+        positionGains=[0.12] * len(joints),
+        velocityGains=[0.9] * len(joints),
+    )
 
 # ---- Moving obstacle = second robot arm (kinematic obstacle) ----
 import math
@@ -877,7 +962,8 @@ def _ensure_noncolliding_start(controller: NeuralLidarCBFController,
                                x: torch.Tensor,
                                min_clearance: float = 0.01,
                                max_tries: int = 30,
-                               abort_on_fail: bool = False):
+                               abort_on_fail: bool = False,
+                               exclude_obstacle_ids=None):
     """Ensure the rollout starts collision-free.
 
     If the provided `x` is already in collision with any obstacle, resample a safe
@@ -900,7 +986,7 @@ def _ensure_noncolliding_start(controller: NeuralLidarCBFController,
     x0 = _refresh_datax_from_q(q0)
     robot.set_joint_position(robot.body_joints, x0[0, :dm.n_dims])
     env.p.stepSimulation()
-    obstacle_ids = _get_eval_obstacle_ids(env, robot.robotId)
+    obstacle_ids = _get_eval_obstacle_ids(env, robot.robotId, exclude_ids=exclude_obstacle_ids)
     min_d, hit = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
     if (not hit) and (min_d >= min_clearance):
         return x0
@@ -977,6 +1063,15 @@ def run_moving_obstacle_rollout(
 	max_dq_per_step: float = 0.03,
 	pause_on_floor_penetration: bool = True,
 	floor_z_tol: float = -0.005,
+    scene: str = "plain",
+    block_x: float = 0.55,
+    block_y_off: float = 0.12,
+    block_z: float = 0.03,
+    main_base_y: float = -0.18,
+    obst_base_y: float = +0.18,
+    cross_jitter_amp: float = 0.018,
+    cross_jitter_hz: float = 6.0,
+    cross_window_ratio: float = 0.35,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1020,11 +1115,11 @@ def run_moving_obstacle_rollout(
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
-	elif mode == "arm":
+	elif mode in ("arm", "arm_task"):
 		# User request: delete the original rigid/box obstacles, keep only the obstacle arm.
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
-		print(f"[ROLL] obstacle_mode=arm -> removed {len(removed)} rigid obstacles: {removed}")
+		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
 		# Also remove any stale built-in obstacle robot from ArmEnv to avoid
 		# contaminating clean-start checks before we spawn the rollout obstacle arm.
 		try:
@@ -1033,7 +1128,7 @@ def run_moving_obstacle_rollout(
 				oid = int(obst.robotId)
 				try:
 					p_.removeBody(oid)
-					print(f"[ROLL] obstacle_mode=arm -> removed stale obstacle_robot id={oid}")
+					print(f"[ROLL] obstacle_mode={mode} -> removed stale obstacle_robot id={oid}")
 				except Exception:
 					pass
 				env.obstacle_robot = None
@@ -1056,8 +1151,64 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			print(f"[ROLL] obstacle_ids ({len(obstacle_ids)}): {obstacle_ids}")
 
-		if len(obstacle_ids) == 0:
-			print("[ROLL] WARNING: obstacle_ids is empty after filtering; obstacles will not move and collision checks will be skipped.")
+	if len(obstacle_ids) == 0:
+		print("[ROLL] WARNING: obstacle_ids is empty after filtering; obstacles will not move and collision checks will be skipped.")
+
+	# --- Cross-pick scene: spawn blocks AFTER obstacle cleanup so they won't be removed ---
+	scene_block_ids = []
+	table_top_z = None
+
+	def _find_table_top_z(p_):
+		# best-effort: find a body whose name contains "table" and return its AABB top z
+		try:
+			n = p_.getNumBodies()
+			for i in range(n):
+				bid = p_.getBodyUniqueId(i)
+				bi = p_.getBodyInfo(bid)
+				nm = bi[1]
+				if isinstance(nm, (bytes, bytearray)):
+					nm = nm.decode("utf-8", "ignore")
+				nm = str(nm).lower()
+				if "table" in nm:
+					aabb = p_.getAABB(bid, -1)
+					return float(aabb[1][2])
+		except Exception:
+			pass
+		return None
+
+	if str(scene).lower() == "cross_pick":
+		# move main robot base to left in Y for visual separation
+		try:
+			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
+			p_.resetBasePositionAndOrientation(
+				robot.robotId,
+				[float(bpos[0]), float(main_base_y), float(bpos[2])],
+				born,
+			)
+			print(f"[SCENE] main_base_y={float(main_base_y):.3f}")
+		except Exception as e:
+			print(f"[SCENE] WARN: cannot reset main base y: {e}")
+
+		table_top_z = _find_table_top_z(p_)
+		if table_top_z is None:
+			# fallback: assume z=0 is support surface
+			table_top_z = 0.0
+
+		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
+		right_block = (float(block_x), +float(block_y_off), float(table_top_z) + float(block_z))
+		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
+		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
+		scene_block_ids = [int(lb_id), int(rb_id)]
+		print(f"[SCENE] blocks: left(id={lb_id})={left_block}, right(id={rb_id})={right_block}")
+
+		# main arm goal = right block pregrasp
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.12]
+		try:
+			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
+			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
+			print(f"[GOAL][cross_pick] main_goal_xyz={goal_xyz}")
+		except Exception as e:
+			print(f"[GOAL][cross_pick] IK failed: {e}")
 
 	if start_q_override is not None:
 		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
@@ -1075,14 +1226,16 @@ def run_moving_obstacle_rollout(
 	# If we are using a moving obstacle arm, spawn it BEFORE clean-start checks so
 	# collision/clearance is measured against the actual obstacle arm.
 	obstacle_arm = None
-	if mode == "arm":
+	if mode in ("arm", "arm_task"):
 		try:
 			if obstacle_arm_urdf is not None:
 				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+			_b = list(obstacle_arm_base_xyz)
+			_b[1] = float(obst_base_y)
 			obstacle_arm = _spawn_obstacle_arm(
 				env,
 				main_robot=robot,
-				base_xyz=tuple(obstacle_arm_base_xyz),
+				base_xyz=tuple(_b),
 				base_rpy=tuple(obstacle_arm_base_rpy),
 				seed=int(obstacle_arm_seed),
 				urdf_path=obstacle_arm_urdf,
@@ -1093,6 +1246,20 @@ def run_moving_obstacle_rollout(
 			# Include obstacle arm in collision checks
 			if obstacle_arm["arm_id"] not in obstacle_ids:
 				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+			# Don't treat the scene blocks as obstacles for collision/distance checks
+			if scene_block_ids:
+				obstacle_ids = [oid for oid in obstacle_ids if int(oid) not in set(scene_block_ids)]
+			# IMPORTANT: make observation only "see" the obstacle arm by restricting env.obstacle_ids
+			try:
+				env.obstacle_ids = [int(obstacle_arm["arm_id"])]
+			except Exception:
+				pass
+			try:
+				ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
+				obstacle_arm["ee0"] = ee0.copy()
+				print(f"[OBST_ARM] ee0={ee0.tolist()}")
+			except Exception:
+				pass
 			print(f"[OBST_ARM] spawned (pre-start) id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
 		except Exception as e:
 			print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
@@ -1105,6 +1272,7 @@ def run_moving_obstacle_rollout(
 		min_clearance=float(start_min_clearance),
 		max_tries=int(max_start_resample),
 		abort_on_fail=bool(require_clean_start),
+		exclude_obstacle_ids=scene_block_ids,
 	)
 	if x is None:
 		result = {
@@ -1215,6 +1383,24 @@ def run_moving_obstacle_rollout(
 				if k < 3:
 					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
+			elif mode == "arm_task" and obstacle_arm is not None:
+				if str(scene).lower() == "cross_pick":
+					# Match the Z used when spawning blocks: table_top_z + block_z
+					_tz = float(table_top_z) if table_top_z is not None else 0.0
+					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"]))
+					ee_tgt = _obstacle_ee_target_cross_pick(
+						t=float(k * dm.dt),
+						T=float(t_sim),
+						start_xyz=ee0,
+						left_block_xyz=left_block_xyz,
+						cross_jitter_amp=float(cross_jitter_amp),
+						cross_jitter_hz=float(cross_jitter_hz),
+						cross_window_ratio=float(cross_window_ratio),
+					)
+					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
+				else:
+					_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 			elif mode == "rigid":
 				_update_obstacles(env, obstacle_ids, t_base, base, direction, omega, amp)
 			# else: mode == "none" -> do nothing
@@ -1273,8 +1459,13 @@ def run_moving_obstacle_rollout(
 					z = float(ls[4][2])
 					if z < min_z:
 						min_z = z
-				if min_z <= float(floor_z_tol):
-					print(f"[FLOOR] WARNING: link below floor: min_link_z={min_z:.6f} <= {float(floor_z_tol):.6f} at step {k}")
+				# If cross-pick scene, forbid going below the tabletop ("under the table")
+				_limit_z = float(floor_z_tol)
+				if str(scene).lower() == "cross_pick" and table_top_z is not None:
+					_limit_z = float(table_top_z) - 0.005
+
+				if min_z <= _limit_z:
+					print(f"[FLOOR] WARNING: link below floor: min_link_z={min_z:.6f} <= {_limit_z:.6f} at step {k}")
 					if pause_on_collision:
 						try:
 							p_.setRealTimeSimulation(0)
@@ -1819,7 +2010,16 @@ if __name__ == "__main__":
     # Rollout options (only used when --mode rollout)
     parser.add_argument("--t_sim", type=float, default=6.0)
     parser.add_argument("--speed_scale", type=float, default=1.8)
-    parser.add_argument("--obstacle_mode", type=str, default="arm", choices=["none", "rigid", "arm"])
+    parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
+    parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
+    parser.add_argument("--block_x", type=float, default=0.55)
+    parser.add_argument("--block_y_off", type=float, default=0.12)
+    parser.add_argument("--block_z", type=float, default=0.03)
+    parser.add_argument("--main_base_y", type=float, default=-0.18)
+    parser.add_argument("--obst_base_y", type=float, default=+0.18)
+    parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
+    parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
+    parser.add_argument("--cross_window_ratio", type=float, default=0.35)
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -1952,6 +2152,15 @@ if __name__ == "__main__":
             use_motor_control=bool(args_cli.use_motor_control),
             max_dq_per_step=float(args_cli.max_dq_per_step),
             pause_on_floor_penetration=not bool(args_cli.no_floor_pause),
+            scene=str(args_cli.scene),
+            block_x=float(args_cli.block_x),
+            block_y_off=float(args_cli.block_y_off),
+            block_z=float(args_cli.block_z),
+            main_base_y=float(args_cli.main_base_y),
+            obst_base_y=float(args_cli.obst_base_y),
+            cross_jitter_amp=float(args_cli.cross_jitter_amp),
+            cross_jitter_hz=float(args_cli.cross_jitter_hz),
+            cross_window_ratio=float(args_cli.cross_window_ratio),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
