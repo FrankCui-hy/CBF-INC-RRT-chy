@@ -946,12 +946,16 @@ def _update_obstacle_arm(env: ArmEnv, arm_spec: dict, t: float, strength: float 
     )
 
 
-def _get_arm_ee_pos(body_id: int, ee_link_index: int = None) -> np.ndarray:
-    """Return end-effector position for a pybullet body."""
+def _get_arm_ee_pos(body_id: int, ee_link_index: int = None, p_client=None) -> np.ndarray:
+    """Return end-effector position for a pybullet body.
+
+    IMPORTANT: Use the same pybullet client as the environment (`env.p`) when available.
+    """
+    pc = p_client if p_client is not None else p
     try:
         if ee_link_index is None:
-            ee_link_index = p.getNumJoints(body_id) - 1
-        ls = p.getLinkState(body_id, ee_link_index)
+            ee_link_index = pc.getNumJoints(body_id) - 1
+        ls = pc.getLinkState(body_id, ee_link_index)
         return np.array(ls[4], dtype=np.float32)
     except Exception:
         return np.zeros((3,), dtype=np.float32)
@@ -1306,7 +1310,7 @@ def run_moving_obstacle_rollout(
 
 				# Record ee0
 				try:
-					ee0 = _get_arm_ee_pos(oid, ee_link_index=(p_.getNumJoints(oid) - 1))
+					ee0 = _get_arm_ee_pos(oid, ee_link_index=(p_.getNumJoints(oid) - 1), p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] (env.obstacle_robot) ee0={ee0.tolist()}")
 				except Exception:
@@ -1349,7 +1353,7 @@ def run_moving_obstacle_rollout(
 				except Exception:
 					pass
 				try:
-					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
+					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] ee0={ee0.tolist()}")
 				except Exception:
@@ -1475,14 +1479,14 @@ def run_moving_obstacle_rollout(
 				_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 				# optional tiny debug prints
 				if k < 3:
-					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
+					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
 			elif mode == "arm_task" and obstacle_arm is not None:
 				if str(scene).lower() == "cross_pick":
 					# Match the Z used when spawning blocks: table_top_z + block_z
 					_tz = float(table_top_z) if table_top_z is not None else 0.0
 					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
-					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"]))
+					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
 					ee_tgt = _obstacle_ee_target_cross_pick(
 						t=float(k * dm.dt),
 						T=float(t_sim),
