@@ -1120,20 +1120,6 @@ def run_moving_obstacle_rollout(
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
-		# Also remove any stale built-in obstacle robot from ArmEnv to avoid
-		# contaminating clean-start checks before we spawn the rollout obstacle arm.
-		try:
-			obst = getattr(env, "obstacle_robot", None)
-			if obst is not None and hasattr(obst, "robotId"):
-				oid = int(obst.robotId)
-				try:
-					p_.removeBody(oid)
-					print(f"[ROLL] obstacle_mode={mode} -> removed stale obstacle_robot id={oid}")
-				except Exception:
-					pass
-				env.obstacle_robot = None
-		except Exception:
-			pass
 
 	else:
 		# mode == "rigid": keep existing rigid obstacles (boxes/meshes)
@@ -1227,43 +1213,128 @@ def run_moving_obstacle_rollout(
 	# collision/clearance is measured against the actual obstacle arm.
 	obstacle_arm = None
 	if mode in ("arm", "arm_task"):
+		# Prefer reusing ArmEnv's built-in obstacle robot (keeps observation pipeline consistent)
 		try:
-			if obstacle_arm_urdf is not None:
-				setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
-			_b = list(obstacle_arm_base_xyz)
-			_b[1] = float(obst_base_y)
-			obstacle_arm = _spawn_obstacle_arm(
-				env,
-				main_robot=robot,
-				base_xyz=tuple(_b),
-				base_rpy=tuple(obstacle_arm_base_rpy),
-				seed=int(obstacle_arm_seed),
-				urdf_path=obstacle_arm_urdf,
-				use_fixed_base=True,
-				amp_scale=float(obstacle_arm_amp_scale),
-				omega_scale=float(obstacle_arm_omega_scale),
-			)
-			# Include obstacle arm in collision checks
-			if obstacle_arm["arm_id"] not in obstacle_ids:
-				obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
-			# Don't treat the scene blocks as obstacles for collision/distance checks
-			if scene_block_ids:
-				obstacle_ids = [oid for oid in obstacle_ids if int(oid) not in set(scene_block_ids)]
-			# IMPORTANT: make observation only "see" the obstacle arm by restricting env.obstacle_ids
+			_env_obst = getattr(env, "obstacle_robot", None)
+			oid = int(getattr(_env_obst, "robotId", -1)) if _env_obst is not None else -1
+			if oid >= 0:
+				# Reposition obstacle robot base to the right
+				try:
+					bpos, born = p_.getBasePositionAndOrientation(oid)
+					p_.resetBasePositionAndOrientation(oid, [float(bpos[0]), float(obst_base_y), float(bpos[2])], born)
+				except Exception:
+					pass
+
+				# Build an obstacle_arm spec that matches our helper expectations
+				joints = []
+				lower = []
+				upper = []
+				for j in range(p_.getNumJoints(oid)):
+					ji = p_.getJointInfo(oid, j)
+					if ji[2] == p_.JOINT_REVOLUTE:
+						joints.append(j)
+						lower.append(float(ji[8]))
+						upper.append(float(ji[9]))
+				joints = list(joints)
+				lower = np.array(lower, dtype=np.float32)
+				upper = np.array(upper, dtype=np.float32)
+
+				# Initialize around mid-limits (deterministic with obstacle_arm_seed)
+				rng = np.random.default_rng(int(obstacle_arm_seed))
+				q_center = 0.5 * (lower + upper)
+				jitter = rng.uniform(low=-0.15, high=0.15, size=q_center.shape).astype(np.float32)
+				q_center = np.clip(q_center + jitter, lower + 0.05, upper - 0.05)
+				amp = rng.uniform(low=0.10, high=0.45, size=q_center.shape).astype(np.float32)
+				amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
+				amp = amp * float(obstacle_arm_amp_scale)
+				amp = np.minimum(amp, np.minimum(q_center - (lower + 0.02), (upper - 0.02) - q_center))
+				amp = np.clip(amp, 0.03, 0.80)
+				omega = rng.uniform(low=0.6, high=2.2, size=q_center.shape).astype(np.float32)
+				omega = omega * float(obstacle_arm_omega_scale)
+				phase = rng.uniform(low=0.0, high=2 * np.pi, size=q_center.shape).astype(np.float32)
+
+				# Reset joints to q_center
+				for idx, j in enumerate(joints):
+					p_.resetJointState(oid, int(j), targetValue=float(q_center[idx]))
+
+				obstacle_arm = {
+					"arm_id": oid,
+					"joint_indices": joints,
+					"q_center": q_center,
+					"amp": amp,
+					"omega": omega,
+					"phase": phase,
+					"base_xyz": np.array([0.0, float(obst_base_y), 0.0], dtype=np.float32),
+				}
+
+				# Ensure evaluation collision checks include the obstacle arm
+				if oid not in obstacle_ids:
+					obstacle_ids = [oid] + list(obstacle_ids)
+
+				# Do not treat blocks as obstacles for collision/distance
+				if scene_block_ids:
+					obstacle_ids = [x for x in obstacle_ids if int(x) not in set(scene_block_ids)]
+
+				# Keep observation focused on the obstacle arm
+				try:
+					env.obstacle_ids = [int(oid)]
+				except Exception:
+					pass
+
+				# Record ee0
+				try:
+					ee0 = _get_arm_ee_pos(oid, ee_link_index=(p_.getNumJoints(oid) - 1))
+					obstacle_arm["ee0"] = ee0.copy()
+					print(f"[OBST_ARM] (env.obstacle_robot) ee0={ee0.tolist()}")
+				except Exception:
+					pass
+
+				print(f"[OBST_ARM] using env.obstacle_robot id={oid} y={float(obst_base_y):.3f}")
+				# If we successfully reused env.obstacle_robot, skip spawning a new URDF arm
+				raise StopIteration
+		except StopIteration:
+			pass
+		except Exception:
+			# Fall back to spawning a separate URDF arm below
+			pass
+		if obstacle_arm is None:
 			try:
-				env.obstacle_ids = [int(obstacle_arm["arm_id"])]
-			except Exception:
-				pass
-			try:
-				ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
-				obstacle_arm["ee0"] = ee0.copy()
-				print(f"[OBST_ARM] ee0={ee0.tolist()}")
-			except Exception:
-				pass
-			print(f"[OBST_ARM] spawned (pre-start) id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
-		except Exception as e:
-			print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
-			obstacle_arm = None
+				if obstacle_arm_urdf is not None:
+					setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
+				_b = list(obstacle_arm_base_xyz)
+				_b[1] = float(obst_base_y)
+				obstacle_arm = _spawn_obstacle_arm(
+					env,
+					main_robot=robot,
+					base_xyz=tuple(_b),
+					base_rpy=tuple(obstacle_arm_base_rpy),
+					seed=int(obstacle_arm_seed),
+					urdf_path=obstacle_arm_urdf,
+					use_fixed_base=True,
+					amp_scale=float(obstacle_arm_amp_scale),
+					omega_scale=float(obstacle_arm_omega_scale),
+				)
+				# Include obstacle arm in collision checks
+				if obstacle_arm["arm_id"] not in obstacle_ids:
+					obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
+				# Don't treat the scene blocks as obstacles for collision/distance checks
+				if scene_block_ids:
+					obstacle_ids = [oid for oid in obstacle_ids if int(oid) not in set(scene_block_ids)]
+				# IMPORTANT: make observation only "see" the obstacle arm by restricting env.obstacle_ids
+				try:
+					env.obstacle_ids = [int(obstacle_arm["arm_id"])]
+				except Exception:
+					pass
+				try:
+					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1))
+					obstacle_arm["ee0"] = ee0.copy()
+					print(f"[OBST_ARM] ee0={ee0.tolist()}")
+				except Exception:
+					pass
+				print(f"[OBST_ARM] spawned (pre-start) id={obstacle_arm['arm_id']} base={obstacle_arm['base_xyz'].tolist()}")
+			except Exception as e:
+				print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
+				obstacle_arm = None
 
 	# Make sure we don't start in collision
 	x = _ensure_noncolliding_start(
