@@ -1167,7 +1167,7 @@ def run_moving_obstacle_rollout(
 	pause_on_floor_penetration: bool = True,
 	floor_z_tol: float = -0.005,
 	scene: str = "plain",
-	block_x: float = 0.55,
+	block_x: float = 0.30,
 	block_y_off: float = 0.14,
 	block_z: float = 0.04,
 	main_base_y: float = -0.28,
@@ -2090,7 +2090,7 @@ if __name__ == "__main__":
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
-    parser.add_argument("--block_x", type=float, default=0.55)
+    parser.add_argument("--block_x", type=float, default=0.30)
     parser.add_argument("--block_y_off", type=float, default=0.14)
     parser.add_argument("--block_z", type=float, default=0.04)
     parser.add_argument("--main_base_y", type=float, default=-0.28)
