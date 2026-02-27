@@ -1204,6 +1204,8 @@ def run_moving_obstacle_rollout(
 	right_block_id = None
 	obst_grasp_state = {"grabbed": False}
 	main_grasp_state = {"grabbed": False}
+	# For cross_pick: track return-to-home after grasp
+	main_return_state = {"returning": False, "home_q": None}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1455,6 +1457,11 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
+	# Save home configuration for return-to-home after grasp
+	try:
+		main_return_state["home_q"] = q.detach().clone().float()
+	except Exception:
+		main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
 	start_ee = _get_ee_pos(robot)
@@ -1631,6 +1638,18 @@ def run_moving_obstacle_rollout(
 				dist_thresh=0.05,
 				ee_z_offset=-0.035,
 			)
+			# After first successful grasp, switch goal to return home
+			if str(scene).lower() == "cross_pick" and (not main_return_state.get("returning", False)):
+				if bool(main_grasp_state.get("grabbed", False)):
+					hq = main_return_state.get("home_q", None)
+					if hq is not None:
+						try:
+							dm.set_goal(hq)
+							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+							main_return_state["returning"] = True
+							print("[TASK] main grasped right block -> switching goal to HOME")
+						except Exception as e:
+							print(f"[TASK] WARN: failed to switch goal to HOME: {e}")
 
 		# Detect obvious floor penetration (debug)
 		if pause_on_floor_penetration:
@@ -1679,7 +1698,8 @@ def run_moving_obstacle_rollout(
 					time.sleep(0.1)
 			# If you prefer to stop instead of pause, keep stop_on_goal=True
 		if stop_on_goal and (d_goal <= float(goal_tol)):
-			print(f"[ROLL] reached goal: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
+			phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
+			print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
 			break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
