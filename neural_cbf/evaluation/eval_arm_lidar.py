@@ -719,9 +719,9 @@ def _obstacle_ee_target_cross_pick(
     grasp_dz: float = 0.035,
     safe_pregrasp_dz: float = 0.12,
     safe_drop_dz: float = 0.035,
-    cross_jitter_amp: float = 0.018,
+    cross_jitter_amp: float = 0.014,
     cross_jitter_hz: float = 6.0,
-    cross_window_ratio: float = 0.35,
+    cross_window_ratio: float = 0.12,
 ):
     """Obstacle-arm EE target: pick left block, then place at left-safe region, with non-smooth jitter near crossing."""
     T = max(float(T), 1e-6)
@@ -756,8 +756,8 @@ def _obstacle_ee_target_cross_pick(
     else:
         p_des = safe_drop.copy()
 
-    # Inject non-smooth jitter around crossing (s ~= 0.62).
-    w = float(np.clip(cross_window_ratio, 1e-3, 1.0))
+    # Inject non-smooth jitter only in a narrow window to avoid prolonged close-range entanglement.
+    w = float(np.clip(cross_window_ratio, 1e-3, 0.18))
     c = 0.62
     s0 = max(0.0, c - 0.5 * w)
     s1 = min(1.0, c + 0.5 * w)
@@ -1190,9 +1190,9 @@ def run_moving_obstacle_rollout(
 	block_z: float = 0.04,
 	main_base_y: float = -0.15,
 	obst_base_y: float = 0.15,
-	cross_jitter_amp: float = 0.018,
+	cross_jitter_amp: float = 0.014,
 	cross_jitter_hz: float = 6.0,
-	cross_window_ratio: float = 0.35,
+	cross_window_ratio: float = 0.12,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1367,7 +1367,8 @@ def run_moving_obstacle_rollout(
 	main_goal_pick_q = None
 	main_goal_place_q = None
 	main_goal_switched = False
-	main_goal_switch_t = 0.55 * float(t_sim)
+	# Switch once near the crossing phase to create one strong avoidance event.
+	main_goal_switch_t = 0.62 * float(t_sim)
 	if str(scene).lower() == "cross_pick":
 		left_block_xyz = np.array([float(block_x), -float(block_y_off), float(table_top_z) + float(block_z)], dtype=np.float32)
 		right_block_xyz = np.array([float(block_x), float(block_y_off), float(table_top_z) + float(block_z)], dtype=np.float32)
@@ -2148,9 +2149,9 @@ if __name__ == "__main__":
     parser.add_argument("--block_z", type=float, default=0.04)
     parser.add_argument("--main_base_y", type=float, default=-0.15)
     parser.add_argument("--obst_base_y", type=float, default=+0.15)
-    parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
+    parser.add_argument("--cross_jitter_amp", type=float, default=0.014)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
-    parser.add_argument("--cross_window_ratio", type=float, default=0.35)
+    parser.add_argument("--cross_window_ratio", type=float, default=0.12)
     parser.add_argument(
         "--obstacle_arm_switch_ratio",
         type=float,
