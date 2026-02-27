@@ -633,13 +633,13 @@ def _min_distance_and_collision(env: ArmEnv, robot_id: int, obstacle_ids, distan
 
 
 # ---- Remove all obstacles helper ----
-def _remove_all_obstacles(env: ArmEnv, robot_id: int = None):
+def _remove_all_obstacles(env: ArmEnv, robot_id: int = None, exclude_ids=None):
     """Remove all non-floor obstacles from the pybullet world.
 
-    This is used when you want a clean, obstacle-free evaluation scene.
+    Supports excluding specific body ids from removal.
     """
     p_ = env.p
-    obstacle_ids = _get_eval_obstacle_ids(env, robot_id)
+    obstacle_ids = _get_eval_obstacle_ids(env, robot_id, exclude_ids=exclude_ids)
     removed = []
     for oid in obstacle_ids:
         try:
@@ -1116,8 +1116,16 @@ def run_moving_obstacle_rollout(
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode in ("arm", "arm_task"):
-		# User request: delete the original rigid/box obstacles, keep only the obstacle arm.
-		removed = _remove_all_obstacles(env, robot.robotId)
+		# Keep ArmEnv's built-in obstacle robot (if present) so explicit/JVP observation pipeline stays consistent
+		_keep = []
+		try:
+			_obst = getattr(env, "obstacle_robot", None)
+			_oid = int(getattr(_obst, "robotId", -1)) if _obst is not None else -1
+			if _oid >= 0:
+				_keep.append(_oid)
+		except Exception:
+			_keep = []
+		removed = _remove_all_obstacles(env, robot.robotId, exclude_ids=_keep)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
 
@@ -1180,6 +1188,15 @@ def run_moving_obstacle_rollout(
 			# fallback: assume z=0 is support surface
 			table_top_z = 0.0
 
+		# Print kept obstacle robot id for debugging
+		try:
+			_obst = getattr(env, "obstacle_robot", None)
+			_oid = int(getattr(_obst, "robotId", -1)) if _obst is not None else -1
+			if _oid >= 0:
+				print(f"[SCENE] env.obstacle_robot id={_oid} (kept)")
+		except Exception:
+			pass
+
 		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
 		right_block = (float(block_x), +float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
@@ -1217,6 +1234,12 @@ def run_moving_obstacle_rollout(
 		try:
 			_env_obst = getattr(env, "obstacle_robot", None)
 			oid = int(getattr(_env_obst, "robotId", -1)) if _env_obst is not None else -1
+			# Validate the obstacle robot id is still a robot arm (has joints)
+			try:
+				if oid >= 0 and p_.getNumJoints(oid) <= 0:
+					oid = -1
+			except Exception:
+				oid = -1
 			if oid >= 0:
 				# Reposition obstacle robot base to the right
 				try:
