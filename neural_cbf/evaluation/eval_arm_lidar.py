@@ -680,7 +680,7 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 def _spawn_block(
     env: ArmEnv,
     pos_xyz,
-    half_extents=(0.02, 0.02, 0.02),
+    half_extents=(0.03, 0.03, 0.03),
     rgba=(0.9, 0.3, 0.3, 1.0),
 ):
     """Spawn a static box block on the table."""
@@ -1168,10 +1168,10 @@ def run_moving_obstacle_rollout(
 	floor_z_tol: float = -0.005,
 	scene: str = "plain",
 	block_x: float = 0.55,
-	block_y_off: float = 0.12,
-	block_z: float = 0.03,
-	main_base_y: float = -0.18,
-	obst_base_y: float = 0.18,
+	block_y_off: float = 0.14,
+	block_z: float = 0.04,
+	main_base_y: float = -0.28,
+	obst_base_y: float = 0.28,
 	cross_jitter_amp: float = 0.018,
 	cross_jitter_hz: float = 6.0,
 	cross_window_ratio: float = 0.35,
@@ -2091,10 +2091,10 @@ if __name__ == "__main__":
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
     parser.add_argument("--block_x", type=float, default=0.55)
-    parser.add_argument("--block_y_off", type=float, default=0.12)
-    parser.add_argument("--block_z", type=float, default=0.03)
-    parser.add_argument("--main_base_y", type=float, default=-0.18)
-    parser.add_argument("--obst_base_y", type=float, default=+0.18)
+    parser.add_argument("--block_y_off", type=float, default=0.14)
+    parser.add_argument("--block_z", type=float, default=0.04)
+    parser.add_argument("--main_base_y", type=float, default=-0.28)
+    parser.add_argument("--obst_base_y", type=float, default=+0.28)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
