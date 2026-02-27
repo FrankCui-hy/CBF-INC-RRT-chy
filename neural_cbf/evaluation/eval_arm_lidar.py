@@ -669,6 +669,7 @@ def _get_ee_pos(robot) -> np.ndarray:
 		return np.zeros((3,), dtype=np.float32)
 
 
+
 def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 	"""Spawn a visual marker sphere in GUI; returns body id."""
 	try:
@@ -677,6 +678,50 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return int(bid)
 	except Exception:
 		return -1
+
+
+# ---- Visual grasp helper for cross-pick ----
+def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_id: int, grasp_state: dict,
+                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035):
+    """Visual-only grasp: when EE is close, disable block collisions and make block follow EE.
+
+    grasp_state: dict that will store keys {"grabbed": bool}.
+    """
+    if block_id is None or int(block_id) < 0:
+        return
+    if arm_id is None or int(arm_id) < 0:
+        return
+    try:
+        ls = p_client.getLinkState(int(arm_id), int(ee_link_index))
+        ee_pos = np.array(ls[4], dtype=np.float32)
+        ee_orn = ls[5]
+    except Exception:
+        return
+
+    try:
+        bpos, born = p_client.getBasePositionAndOrientation(int(block_id))
+        bpos = np.array(bpos, dtype=np.float32)
+    except Exception:
+        return
+
+    grabbed = bool(grasp_state.get("grabbed", False))
+
+    # Trigger grasp once within threshold
+    if (not grabbed) and (float(np.linalg.norm(ee_pos - bpos)) <= float(dist_thresh)):
+        grasp_state["grabbed"] = True
+        # Disable collisions for the block so it won't affect control/contacts
+        try:
+            p_client.setCollisionFilterGroupMask(int(block_id), -1, 0, 0)
+        except Exception:
+            pass
+
+    # If grabbed, kinematically attach the block to EE
+    if bool(grasp_state.get("grabbed", False)):
+        tgt_pos = (ee_pos + np.array([0.0, 0.0, float(ee_z_offset)], dtype=np.float32)).tolist()
+        try:
+            p_client.resetBasePositionAndOrientation(int(block_id), tgt_pos, ee_orn)
+        except Exception:
+            pass
 
 def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0):
     p_ = env.p
@@ -1155,6 +1200,9 @@ def run_moving_obstacle_rollout(
 	# --- Cross-pick scene: spawn blocks AFTER obstacle cleanup so they won't be removed ---
 	scene_block_ids = []
 	table_top_z = None
+	left_block_id = None
+	right_block_id = None
+	obst_grasp_state = {"grabbed": False}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1207,6 +1255,10 @@ def run_moving_obstacle_rollout(
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
 		print(f"[SCENE] blocks: left(id={lb_id})={left_block}, right(id={rb_id})={right_block}")
+		# Track blocks explicitly for visual grasp
+		left_block_id = int(lb_id)
+		right_block_id = int(rb_id)
+		obst_grasp_state = {"grabbed": False}
 
 		# main arm goal = right block pregrasp
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.12]
@@ -1481,6 +1533,14 @@ def run_moving_obstacle_rollout(
 				if k < 3:
 					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
+				# Visual-only grasp for obstacle arm in sinusoidal mode as well
+				if str(scene).lower() == "cross_pick":
+					try:
+						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
+					except Exception:
+						ee_link = -1
+					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
+									  dist_thresh=0.05, ee_z_offset=-0.035)
 			elif mode == "arm_task" and obstacle_arm is not None:
 				if str(scene).lower() == "cross_pick":
 					# Match the Z used when spawning blocks: table_top_z + block_z
@@ -1497,6 +1557,13 @@ def run_moving_obstacle_rollout(
 						cross_window_ratio=float(cross_window_ratio),
 					)
 					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
+					# Visual-only grasp: obstacle arm attaches left block when close
+					try:
+						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
+					except Exception:
+						ee_link = -1
+					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
+									  dist_thresh=0.05, ee_z_offset=-0.035)
 				else:
 					_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 			elif mode == "rigid":
