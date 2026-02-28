@@ -826,9 +826,9 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
-    # Brief "feint" near midline, high-z, then quickly leave to obstacle side.
+    # Brief "feint" near midline, high-z, then return to its own start position.
     feint = np.array([left_block_xyz[0] - 0.12, -0.05, left_block_xyz[2] + 0.26], dtype=np.float32)
-    retreat = np.array([left_block_xyz[0] - 0.22, left_block_xyz[1] - 0.14, left_block_xyz[2] + 0.24], dtype=np.float32)
+    retreat = start.copy()
 
     if s <= 0.30:
         w = _smoothstep(s / 0.30)
@@ -1872,7 +1872,8 @@ def run_moving_obstacle_rollout(
 			and (not bool(main_return_state.get("returning", False)))
 			and (not bool(main_grasp_state.get("grabbed", False)))
 		):
-			if pre_min_d < 0.35:
+			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
+			if pre_min_d < 0.35 and ee_to_blue > 0.18:
 				try:
 					q_now = x[0, :dm.n_dims]
 					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
@@ -1920,7 +1921,14 @@ def run_moving_obstacle_rollout(
 								beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
 								u = (1.0 - beta) * u + beta * u_track
 						else:
-							alpha = 0.0
+							# With obstacles: keep CBF dominant, but allow small approach
+							# assistance once we are close to the blue block and not too near obstacle.
+							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
+							if (pre_min_d is not None) and (pre_min_d > 0.12) and (ee_to_blue < 0.25):
+								alpha = float(np.clip((0.25 - ee_to_blue) / 0.15, 0.0, 0.25))
+								u = (1.0 - alpha) * u + alpha * u_ref
+							else:
+								alpha = 0.0
 					if (k % max(int(print_every), 1)) == 0:
 						phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
 						print(f"[CTRL] near_goal_blend phase={phase} alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
@@ -1934,8 +1942,10 @@ def run_moving_obstacle_rollout(
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
+			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			if pre_min_d < 0.35:
-				slow = float(np.clip((pre_min_d - 0.05) / 0.30, 0.15, 1.0))
+				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
+				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
 				u = u * slow
 				if (k % max(int(print_every), 1)) == 0:
 					print(f"[SAFE] pre_min_d={pre_min_d:.4f} speed_scale_near_obs={slow:.3f}")
