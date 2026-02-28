@@ -773,6 +773,55 @@ def _obstacle_ee_target_cross_pick(
 
     return xyz
 
+def _ik_close_to_q(p_client, robot_id: int, ee_link: int, target_pos, q_ref, target_orn=None):
+    """Compute IK biased toward q_ref using pybullet restPoses + joint limits.
+
+    Returns a torch.FloatTensor of size (n_dof,) on success, otherwise None.
+    """
+    try:
+        # Collect revolute joints in the same order as robot.body_joints uses (for Panda this is 7 DOF)
+        joints = []
+        lower = []
+        upper = []
+        for j in range(p_client.getNumJoints(robot_id)):
+            ji = p_client.getJointInfo(robot_id, j)
+            if ji[2] == p_client.JOINT_REVOLUTE:
+                joints.append(j)
+                lower.append(float(ji[8]))
+                upper.append(float(ji[9]))
+        if len(joints) == 0:
+            return None
+        n = len(joints)
+
+        q_ref = torch.as_tensor(q_ref, dtype=torch.float32).reshape(-1)
+        if q_ref.numel() < n:
+            return None
+        q_ref = q_ref[:n].detach().cpu().numpy().astype(np.float32).tolist()
+
+        lower = np.array(lower, dtype=np.float32)
+        upper = np.array(upper, dtype=np.float32)
+        jr = (upper - lower).astype(np.float32)
+        jr = np.where(jr <= 1e-6, 2.0, jr)
+
+        kwargs = dict(
+            lowerLimits=lower.tolist(),
+            upperLimits=upper.tolist(),
+            jointRanges=jr.tolist(),
+            restPoses=q_ref,
+            maxNumIterations=120,
+            residualThreshold=1e-4,
+        )
+
+        if target_orn is None:
+            sol = p_client.calculateInverseKinematics(robot_id, int(ee_link), list(map(float, target_pos)), **kwargs)
+        else:
+            sol = p_client.calculateInverseKinematics(robot_id, int(ee_link), list(map(float, target_pos)), targetOrientation=target_orn, **kwargs)
+
+        sol = np.array(sol[:n], dtype=np.float32)
+        return torch.tensor(sol, dtype=torch.float32)
+    except Exception:
+        return None
+
 def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_index: int = None, strength: float = 260.0):
     p_ = env.p
     if ee_link_index is None:
@@ -1205,7 +1254,7 @@ def run_moving_obstacle_rollout(
 	obst_grasp_state = {"grabbed": False}
 	main_grasp_state = {"grabbed": False}
 	# For cross_pick: track return-to-home after grasp
-	main_return_state = {"returning": False, "home_q": None}
+	main_return_state = {"returning": False, "home_q": None, "enable_return": True}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1264,14 +1313,9 @@ def run_moving_obstacle_rollout(
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False}
 
-		# main arm goal = right block pregrasp
+		# main arm goal xyz (IK will be solved after start_q is applied, biased to the start pose)
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
-		try:
-			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
-			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
-			print(f"[GOAL][cross_pick] main_goal_xyz={goal_xyz}")
-		except Exception as e:
-			print(f"[GOAL][cross_pick] IK failed: {e}")
+		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
 
 	if start_q_override is not None:
 		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
@@ -1457,20 +1501,21 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
-	# Save home configuration for return-to-home after grasp
-	try:
-		main_return_state["home_q"] = q.detach().clone().float()
-	except Exception:
-		main_return_state["home_q"] = None
+	# Save home configuration only when return-home behavior is enabled
+	if bool(main_return_state.get("enable_return", False)):
+		try:
+			main_return_state["home_q"] = q.detach().clone().float()
+		except Exception:
+			main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
-	start_ee = _get_ee_pos(robot)
+	start_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(robot.body_joints[-1]), p_client=p_)
 	# Put the robot at goal once to get goal EE, then restore
 	q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
 	q_save = q.detach().clone()
 	robot.set_joint_position(robot.body_joints, q_goal)
 	p_.stepSimulation()
-	goal_ee = _get_ee_pos(robot)
+	goal_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(robot.body_joints[-1]), p_client=p_)
 	# restore start
 	robot.set_joint_position(robot.body_joints, q_save)
 	p_.stepSimulation()
@@ -1638,8 +1683,8 @@ def run_moving_obstacle_rollout(
 				dist_thresh=0.05,
 				ee_z_offset=-0.035,
 			)
-			# After first successful grasp, switch goal to return home
-			if str(scene).lower() == "cross_pick" and (not main_return_state.get("returning", False)):
+			# Optional behavior: after grasp, switch goal to return home
+			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
 					hq = main_return_state.get("home_q", None)
 					if hq is not None:
