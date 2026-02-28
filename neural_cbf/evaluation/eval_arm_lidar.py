@@ -1516,6 +1516,7 @@ def run_moving_obstacle_rollout(
 					"phase": phase,
 					"base_xyz": np.array([0.0, float(obst_base_y), 0.0], dtype=np.float32),
 					"task_done": False,
+					"returning": False,
 				}
 
 				# Ensure evaluation collision checks include the obstacle arm
@@ -1569,6 +1570,7 @@ def run_moving_obstacle_rollout(
 				)
 				# Include obstacle arm in collision checks
 				obstacle_arm["task_done"] = False
+				obstacle_arm["returning"] = False
 				if obstacle_arm["arm_id"] not in obstacle_ids:
 					obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
 				# Don't treat the scene blocks as obstacles for collision/distance checks
@@ -1585,6 +1587,7 @@ def run_moving_obstacle_rollout(
 					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=ee_link_idx, p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					obstacle_arm["task_done"] = False
+					obstacle_arm["returning"] = False
 					print(f"[OBST_ARM] ee0={ee0.tolist()}")
 				except Exception:
 					pass
@@ -1812,19 +1815,55 @@ def run_moving_obstacle_rollout(
 					if bool(obstacle_arm.get("task_done", False)):
 						ee_tgt = np.array(ee0, dtype=np.float32)
 					else:
-						t_task = float(min(t_raw, T_task))
-						ee_tgt = _obstacle_ee_target_cross_pick_nominal(
-							t=t_task,
-							T=T_task,
-							start_xyz=ee0,
-							left_block_xyz=left_block_xyz,
-							cross_jitter_amp=float(cross_jitter_amp),
-							cross_jitter_hz=float(cross_jitter_hz),
-							cross_window_ratio=float(cross_window_ratio),
-						)
-						if t_raw >= T_task:
-							obstacle_arm["task_done"] = True
-							print("[OBST_ARM_TASK] reached home pose; holding still.")
+						# Grabbed => immediately switch to return arc (no phase waiting)
+						if bool(obst_grasp_state.get("grabbed", False)) and (not bool(obstacle_arm.get("returning", False))):
+							obstacle_arm["returning"] = True
+							obstacle_arm["return_t0"] = float(t_raw)
+							try:
+								ee_now0 = _get_arm_ee_pos(
+									int(obstacle_arm["arm_id"]),
+									ee_link_index=int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"])))),
+									p_client=p_,
+								)
+								obstacle_arm["return_start_ee"] = ee_now0.copy()
+							except Exception:
+								obstacle_arm["return_start_ee"] = np.array(ee0, dtype=np.float32)
+							print("[OBST_ARM_TASK] grabbed -> immediate return")
+
+						if bool(obstacle_arm.get("returning", False)):
+							p0 = np.array(obstacle_arm.get("return_start_ee", ee0), dtype=np.float32)
+							p2 = np.array(ee0, dtype=np.float32)
+							T_ret = float(max(1.0, 0.45 * T_task))
+							sr = float(np.clip((t_raw - float(obstacle_arm.get("return_t0", t_raw))) / max(T_ret, 1e-6), 0.0, 1.0))
+							dxy = p2[:2] - p0[:2]
+							norm = float(np.linalg.norm(dxy))
+							if norm > 1e-6:
+								n = np.array([-dxy[1], dxy[0]], dtype=np.float32) / norm  # CCW normal
+							else:
+								n = np.array([0.0, 1.0], dtype=np.float32)
+							mid = 0.5 * (p0[:2] + p2[:2])
+							p1 = mid + 0.10 * n
+							xy = ((1.0 - sr) ** 2) * p0[:2] + 2.0 * (1.0 - sr) * sr * p1 + (sr ** 2) * p2[:2]
+							z = (1.0 - sr) * p0[2] + sr * p2[2]
+							ee_tgt = np.array([xy[0], xy[1], z], dtype=np.float32)
+							if sr >= 0.999:
+								obstacle_arm["task_done"] = True
+								obstacle_arm["returning"] = False
+								print("[OBST_ARM_TASK] reached home pose; holding still.")
+						else:
+							t_task = float(min(t_raw, T_task))
+							ee_tgt = _obstacle_ee_target_cross_pick_nominal(
+								t=t_task,
+								T=T_task,
+								start_xyz=ee0,
+								left_block_xyz=left_block_xyz,
+								cross_jitter_amp=float(cross_jitter_amp),
+								cross_jitter_hz=float(cross_jitter_hz),
+								cross_window_ratio=float(cross_window_ratio),
+							)
+							if t_raw >= T_task:
+								obstacle_arm["task_done"] = True
+								print("[OBST_ARM_TASK] reached home pose; holding still.")
 					if k < 5:
 						ee_now = _get_arm_ee_pos(
 							int(obstacle_arm["arm_id"]),
@@ -1846,7 +1885,7 @@ def run_moving_obstacle_rollout(
 						ee_link,
 						left_block_id,
 						obst_grasp_state,
-						dist_thresh=0.08,
+						dist_thresh=0.12,
 						ee_z_offset=-0.035,
 					)
 				else:
