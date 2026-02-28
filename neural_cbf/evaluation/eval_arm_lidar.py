@@ -660,38 +660,10 @@ def _remove_all_obstacles(env: ArmEnv, robot_id: int = None, exclude_ids=None):
 
 
 # ---- EE marker/utility helpers ----
-def _find_ee_link_index(p_client, body_id: int) -> int:
-	"""Best-effort EE link index for Panda-like arms."""
-	try:
-		preferred_link = ["panda_grasptarget", "panda_hand", "panda_link8", "ee", "gripper"]
-		preferred_joint = ["panda_hand_joint", "hand", "ee"]
-		nj = int(p_client.getNumJoints(int(body_id)))
-		if nj <= 0:
-			return -1
-		cands = []
-		for j in range(nj):
-			ji = p_client.getJointInfo(int(body_id), int(j))
-			jname = ji[1].decode("utf-8", "ignore") if isinstance(ji[1], (bytes, bytearray)) else str(ji[1])
-			lname = ji[12].decode("utf-8", "ignore") if isinstance(ji[12], (bytes, bytearray)) else str(ji[12])
-			cands.append((j, jname.lower(), lname.lower()))
-		for key in preferred_link:
-			for j, _, lname in cands:
-				if key in lname:
-					return int(j)
-		for key in preferred_joint:
-			for j, jname, _ in cands:
-				if key in jname:
-					return int(j)
-		return int(nj - 1)
-	except Exception:
-		return -1
-
-
 def _get_ee_pos(robot) -> np.ndarray:
 	"""End-effector position for quick visualization/printing."""
 	try:
-		ee_link = _find_ee_link_index(p, int(robot.robotId))
-		ls = p.getLinkState(robot.robotId, ee_link)
+		ls = p.getLinkState(robot.robotId, robot.body_joints[-1])
 		return np.array(ls[4], dtype=np.float32)
 	except Exception:
 		return np.zeros((3,), dtype=np.float32)
@@ -710,9 +682,7 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 
 # ---- Visual grasp helper for cross-pick ----
 def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_id: int, grasp_state: dict,
-                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035,
-                              z_align_thresh: float = 0.08, xy_align_thresh: float = 1.0,
-                              grasp_z_max_offset: float = 1.0):
+                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035):
     """Visual-only grasp: when EE is close, disable block collisions and make block follow EE.
 
     grasp_state: dict that will store keys {"grabbed": bool}.
@@ -736,23 +706,8 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
 
     grabbed = bool(grasp_state.get("grabbed", False))
 
-    ee_block_dist = float(np.linalg.norm(ee_pos - bpos))
-    grasp_state["ee_block_dist"] = ee_block_dist
-    ee_xy_dist = float(np.linalg.norm(ee_pos[:2] - bpos[:2]))
-    ee_dz = float(abs(ee_pos[2] - bpos[2]))
-    grasp_state["ee_xy_dist"] = ee_xy_dist
-    grasp_state["ee_dz"] = ee_dz
-    grasp_state["ee_z"] = float(ee_pos[2])
-    grasp_state["block_z"] = float(bpos[2])
-
-    # Trigger grasp only when close in 3D and reasonably aligned in Z
-    if (
-        (not grabbed)
-        and (ee_block_dist <= float(dist_thresh))
-        and (ee_dz <= float(z_align_thresh))
-        and (ee_xy_dist <= float(xy_align_thresh))
-        and (float(ee_pos[2]) <= float(bpos[2]) + float(grasp_z_max_offset))
-    ):
+    # Trigger grasp once within threshold
+    if (not grabbed) and (float(np.linalg.norm(ee_pos - bpos)) <= float(dist_thresh)):
         grasp_state["grabbed"] = True
         # Disable collisions for the block so it won't affect control/contacts
         try:
@@ -818,111 +773,11 @@ def _obstacle_ee_target_cross_pick(
 
     return xyz
 
-
-def _obstacle_ee_target_cross_pick_nominal(
-    t: float,
-    T: float,
-    start_xyz,
-    left_block_xyz,
-    cross_jitter_amp: float = 0.010,
-    cross_jitter_hz: float = 8.0,
-    cross_window_ratio: float = 0.12,
-):
-    """Obstacle-arm task: pick on obstacle side, brief near-mid feint, then retreat.
-
-    Designed to create one brief avoidance event (helps separate JVP vs FD)
-    without long-duration entanglement.
-    """
-    t = float(np.clip(t, 0.0, T))
-    s = t / max(T, 1e-6)
-
-    start = np.array(start_xyz, dtype=np.float32)
-    pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
-    grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
-    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
-    # Brief "feint" near midline, high-z, then return to its own start position.
-    feint = np.array([left_block_xyz[0] - 0.12, -0.05, left_block_xyz[2] + 0.26], dtype=np.float32)
-    retreat = start.copy()
-
-    if s <= 0.30:
-        w = _smoothstep(s / 0.30)
-        xyz = (1.0 - w) * start + w * pre
-    elif s <= 0.46:
-        w = _smoothstep((s - 0.30) / 0.16)
-        xyz = (1.0 - w) * pre + w * grasp
-    elif s <= 0.54:
-        xyz = grasp.copy()
-    elif s <= 0.66:
-        w = _smoothstep((s - 0.54) / 0.12)
-        xyz = (1.0 - w) * grasp + w * lift
-    elif s <= 0.78:
-        w = _smoothstep((s - 0.66) / 0.12)
-        xyz = (1.0 - w) * lift + w * feint
-    else:
-        w = _smoothstep((s - 0.78) / 0.22)
-        xyz = (1.0 - w) * feint + w * retreat
-
-    # Non-smooth jitter only around the brief feint window.
-    hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
-    if abs(s - 0.74) <= hw:
-        sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
-        xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
-
-    return xyz
-
-def _ik_close_to_q(p_client, robot_id: int, ee_link: int, target_pos, q_ref, target_orn=None):
-    """Compute IK biased toward q_ref using pybullet restPoses + joint limits.
-
-    Returns a torch.FloatTensor of size (n_dof,) on success, otherwise None.
-    """
-    try:
-        # Collect revolute joints in the same order as robot.body_joints uses (for Panda this is 7 DOF)
-        joints = []
-        lower = []
-        upper = []
-        for j in range(p_client.getNumJoints(robot_id)):
-            ji = p_client.getJointInfo(robot_id, j)
-            if ji[2] == p_client.JOINT_REVOLUTE:
-                joints.append(j)
-                lower.append(float(ji[8]))
-                upper.append(float(ji[9]))
-        if len(joints) == 0:
-            return None
-        n = len(joints)
-
-        q_ref = torch.as_tensor(q_ref, dtype=torch.float32).reshape(-1)
-        if q_ref.numel() < n:
-            return None
-        q_ref = q_ref[:n].detach().cpu().numpy().astype(np.float32).tolist()
-
-        lower = np.array(lower, dtype=np.float32)
-        upper = np.array(upper, dtype=np.float32)
-        jr = (upper - lower).astype(np.float32)
-        jr = np.where(jr <= 1e-6, 2.0, jr)
-
-        kwargs = dict(
-            lowerLimits=lower.tolist(),
-            upperLimits=upper.tolist(),
-            jointRanges=jr.tolist(),
-            restPoses=q_ref,
-            maxNumIterations=120,
-            residualThreshold=1e-4,
-        )
-
-        if target_orn is None:
-            sol = p_client.calculateInverseKinematics(robot_id, int(ee_link), list(map(float, target_pos)), **kwargs)
-        else:
-            sol = p_client.calculateInverseKinematics(robot_id, int(ee_link), list(map(float, target_pos)), targetOrientation=target_orn, **kwargs)
-
-        sol = np.array(sol[:n], dtype=np.float32)
-        return torch.tensor(sol, dtype=torch.float32)
-    except Exception:
-        return None
-
 def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_index: int = None, strength: float = 260.0):
     p_ = env.p
     if ee_link_index is None:
-        ee_link_index = _find_ee_link_index(p_, int(arm_id))
+        ee_link_index = p_.getNumJoints(arm_id) - 1
+
     ik = p_.calculateInverseKinematics(
         arm_id,
         ee_link_index,
@@ -1144,7 +999,7 @@ def _get_arm_ee_pos(body_id: int, ee_link_index: int = None, p_client=None) -> n
     pc = p_client if p_client is not None else p
     try:
         if ee_link_index is None:
-            ee_link_index = _find_ee_link_index(pc, int(body_id))
+            ee_link_index = pc.getNumJoints(body_id) - 1
         ls = pc.getLinkState(body_id, ee_link_index)
         return np.array(ls[4], dtype=np.float32)
     except Exception:
@@ -1258,17 +1113,14 @@ def run_moving_obstacle_rollout(
 	pause_on_floor_penetration: bool = True,
 	floor_z_tol: float = -0.005,
     scene: str = "plain",
-    block_x: float = 0.50,
-    block_y_off: float = 0.10,
+    block_x: float = 0.55,
+    block_y_off: float = 0.12,
     block_z: float = 0.03,
-    main_base_y: float = -0.20,
-    obst_base_y: float = +0.20,
+    main_base_y: float = -0.18,
+    obst_base_y: float = +0.18,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
-    pure_cbf_eval: bool = False,
-    obst_freeze_on_close: bool = False,
-    continue_after_collision: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1279,14 +1131,6 @@ def run_moving_obstacle_rollout(
 	env = dm.env
 	robot = dm.robot
 	p_ = env.p
-	main_ee_link_idx = _find_ee_link_index(p_, int(robot.robotId))
-	try:
-		ji = p_.getJointInfo(int(robot.robotId), int(main_ee_link_idx))
-		jn = ji[1].decode("utf-8", "ignore") if isinstance(ji[1], (bytes, bytearray)) else str(ji[1])
-		ln = ji[12].decode("utf-8", "ignore") if isinstance(ji[12], (bytes, bytearray)) else str(ji[12])
-		print(f"[EE] main_ee_link_index={int(main_ee_link_idx)} joint={jn} link={ln}")
-	except Exception:
-		print(f"[EE] main_ee_link_index={int(main_ee_link_idx)}")
 
 	# --- Sync speeds: by default, keep both arms and obstacle motion on the same scale ---
 	if obstacle_speed_scale is None:
@@ -1318,18 +1162,6 @@ def run_moving_obstacle_rollout(
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
-		# Explicitly clear stale obstacle handles so observation/Jacobian code
-		# won't read invalid obstacle robot state in no-obstacle rollouts.
-		try:
-			if hasattr(env, "obstacle_ids"):
-				env.obstacle_ids = []
-		except Exception:
-			pass
-		try:
-			if hasattr(env, "obstacle_robot"):
-				env.obstacle_robot = None
-		except Exception:
-			pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode in ("arm", "arm_task"):
@@ -1345,17 +1177,6 @@ def run_moving_obstacle_rollout(
 		removed = _remove_all_obstacles(env, robot.robotId, exclude_ids=_keep)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
-		if mode == "arm_task":
-			# IMPORTANT: disable ArmEnv's built-in obstacle trajectory playback.
-			# Otherwise dm.closed_loop_dynamics() calls env.step_obstacle() every step
-			# and overrides our nominal pick task IK commands.
-			try:
-				env.obstacle_traj = None
-				env.obstacle_traj_dt = None
-				env.obstacle_qdot = None
-				print("[OBST_ARM_TASK] disabled env obstacle trajectory playback")
-			except Exception as e:
-				print(f"[OBST_ARM_TASK] WARN: failed to disable env obstacle traj: {e}")
 
 	else:
 		# mode == "rigid": keep existing rigid obstacles (boxes/meshes)
@@ -1381,11 +1202,7 @@ def run_moving_obstacle_rollout(
 	table_top_z = None
 	left_block_id = None
 	right_block_id = None
-	obst_target_block_xyz = None
 	obst_grasp_state = {"grabbed": False}
-	main_grasp_state = {"grabbed": False}
-	# For cross_pick: track return-to-home after grasp
-	main_return_state = {"returning": False, "home_q": None, "enable_return": True}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1432,11 +1249,8 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			pass
 
-		# Replanned asymmetric layout (stable grasp-first behavior):
-		# - green block (obstacle arm task) on obstacle side (+y)
-		# - blue block (main arm task) on main-arm side (-y)
-		left_block = (float(block_x) + 0.04, +0.75 * float(block_y_off), float(table_top_z) + float(block_z))
-		right_block = (float(block_x) - 0.04, -0.55 * float(block_y_off), float(table_top_z) + float(block_z))
+		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
+		right_block = (float(block_x), +float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
@@ -1444,19 +1258,16 @@ def run_moving_obstacle_rollout(
 		# Track blocks explicitly for visual grasp
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
-		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {
-			"grabbed": False,
-			"ee_block_dist": float("inf"),
-			"approach_lock": False,
-			"descent_goal_set": False,
-			"descent_mode": False,
-		}
 
-		# main arm goal xyz: lower pregrasp so EE can descend to the block.
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.025]
-		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
+		# main arm goal = right block pregrasp
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.12]
+		try:
+			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
+			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
+			print(f"[GOAL][cross_pick] main_goal_xyz={goal_xyz}")
+		except Exception as e:
+			print(f"[GOAL][cross_pick] IK failed: {e}")
 
 	if start_q_override is not None:
 		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
@@ -1551,9 +1362,7 @@ def run_moving_obstacle_rollout(
 
 				# Record ee0
 				try:
-					ee_link_idx = _find_ee_link_index(p_, int(oid))
-					obstacle_arm["ee_link_index"] = int(ee_link_idx)
-					ee0 = _get_arm_ee_pos(oid, ee_link_index=ee_link_idx, p_client=p_)
+					ee0 = _get_arm_ee_pos(oid, ee_link_index=(p_.getNumJoints(oid) - 1), p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] (env.obstacle_robot) ee0={ee0.tolist()}")
 				except Exception:
@@ -1596,9 +1405,7 @@ def run_moving_obstacle_rollout(
 				except Exception:
 					pass
 				try:
-					ee_link_idx = _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))
-					obstacle_arm["ee_link_index"] = int(ee_link_idx)
-					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=ee_link_idx, p_client=p_)
+					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] ee0={ee0.tolist()}")
 				except Exception:
@@ -1608,130 +1415,59 @@ def run_moving_obstacle_rollout(
 				print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
 				obstacle_arm = None
 
-	# Make sure we don't start in collision (unless start_q is explicitly fixed).
-	if start_q_override is not None:
-		print("[ROLL] lock_start_q=True -> skip start resampling")
-	else:
-		x = _ensure_noncolliding_start(
-			controller,
-			x,
-			min_clearance=float(start_min_clearance),
-			max_tries=int(max_start_resample),
-			abort_on_fail=bool(require_clean_start),
-			exclude_obstacle_ids=scene_block_ids,
-		)
-		if x is None:
-			result = {
-				"collided": None,
-				"skipped": True,
-				"skip_reason": "no_clean_start",
-				"seed": int(seed),
-				"start_q": start_q_override.tolist() if isinstance(start_q_override, np.ndarray) else None,
-				"clean_start": False,
-				"steps_ran": 0,
-				"min_dist_min": None,
-				"min_dist_mean": None,
-				"qp_infeasible_count": 0,
-				"u_jitter_mean": None,
-				"diagnostic_samples": 0,
-			}
-			print("[ROLL] skipped=True reason=no_clean_start")
+	# Make sure we don't start in collision
+	x = _ensure_noncolliding_start(
+		controller,
+		x,
+		min_clearance=float(start_min_clearance),
+		max_tries=int(max_start_resample),
+		abort_on_fail=bool(require_clean_start),
+		exclude_obstacle_ids=scene_block_ids,
+	)
+	if x is None:
+		result = {
+			"collided": None,
+			"skipped": True,
+			"skip_reason": "no_clean_start",
+			"seed": int(seed),
+			"start_q": start_q_override.tolist() if isinstance(start_q_override, np.ndarray) else None,
+			"clean_start": False,
+			"steps_ran": 0,
+			"min_dist_min": None,
+			"min_dist_mean": None,
+			"qp_infeasible_count": 0,
+			"u_jitter_mean": None,
+			"diagnostic_samples": 0,
+		}
+		print("[ROLL] skipped=True reason=no_clean_start")
+		try:
+			p_.disconnect()
+		except Exception:
 			try:
-				p_.disconnect()
+				p.disconnect()
 			except Exception:
-				try:
-					p.disconnect()
-				except Exception:
-					pass
-			return result
+				pass
+		return result
 
 	# Ensure robot is in sync with x at t=0
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
-	# In cross-pick scene, explicitly set goal to the blue block grasp pose
-	# and prefer IK solutions close to current start_q.
-	if str(scene).lower() == "cross_pick":
-		try:
-			ee_link = int(main_ee_link_idx)
-
-			def _eval_goal_err(q_goal_t: torch.Tensor) -> float:
-				q_save_local = q.detach().clone()
-				try:
-					robot.set_joint_position(robot.body_joints, q_goal_t)
-					p_.stepSimulation()
-					ee_now = _get_arm_ee_pos(int(robot.robotId), ee_link_index=ee_link, p_client=p_)
-					return float(np.linalg.norm(ee_now - np.array(goal_xyz, dtype=np.float32)))
-				finally:
-					robot.set_joint_position(robot.body_joints, q_save_local)
-					p_.stepSimulation()
-
-			cands = []
-			q_goal_near = _ik_close_to_q(
-				p_,
-				int(robot.robotId),
-				ee_link,
-				goal_xyz,
-				q_ref=q.detach().clone().float(),
-			)
-			if q_goal_near is not None:
-				cands.append(("near_start", q_goal_near))
-
-			try:
-				ik = p_.calculateInverseKinematics(
-					robot.robotId,
-					ee_link,
-					goal_xyz,
-					maxNumIterations=200,
-					residualThreshold=1e-5,
-				)
-				cands.append(("plain_ik", torch.tensor(ik[:dm.n_dims]).float()))
-			except Exception:
-				pass
-
-			best_name = None
-			best_q = None
-			best_err = float("inf")
-			for name, q_cand in cands:
-				err = _eval_goal_err(q_cand)
-				if err < best_err:
-					best_err = err
-					best_q = q_cand
-					best_name = name
-
-			if best_q is not None:
-				dm.set_goal(best_q)
-				print(
-					f"[GOAL][cross_pick] set_goal_to_blue_block=True source={best_name} "
-					f"goal_xyz={goal_xyz} ee_err={best_err:.4f}"
-				)
-			else:
-				print("[GOAL][cross_pick] WARN: no valid IK candidate for blue block")
-		except Exception as e:
-			print(f"[GOAL][cross_pick] WARN: failed to set blue-block goal from start_q: {e}")
-	# Save home configuration only when return-home behavior is enabled
-	if bool(main_return_state.get("enable_return", False)):
-		try:
-			main_return_state["home_q"] = q.detach().clone().float()
-		except Exception:
-			main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
-	start_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(main_ee_link_idx), p_client=p_)
+	start_ee = _get_ee_pos(robot)
 	# Put the robot at goal once to get goal EE, then restore
 	q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
 	q_save = q.detach().clone()
 	robot.set_joint_position(robot.body_joints, q_goal)
 	p_.stepSimulation()
-	goal_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(main_ee_link_idx), p_client=p_)
+	goal_ee = _get_ee_pos(robot)
 	# restore start
 	robot.set_joint_position(robot.body_joints, q_save)
 	p_.stepSimulation()
 	print(f"[START/GOAL] start_ee={start_ee.tolist()}  goal_ee={goal_ee.tolist()}")
 	_spawn_marker(start_ee, rgba=(0, 1, 0, 0.8), radius=0.035)
-	# In cross_pick, blue block itself is the visual goal; hide red goal marker.
-	if str(scene).lower() != "cross_pick":
-		_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
+	_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
 	# Make sim stepping consistent with the dynamics dt
 	try:
 		p_.setRealTimeSimulation(0)
@@ -1748,24 +1484,6 @@ def run_moving_obstacle_rollout(
 
 	# --- moving obstacle source ---
 	base = direction = omega = amp = None
-	q_sidestep = None
-	if str(scene).lower() == "cross_pick":
-		# Side-step waypoint (joint-space) to make avoidance visibly detour around obstacle arm.
-		try:
-			away_sign = -1.0 if float(obst_base_y) >= 0.0 else 1.0
-			side_goal_xyz = [float(goal_xyz[0]), float(goal_xyz[1]) + away_sign * 0.12, float(goal_xyz[2]) + 0.03]
-			q_side = _ik_close_to_q(
-				p_,
-				int(robot.robotId),
-				int(main_ee_link_idx),
-				side_goal_xyz,
-				q_ref=q.detach().clone().float(),
-			)
-			if q_side is not None:
-				q_sidestep = q_side.detach().clone().float()
-				print(f"[DODGE] sidestep_goal_xyz={side_goal_xyz}")
-		except Exception:
-			q_sidestep = None
 
 	if mode == "arm":
 		# Obstacle arm was spawned before the clean-start check above.
@@ -1800,23 +1518,12 @@ def run_moving_obstacle_rollout(
 		"hit_low": [],
 		"hit_high": [],
 	}
-	obst_task_freeze_steps = 0
-	obst_task_freeze_hold = max(1, int(0.4 / float(dm.dt)))  # ~0.4s
 
 	for k in range(steps):
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
 		# Optionally speed up ONLY the obstacle arm (separate from rigid obstacles)
 		t_arm = t_base * float(obstacle_arm_speed_scale)
-		# Proximity check before moving obstacles (used by arm_task freeze gate)
-		pre_min_d_gate = None
-		if mode != "none" and len(obstacle_ids) > 0:
-			try:
-				pre_min_d_gate, _ = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
-			except Exception:
-				pre_min_d_gate = None
-		if bool(obst_freeze_on_close) and mode == "arm_task" and (pre_min_d_gate is not None) and (pre_min_d_gate < 0.08):
-			obst_task_freeze_steps = int(obst_task_freeze_hold)
 
 		# 1) Move the obstacle(s) first (so observation sees the new positions)
 		if move_obstacles:
@@ -1824,46 +1531,37 @@ def run_moving_obstacle_rollout(
 				_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 				# optional tiny debug prints
 				if k < 3:
-					ee = _get_arm_ee_pos(
-						obstacle_arm["arm_id"],
-						ee_link_index=int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"])))),
-						p_client=p_,
-					)
+					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
 				# Visual-only grasp for obstacle arm in sinusoidal mode as well
 				if str(scene).lower() == "cross_pick":
-					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
+					try:
+						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
+					except Exception:
+						ee_link = -1
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
 									  dist_thresh=0.05, ee_z_offset=-0.035)
 			elif mode == "arm_task" and obstacle_arm is not None:
 				if str(scene).lower() == "cross_pick":
-					if bool(obst_freeze_on_close) and obst_task_freeze_steps > 0:
-						obst_task_freeze_steps -= 1
-						if (k % max(int(print_every), 1)) == 0:
-							print(f"[OBST_ARM_TASK] freeze_hold active steps_left={obst_task_freeze_steps}")
-					else:
-						# Match the Z used when spawning blocks: table_top_z + block_z
-						_tz = float(table_top_z) if table_top_z is not None else 0.0
-						left_block_xyz = (
-							obst_target_block_xyz.copy()
-							if obst_target_block_xyz is not None
-							else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
-						)
-						ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
-						ee_tgt = _obstacle_ee_target_cross_pick_nominal(
-							t=float(k * dm.dt),
-							T=float(t_sim),
-							start_xyz=ee0,
-							left_block_xyz=left_block_xyz,
-							cross_jitter_amp=float(cross_jitter_amp),
-							cross_jitter_hz=float(cross_jitter_hz),
-							cross_window_ratio=float(cross_window_ratio),
-						)
-						_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
-						if k in (0, int(0.35 * steps), int(0.55 * steps), int(0.82 * steps)):
-							print(f"[OBST_ARM_TASK] nominal_pick ee_tgt={ee_tgt.tolist()}")
+					# Match the Z used when spawning blocks: table_top_z + block_z
+					_tz = float(table_top_z) if table_top_z is not None else 0.0
+					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
+					ee_tgt = _obstacle_ee_target_cross_pick(
+						t=float(k * dm.dt),
+						T=float(t_sim),
+						start_xyz=ee0,
+						left_block_xyz=left_block_xyz,
+						cross_jitter_amp=float(cross_jitter_amp),
+						cross_jitter_hz=float(cross_jitter_hz),
+						cross_window_ratio=float(cross_window_ratio),
+					)
+					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
 					# Visual-only grasp: obstacle arm attaches left block when close
-					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
+					try:
+						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
+					except Exception:
+						ee_link = -1
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
 									  dist_thresh=0.05, ee_z_offset=-0.035)
 				else:
@@ -1872,112 +1570,13 @@ def run_moving_obstacle_rollout(
 				_update_obstacles(env, obstacle_ids, t_base, base, direction, omega, amp)
 			# else: mode == "none" -> do nothing
 
-		# Pre-control proximity check (for adaptive safety scaling).
-		pre_min_d = None
-		if mode != "none" and len(obstacle_ids) > 0:
-			try:
-				pre_min_d, _ = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
-			except Exception:
-				pre_min_d = None
-
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
-		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
-		if (
-			(not bool(pure_cbf_eval))
-			and str(scene).lower() == "cross_pick"
-			and (mode != "none")
-			and (pre_min_d is not None)
-			and (q_sidestep is not None)
-			and (not bool(main_return_state.get("returning", False)))
-			and (not bool(main_grasp_state.get("grabbed", False)))
-		):
-			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			descent_mode = bool(main_grasp_state.get("descent_mode", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
-				try:
-					q_now = x[0, :dm.n_dims]
-					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
-					gamma = 0.75 * float(np.clip((0.35 - pre_min_d) / 0.22, 0.0, 1.0))
-					u = (1.0 - gamma) * u + gamma * u_side
-					if (k % max(int(print_every), 1)) == 0:
-						print(f"[DODGE] pre_min_d={pre_min_d:.4f} sidestep_blend={gamma:.3f}")
-				except Exception:
-					pass
-		# Near-goal stabilization for cross_pick:
-		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
-		# reference/track term to force final convergence.
-		if (not bool(pure_cbf_eval)) and str(scene).lower() == "cross_pick":
-			try:
-				q_now_pre = x[0, :dm.n_dims]
-				q_goal_dev = q_goal.to(x.device)
-				d_goal_pre = float(torch.norm(q_now_pre - q_goal_dev).item())
-			except Exception:
-				d_goal_pre = None
-			if d_goal_pre is not None:
-				try:
-					u_ref = controller.u_reference(x)[0]
-					is_return = bool(main_return_state.get("returning", False))
-					if is_return:
-						# During return, keep obstacle avoidance active.
-						# If obstacles exist, do NOT blend in nominal/reference terms.
-						if mode == "none":
-							alpha = float(np.clip((0.90 - d_goal_pre) / 0.70, 0.0, 1.0))
-							u = (1.0 - alpha) * u + alpha * u_ref
-							if d_goal_pre < 0.80:
-								k_track = 3.2
-								u_track = k_track * (q_goal_dev - q_now_pre)
-								beta = float(np.clip((0.80 - d_goal_pre) / 0.65, 0.0, 1.0))
-								u = (1.0 - beta) * u + beta * u_track
-						else:
-							alpha = 0.0
-					else:
-						# GOAL phase (grasp): keep pure CBF when obstacles exist.
-						if mode == "none":
-							alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
-							u = (1.0 - alpha) * u + alpha * u_ref
-							if d_goal_pre < 0.45:
-								k_track = 2.4
-								u_track = k_track * (q_goal_dev - q_now_pre)
-								beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
-								u = (1.0 - beta) * u + beta * u_track
-						else:
-							# With obstacles: keep CBF dominant, but add stronger approach
-							# assistance near the blue block to avoid stalling.
-							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-							descent_mode = bool(main_grasp_state.get("descent_mode", False))
-							if descent_mode:
-								# Force a stronger down-reaching motion once descent starts.
-								alpha = 0.65 if ((pre_min_d is None) or (pre_min_d > 0.03)) else 0.45
-								u = (1.0 - alpha) * u + alpha * u_ref
-							elif (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.35):
-								alpha = float(np.clip((0.35 - ee_to_blue) / 0.25, 0.30, 0.75))
-								u = (1.0 - alpha) * u + alpha * u_ref
-							else:
-								alpha = 0.0
-					if (k % max(int(print_every), 1)) == 0:
-						phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
-						print(f"[CTRL] near_goal_blend phase={phase} alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
-				except Exception:
-					pass
 		if torch.isnan(u).any() or torch.isinf(u).any():
 			qp_infeasible_count += 1
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
-		# If we get too close to moving obstacles, reduce commanded speed to
-		# give CBF/QP more room to react (visible avoidance instead of late collision).
-		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
-			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			descent_mode = bool(main_grasp_state.get("descent_mode", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
-				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
-				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
-				u = u * slow
-				if (k % max(int(print_every), 1)) == 0:
-					print(f"[SAFE] pre_min_d={pre_min_d:.4f} speed_scale_near_obs={slow:.3f}")
 
 		# Enforce a per-step max joint increment to avoid tunneling
 		dq_max = float(max_dq_per_step)
@@ -2015,97 +1614,6 @@ def run_moving_obstacle_rollout(
 
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
-		# Visual-only grasp for MAIN arm: attach the RIGHT block when close
-		if str(scene).lower() == "cross_pick":
-			main_ee_link = int(main_ee_link_idx)
-			_update_visual_grasp_block(
-				p_,
-				int(robot.robotId),
-				main_ee_link,
-				right_block_id,
-				main_grasp_state,
-				dist_thresh=0.14,
-				ee_z_offset=-0.035,
-				z_align_thresh=0.08,
-				xy_align_thresh=0.10,
-				grasp_z_max_offset=0.08,
-			)
-			try:
-				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.35:
-					main_grasp_state["approach_lock"] = True
-			except Exception:
-				pass
-			# One-shot descent stage: once near the blue block, lower the goal to an explicit
-			# down-reaching pose so the gripper actually moves down instead of hovering.
-			try:
-				ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
-				if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.40):
-					descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.015]
-					q_goal_down = _ik_close_to_q(
-						p_,
-						int(robot.robotId),
-						int(main_ee_link_idx),
-						descend_xyz,
-						q_ref=x[0, :dm.n_dims].detach().clone().float(),
-					)
-					if q_goal_down is not None:
-						dm.set_goal(q_goal_down)
-						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-						main_grasp_state["descent_goal_set"] = True
-						main_grasp_state["descent_mode"] = True
-						print(f"[TASK] set_descent_goal_xyz={descend_xyz}")
-			except Exception:
-				pass
-			if (k % max(int(print_every), 1)) == 0:
-				try:
-					print(
-						f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} "
-						f"xy={float(main_grasp_state.get('ee_xy_dist', float('nan'))):.4f} "
-						f"dz={float(main_grasp_state.get('ee_dz', float('nan'))):.4f} "
-						f"grabbed={bool(main_grasp_state.get('grabbed', False))}"
-					)
-				except Exception:
-					pass
-			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
-			try:
-				if (
-					(not bool(main_grasp_state.get("grabbed", False)))
-					and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.14
-					and float(main_grasp_state.get("ee_xy_dist", 1e9)) <= 0.10
-					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.08
-					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.08
-				):
-					main_grasp_state["grabbed"] = True
-			except Exception:
-				pass
-			# In descent mode, refresh low-z IK goal periodically to avoid local stagnation.
-			try:
-				if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 120) == 0):
-					descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
-					q_goal_down = _ik_close_to_q(
-						p_,
-						int(robot.robotId),
-						int(main_ee_link_idx),
-						descend_xyz_refresh,
-						q_ref=x[0, :dm.n_dims].detach().clone().float(),
-					)
-					if q_goal_down is not None:
-						dm.set_goal(q_goal_down)
-						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-			except Exception:
-				pass
-			# Optional behavior: after grasp, switch goal to return home
-			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
-				if bool(main_grasp_state.get("grabbed", False)):
-					hq = main_return_state.get("home_q", None)
-					if hq is not None:
-						try:
-							dm.set_goal(hq)
-							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-							main_return_state["returning"] = True
-							print("[TASK] main grasped right block -> switching goal to HOME")
-						except Exception as e:
-							print(f"[TASK] WARN: failed to switch goal to HOME: {e}")
 
 		# Detect obvious floor penetration (debug)
 		if pause_on_floor_penetration:
@@ -2142,8 +1650,6 @@ def run_moving_obstacle_rollout(
 			else:
 				md = float("nan")
 			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
-			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("returning", False)):
-				print(f"[TASK] return_q_dist={d_goal:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
@@ -2156,13 +1662,8 @@ def run_moving_obstacle_rollout(
 					time.sleep(0.1)
 			# If you prefer to stop instead of pause, keep stop_on_goal=True
 		if stop_on_goal and (d_goal <= float(goal_tol)):
-			# In cross_pick, do not stop at pre-grasp goal before actual grasp trigger.
-			if str(scene).lower() == "cross_pick" and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))):
-				pass
-			else:
-				phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
-				print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
-				break
+			print(f"[ROLL] reached goal: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
+			break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
 		if mode != "none" and len(obstacle_ids) > 0:
@@ -2172,8 +1673,7 @@ def run_moving_obstacle_rollout(
 				(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
 			if hit:
 				collided = True
-				if collide_step is None:
-					collide_step = k
+				collide_step = k
 				print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
 				if pause_on_collision:
 					# Keep the GUI open and pause here. Press Ctrl+C in the terminal to exit.
@@ -2183,8 +1683,7 @@ def run_moving_obstacle_rollout(
 						pass
 					while True:
 						time.sleep(0.1)
-				if not bool(continue_after_collision):
-					break
+				break
 
 		if realtime:
 			# realtime_scale > 1 slows down the visualization (e.g., 2.0 means 2x slower than real time)
@@ -2197,7 +1696,7 @@ def run_moving_obstacle_rollout(
 		"t_sim": t_sim,
 		"start_q": q.detach().cpu().tolist(),
 		"clean_start": True,
-		"steps_ran": ((collide_step + 1) if (collided and (not bool(continue_after_collision)) and (collide_step is not None)) else (k + 1)),
+		"steps_ran": (collide_step if collided else (k + 1)),
 		"collided": collided,
 		"min_dist_min": float(np.min(min_dist_hist)) if len(min_dist_hist) else None,
 		"min_dist_mean": float(np.mean(min_dist_hist)) if len(min_dist_hist) else None,
@@ -2678,17 +2177,14 @@ if __name__ == "__main__":
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
-    parser.add_argument("--block_x", type=float, default=0.50)
-    parser.add_argument("--block_y_off", type=float, default=0.10)
+    parser.add_argument("--block_x", type=float, default=0.55)
+    parser.add_argument("--block_y_off", type=float, default=0.12)
     parser.add_argument("--block_z", type=float, default=0.03)
-    parser.add_argument("--main_base_y", type=float, default=-0.20)
-    parser.add_argument("--obst_base_y", type=float, default=+0.20)
+    parser.add_argument("--main_base_y", type=float, default=-0.18)
+    parser.add_argument("--obst_base_y", type=float, default=+0.18)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
-    parser.add_argument("--pure_cbf_eval", action="store_true", help="Disable all rollout helper policies; use pure controller.u(x).")
-    parser.add_argument("--obst_freeze_on_close", action="store_true", help="Freeze obstacle arm briefly when too close (debug safety helper).")
-    parser.add_argument("--continue_after_collision", action="store_true", help="Do not stop rollout when collision is detected; keep running to task end.")
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -2830,9 +2326,6 @@ if __name__ == "__main__":
             cross_jitter_amp=float(args_cli.cross_jitter_amp),
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
-            pure_cbf_eval=bool(args_cli.pure_cbf_eval),
-            obst_freeze_on_close=bool(args_cli.obst_freeze_on_close),
-            continue_after_collision=bool(args_cli.continue_after_collision),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
