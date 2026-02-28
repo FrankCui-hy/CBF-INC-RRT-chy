@@ -1267,11 +1267,13 @@ def run_moving_obstacle_rollout(
     obst_base_y: float = +0.20,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
-	    cross_window_ratio: float = 0.35,
-	    pure_cbf_eval: bool = False,
-	    legacy_control_overrides: bool = False,
-	    obst_freeze_on_close: bool = False,
-	    continue_after_collision: bool = False,
+	cross_window_ratio: float = 0.35,
+	pure_cbf_eval: bool = False,
+	legacy_control_overrides: bool = False,
+	obst_freeze_on_close: bool = False,
+	continue_after_collision: bool = False,
+	u_smooth_beta: float = 0.0,
+	main_ee_link_index: int = None,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1282,7 +1284,11 @@ def run_moving_obstacle_rollout(
 	env = dm.env
 	robot = dm.robot
 	p_ = env.p
-	main_ee_link_idx = _find_ee_link_index(p_, int(robot.robotId))
+	# Allow overriding the EE link index (useful when heuristics pick the wrong link)
+	if main_ee_link_index is not None and int(main_ee_link_index) >= 0:
+		main_ee_link_idx = int(main_ee_link_index)
+	else:
+		main_ee_link_idx = _find_ee_link_index(p_, int(robot.robotId))
 	try:
 		ji = p_.getJointInfo(int(robot.robotId), int(main_ee_link_idx))
 		jn = ji[1].decode("utf-8", "ignore") if isinstance(ji[1], (bytes, bytearray)) else str(ji[1])
@@ -1318,6 +1324,10 @@ def run_moving_obstacle_rollout(
 	#   - "arm": spawn a second arm as a moving obstacle (and remove rigid boxes)
 	mode = (obstacle_mode or "none").lower()
 	legacy_ctrl = bool(legacy_control_overrides) and (not bool(pure_cbf_eval))
+	# In obstacle-free cross_pick, we want a deterministic grasp + return behavior.
+	# Auto-enable legacy task controller unless the user explicitly requests pure CBF eval.
+	if (not bool(pure_cbf_eval)) and (str(scene).lower() == "cross_pick") and (mode == "none"):
+		legacy_ctrl = True
 
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
