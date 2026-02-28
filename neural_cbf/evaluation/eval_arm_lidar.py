@@ -706,8 +706,11 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
 
     grabbed = bool(grasp_state.get("grabbed", False))
 
+    ee_block_dist = float(np.linalg.norm(ee_pos - bpos))
+    grasp_state["ee_block_dist"] = ee_block_dist
+
     # Trigger grasp once within threshold
-    if (not grabbed) and (float(np.linalg.norm(ee_pos - bpos)) <= float(dist_thresh)):
+    if (not grabbed) and (ee_block_dist <= float(dist_thresh)):
         grasp_state["grabbed"] = True
         # Disable collisions for the block so it won't affect control/contacts
         try:
@@ -1311,10 +1314,10 @@ def run_moving_obstacle_rollout(
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {"grabbed": False}
+		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
 
-		# main arm goal xyz (IK will be solved after start_q is applied, biased to the start pose)
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
+		# main arm goal xyz: near the block center so distance-threshold grasp can trigger.
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04]
 		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
 
 	if start_q_override is not None:
@@ -1501,6 +1504,69 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
+	# In cross-pick scene, explicitly set goal to the blue block grasp pose
+	# and prefer IK solutions close to current start_q.
+	if str(scene).lower() == "cross_pick":
+		try:
+			try:
+				ee_link = int(robot.body_joints[-1])
+			except Exception:
+				ee_link = int(p_.getNumJoints(robot.robotId) - 1)
+
+			def _eval_goal_err(q_goal_t: torch.Tensor) -> float:
+				q_save_local = q.detach().clone()
+				try:
+					robot.set_joint_position(robot.body_joints, q_goal_t)
+					p_.stepSimulation()
+					ee_now = _get_arm_ee_pos(int(robot.robotId), ee_link_index=ee_link, p_client=p_)
+					return float(np.linalg.norm(ee_now - np.array(goal_xyz, dtype=np.float32)))
+				finally:
+					robot.set_joint_position(robot.body_joints, q_save_local)
+					p_.stepSimulation()
+
+			cands = []
+			q_goal_near = _ik_close_to_q(
+				p_,
+				int(robot.robotId),
+				ee_link,
+				goal_xyz,
+				q_ref=q.detach().clone().float(),
+			)
+			if q_goal_near is not None:
+				cands.append(("near_start", q_goal_near))
+
+			try:
+				ik = p_.calculateInverseKinematics(
+					robot.robotId,
+					ee_link,
+					goal_xyz,
+					maxNumIterations=200,
+					residualThreshold=1e-5,
+				)
+				cands.append(("plain_ik", torch.tensor(ik[:dm.n_dims]).float()))
+			except Exception:
+				pass
+
+			best_name = None
+			best_q = None
+			best_err = float("inf")
+			for name, q_cand in cands:
+				err = _eval_goal_err(q_cand)
+				if err < best_err:
+					best_err = err
+					best_q = q_cand
+					best_name = name
+
+			if best_q is not None:
+				dm.set_goal(best_q)
+				print(
+					f"[GOAL][cross_pick] set_goal_to_blue_block=True source={best_name} "
+					f"goal_xyz={goal_xyz} ee_err={best_err:.4f}"
+				)
+			else:
+				print("[GOAL][cross_pick] WARN: no valid IK candidate for blue block")
+		except Exception as e:
+			print(f"[GOAL][cross_pick] WARN: failed to set blue-block goal from start_q: {e}")
 	# Save home configuration only when return-home behavior is enabled
 	if bool(main_return_state.get("enable_return", False)):
 		try:
@@ -1521,7 +1587,9 @@ def run_moving_obstacle_rollout(
 	p_.stepSimulation()
 	print(f"[START/GOAL] start_ee={start_ee.tolist()}  goal_ee={goal_ee.tolist()}")
 	_spawn_marker(start_ee, rgba=(0, 1, 0, 0.8), radius=0.035)
-	_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
+	# In cross_pick, blue block itself is the visual goal; hide red goal marker.
+	if str(scene).lower() != "cross_pick":
+		_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
 	# Make sim stepping consistent with the dynamics dt
 	try:
 		p_.setRealTimeSimulation(0)
@@ -1680,9 +1748,14 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.05,
+				dist_thresh=0.06,
 				ee_z_offset=-0.035,
 			)
+			if (k % max(int(print_every), 1)) == 0:
+				try:
+					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
+				except Exception:
+					pass
 			# Optional behavior: after grasp, switch goal to return home
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
@@ -1743,9 +1816,13 @@ def run_moving_obstacle_rollout(
 					time.sleep(0.1)
 			# If you prefer to stop instead of pause, keep stop_on_goal=True
 		if stop_on_goal and (d_goal <= float(goal_tol)):
-			phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
-			print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
-			break
+			# In cross_pick, do not stop at pre-grasp goal before actual grasp trigger.
+			if str(scene).lower() == "cross_pick" and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))):
+				pass
+			else:
+				phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
+				print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
+				break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
 		if mode != "none" and len(obstacle_ids) > 0:
