@@ -917,8 +917,8 @@ def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_ind
         controlMode=p_.POSITION_CONTROL,
         targetPositions=q_des,
         forces=[float(strength)] * len(joints),
-        positionGains=[0.12] * len(joints),
-        velocityGains=[0.9] * len(joints),
+        positionGains=[0.08] * len(joints),
+        velocityGains=[0.35] * len(joints),
     )
 
 # ---- Moving obstacle = second robot arm (kinematic obstacle) ----
@@ -1772,11 +1772,24 @@ def run_moving_obstacle_rollout(
 						cross_jitter_hz=float(cross_jitter_hz),
 						cross_window_ratio=float(cross_window_ratio),
 					)
-					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
+					# Use softer tracking in task mode to avoid large oscillatory swings.
+					_update_obstacle_arm_ik(
+						env,
+						int(obstacle_arm["arm_id"]),
+						ee_tgt,
+						strength=0.55 * float(obstacle_arm_strength),
+					)
 					# Visual-only grasp: obstacle arm attaches left block when close
 					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
-					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
-									  dist_thresh=0.05, ee_z_offset=-0.035)
+					_update_visual_grasp_block(
+						p_,
+						int(obstacle_arm["arm_id"]),
+						ee_link,
+						left_block_id,
+						obst_grasp_state,
+						dist_thresh=0.08,
+						ee_z_offset=-0.035,
+					)
 				else:
 					_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 			elif mode == "rigid":
