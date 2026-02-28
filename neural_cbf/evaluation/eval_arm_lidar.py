@@ -1721,6 +1721,24 @@ def run_moving_obstacle_rollout(
 
 	# --- moving obstacle source ---
 	base = direction = omega = amp = None
+	q_sidestep = None
+	if str(scene).lower() == "cross_pick":
+		# Side-step waypoint (joint-space) to make avoidance visibly detour around obstacle arm.
+		try:
+			away_sign = -1.0 if float(obst_base_y) >= 0.0 else 1.0
+			side_goal_xyz = [float(goal_xyz[0]), float(goal_xyz[1]) + away_sign * 0.12, float(goal_xyz[2]) + 0.03]
+			q_side = _ik_close_to_q(
+				p_,
+				int(robot.robotId),
+				int(main_ee_link_idx),
+				side_goal_xyz,
+				q_ref=q.detach().clone().float(),
+			)
+			if q_side is not None:
+				q_sidestep = q_side.detach().clone().float()
+				print(f"[DODGE] sidestep_goal_xyz={side_goal_xyz}")
+		except Exception:
+			q_sidestep = None
 
 	if mode == "arm":
 		# Obstacle arm was spawned before the clean-start check above.
@@ -1817,6 +1835,26 @@ def run_moving_obstacle_rollout(
 
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
+		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
+		if (
+			(not bool(pure_cbf_eval))
+			and str(scene).lower() == "cross_pick"
+			and (mode != "none")
+			and (pre_min_d is not None)
+			and (q_sidestep is not None)
+			and (not bool(main_return_state.get("returning", False)))
+			and (not bool(main_grasp_state.get("grabbed", False)))
+		):
+			if pre_min_d < 0.20:
+				try:
+					q_now = x[0, :dm.n_dims]
+					u_side = 2.2 * (q_sidestep.to(x.device) - q_now)
+					gamma = 0.55 * float(np.clip((0.20 - pre_min_d) / 0.10, 0.0, 1.0))
+					u = (1.0 - gamma) * u + gamma * u_side
+					if (k % max(int(print_every), 1)) == 0:
+						print(f"[DODGE] pre_min_d={pre_min_d:.4f} sidestep_blend={gamma:.3f}")
+				except Exception:
+					pass
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
