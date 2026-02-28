@@ -1453,6 +1453,7 @@ def run_moving_obstacle_rollout(
 			"descent_goal_set": False,
 			"descent_mode": False,
 			"nominal_grasp_mode": False,
+			"nominal_grasp_qgoal": None,
 		}
 
 		# main arm goal xyz: lower pregrasp so EE can descend to the block.
@@ -1890,28 +1891,29 @@ def run_moving_obstacle_rollout(
 			main_grasp_state["nominal_grasp_mode"] = True
 		if bool(main_grasp_state.get("grabbed", False)) or bool(main_return_state.get("returning", False)):
 			main_grasp_state["nominal_grasp_mode"] = False
+			main_grasp_state["nominal_grasp_qgoal"] = None
 		nominal_grasp_mode = bool(main_grasp_state.get("nominal_grasp_mode", False))
 		if nominal_grasp_mode:
 			try:
-				u_nom = controller.u_reference(x)[0]
 				q_now_ng = x[0, :dm.n_dims]
-				# Recompute a Cartesian descent IK target every step to avoid
-				# getting stuck on a stale joint-space goal.
-				descend_xyz_nom = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
-				try:
-					ik_nom = p_.calculateInverseKinematics(
+				q_goal_ng = main_grasp_state.get("nominal_grasp_qgoal", None)
+				if q_goal_ng is None:
+					descend_xyz_nom = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
+					q_goal_ng = _ik_close_to_q(
+						p_,
 						int(robot.robotId),
 						int(main_ee_link_idx),
 						descend_xyz_nom,
-						maxNumIterations=220,
-						residualThreshold=1e-5,
+						q_ref=q_now_ng.detach().clone().float(),
 					)
-					q_goal_ng = torch.tensor(ik_nom[:dm.n_dims], dtype=torch.float32, device=x.device)
-				except Exception:
+					if q_goal_ng is not None:
+						main_grasp_state["nominal_grasp_qgoal"] = q_goal_ng.detach().clone().float()
+				if q_goal_ng is None:
 					q_goal_ng = q_goal.to(x.device)
-				# Strong joint-space tracking to enforce descent, blended with nominal.
-				u_track = 4.5 * (q_goal_ng - q_now_ng)
-				u = 0.1 * u_nom + 0.9 * u_track
+				else:
+					q_goal_ng = q_goal_ng.to(x.device)
+				# Strong fixed-goal tracking to enforce descent.
+				u = 8.0 * (q_goal_ng - q_now_ng)
 				if (k % max(int(print_every), 1)) == 0:
 					d_ng = float(torch.norm(q_now_ng - q_goal_ng).item())
 					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f} d_qdes={d_ng:.4f}")
@@ -2002,6 +2004,9 @@ def run_moving_obstacle_rollout(
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
+		# In fixed nominal grasp mode, neutralize user speed scaling to keep descent authority.
+		if nominal_grasp_mode and float(speed_scale) > 1e-6:
+			u = u / float(speed_scale)
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
 		if (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
