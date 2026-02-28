@@ -815,16 +815,17 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Obstacle-arm task: pick green block, detour from right side, then return home."""
+    """Obstacle-arm task: pick green block, then return home via CCW arc."""
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
     start = np.array(start_xyz, dtype=np.float32)
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
-    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
-    # Right-side detour waypoint: shift to +x/+y corridor before returning.
-    side = np.array([left_block_xyz[0] + 0.10, start[1] + 0.10, left_block_xyz[2] + 0.18], dtype=np.float32)
+    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.28], dtype=np.float32)
+    # CCW return arc in XY, with elevated Z to avoid blocking main-arm descent.
+    arc_a = np.array([left_block_xyz[0] + 0.14, left_block_xyz[1] - 0.02, left_block_xyz[2] + 0.30], dtype=np.float32)
+    arc_b = np.array([left_block_xyz[0] + 0.12, start[1] + 0.08, left_block_xyz[2] + 0.26], dtype=np.float32)
     retreat = start.copy()
 
     if s <= 0.26:
@@ -840,14 +841,17 @@ def _obstacle_ee_target_cross_pick_nominal(
         xyz = (1.0 - w) * grasp + w * lift
     elif s <= 0.78:
         w = _smoothstep((s - 0.60) / 0.18)
-        xyz = (1.0 - w) * lift + w * side
-        # Optional non-smooth perturbation in detour segment.
+        xyz = (1.0 - w) * lift + w * arc_a
+        # Optional non-smooth perturbation in arc segment.
         if float(cross_jitter_amp) > 0.0:
             sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0.0 else -1.0
-            xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
+            xyz = xyz + np.array([0.0, sig * (0.5 * float(cross_jitter_amp)), 0.0], dtype=np.float32)
+    elif s <= 0.90:
+        w = _smoothstep((s - 0.78) / 0.12)
+        xyz = (1.0 - w) * arc_a + w * arc_b
     else:
-        w = _smoothstep((s - 0.78) / 0.22)
-        xyz = (1.0 - w) * side + w * retreat
+        w = _smoothstep((s - 0.90) / 0.10)
+        xyz = (1.0 - w) * arc_b + w * retreat
 
     return xyz
 
