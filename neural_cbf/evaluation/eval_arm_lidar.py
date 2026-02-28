@@ -660,10 +660,38 @@ def _remove_all_obstacles(env: ArmEnv, robot_id: int = None, exclude_ids=None):
 
 
 # ---- EE marker/utility helpers ----
+def _find_ee_link_index(p_client, body_id: int) -> int:
+	"""Best-effort EE link index for Panda-like arms."""
+	try:
+		preferred_link = ["panda_grasptarget", "panda_hand", "panda_link8", "ee", "gripper"]
+		preferred_joint = ["panda_hand_joint", "hand", "ee"]
+		nj = int(p_client.getNumJoints(int(body_id)))
+		if nj <= 0:
+			return -1
+		cands = []
+		for j in range(nj):
+			ji = p_client.getJointInfo(int(body_id), int(j))
+			jname = ji[1].decode("utf-8", "ignore") if isinstance(ji[1], (bytes, bytearray)) else str(ji[1])
+			lname = ji[12].decode("utf-8", "ignore") if isinstance(ji[12], (bytes, bytearray)) else str(ji[12])
+			cands.append((j, jname.lower(), lname.lower()))
+		for key in preferred_link:
+			for j, _, lname in cands:
+				if key in lname:
+					return int(j)
+		for key in preferred_joint:
+			for j, jname, _ in cands:
+				if key in jname:
+					return int(j)
+		return int(nj - 1)
+	except Exception:
+		return -1
+
+
 def _get_ee_pos(robot) -> np.ndarray:
 	"""End-effector position for quick visualization/printing."""
 	try:
-		ls = p.getLinkState(robot.robotId, robot.body_joints[-1])
+		ee_link = _find_ee_link_index(p, int(robot.robotId))
+		ls = p.getLinkState(robot.robotId, ee_link)
 		return np.array(ls[4], dtype=np.float32)
 	except Exception:
 		return np.zeros((3,), dtype=np.float32)
@@ -828,7 +856,7 @@ def _ik_close_to_q(p_client, robot_id: int, ee_link: int, target_pos, q_ref, tar
 def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_index: int = None, strength: float = 260.0):
     p_ = env.p
     if ee_link_index is None:
-        ee_link_index = p_.getNumJoints(arm_id) - 1
+        ee_link_index = _find_ee_link_index(p_, int(arm_id))
 
     ik = p_.calculateInverseKinematics(
         arm_id,
@@ -1051,7 +1079,7 @@ def _get_arm_ee_pos(body_id: int, ee_link_index: int = None, p_client=None) -> n
     pc = p_client if p_client is not None else p
     try:
         if ee_link_index is None:
-            ee_link_index = pc.getNumJoints(body_id) - 1
+            ee_link_index = _find_ee_link_index(pc, int(body_id))
         ls = pc.getLinkState(body_id, ee_link_index)
         return np.array(ls[4], dtype=np.float32)
     except Exception:
@@ -1183,6 +1211,14 @@ def run_moving_obstacle_rollout(
 	env = dm.env
 	robot = dm.robot
 	p_ = env.p
+	main_ee_link_idx = _find_ee_link_index(p_, int(robot.robotId))
+	try:
+		ji = p_.getJointInfo(int(robot.robotId), int(main_ee_link_idx))
+		jn = ji[1].decode("utf-8", "ignore") if isinstance(ji[1], (bytes, bytearray)) else str(ji[1])
+		ln = ji[12].decode("utf-8", "ignore") if isinstance(ji[12], (bytes, bytearray)) else str(ji[12])
+		print(f"[EE] main_ee_link_index={int(main_ee_link_idx)} joint={jn} link={ln}")
+	except Exception:
+		print(f"[EE] main_ee_link_index={int(main_ee_link_idx)}")
 
 	# --- Sync speeds: by default, keep both arms and obstacle motion on the same scale ---
 	if obstacle_speed_scale is None:
@@ -1425,7 +1461,9 @@ def run_moving_obstacle_rollout(
 
 				# Record ee0
 				try:
-					ee0 = _get_arm_ee_pos(oid, ee_link_index=(p_.getNumJoints(oid) - 1), p_client=p_)
+					ee_link_idx = _find_ee_link_index(p_, int(oid))
+					obstacle_arm["ee_link_index"] = int(ee_link_idx)
+					ee0 = _get_arm_ee_pos(oid, ee_link_index=ee_link_idx, p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] (env.obstacle_robot) ee0={ee0.tolist()}")
 				except Exception:
@@ -1468,7 +1506,9 @@ def run_moving_obstacle_rollout(
 				except Exception:
 					pass
 				try:
-					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
+					ee_link_idx = _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))
+					obstacle_arm["ee_link_index"] = int(ee_link_idx)
+					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=ee_link_idx, p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
 					print(f"[OBST_ARM] ee0={ee0.tolist()}")
 				except Exception:
@@ -1520,10 +1560,7 @@ def run_moving_obstacle_rollout(
 	# and prefer IK solutions close to current start_q.
 	if str(scene).lower() == "cross_pick":
 		try:
-			try:
-				ee_link = int(robot.body_joints[-1])
-			except Exception:
-				ee_link = int(p_.getNumJoints(robot.robotId) - 1)
+			ee_link = int(main_ee_link_idx)
 
 			def _eval_goal_err(q_goal_t: torch.Tensor) -> float:
 				q_save_local = q.detach().clone()
@@ -1587,13 +1624,13 @@ def run_moving_obstacle_rollout(
 			main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
-	start_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(robot.body_joints[-1]), p_client=p_)
+	start_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(main_ee_link_idx), p_client=p_)
 	# Put the robot at goal once to get goal EE, then restore
 	q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
 	q_save = q.detach().clone()
 	robot.set_joint_position(robot.body_joints, q_goal)
 	p_.stepSimulation()
-	goal_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(robot.body_joints[-1]), p_client=p_)
+	goal_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(main_ee_link_idx), p_client=p_)
 	# restore start
 	robot.set_joint_position(robot.body_joints, q_save)
 	p_.stepSimulation()
@@ -1665,14 +1702,15 @@ def run_moving_obstacle_rollout(
 				_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
 				# optional tiny debug prints
 				if k < 3:
-					ee = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=(p_.getNumJoints(obstacle_arm["arm_id"]) - 1), p_client=p_)
+					ee = _get_arm_ee_pos(
+						obstacle_arm["arm_id"],
+						ee_link_index=int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"])))),
+						p_client=p_,
+					)
 					print(f"[OBST_ARM] t={t_arm:.3f} ee={ee.tolist()}")
 				# Visual-only grasp for obstacle arm in sinusoidal mode as well
 				if str(scene).lower() == "cross_pick":
-					try:
-						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
-					except Exception:
-						ee_link = -1
+					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
 									  dist_thresh=0.05, ee_z_offset=-0.035)
 			elif mode == "arm_task" and obstacle_arm is not None:
@@ -1692,10 +1730,7 @@ def run_moving_obstacle_rollout(
 					)
 					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
 					# Visual-only grasp: obstacle arm attaches left block when close
-					try:
-						ee_link = int(p_.getNumJoints(int(obstacle_arm["arm_id"])) - 1)
-					except Exception:
-						ee_link = -1
+					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
 									  dist_thresh=0.05, ee_z_offset=-0.035)
 				else:
@@ -1776,10 +1811,7 @@ def run_moving_obstacle_rollout(
 		p_.stepSimulation()
 		# Visual-only grasp for MAIN arm: attach the RIGHT block when close
 		if str(scene).lower() == "cross_pick":
-			try:
-				main_ee_link = int(robot.body_joints[-1])
-			except Exception:
-				main_ee_link = -1
+			main_ee_link = int(main_ee_link_idx)
 			_update_visual_grasp_block(
 				p_,
 				int(robot.robotId),
