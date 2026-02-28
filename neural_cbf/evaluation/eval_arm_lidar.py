@@ -1501,12 +1501,28 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
-	# In cross-pick scene, explicitly set goal to the blue block grasp pose.
+	# In cross-pick scene, explicitly set goal to the blue block grasp pose
+	# and prefer IK solutions close to current start_q.
 	if str(scene).lower() == "cross_pick":
 		try:
-			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
-			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
-			print(f"[GOAL][cross_pick] set_goal_to_blue_block=True goal_xyz={goal_xyz}")
+			try:
+				ee_link = int(robot.body_joints[-1])
+			except Exception:
+				ee_link = int(p_.getNumJoints(robot.robotId) - 1)
+			q_goal_near = _ik_close_to_q(
+				p_,
+				int(robot.robotId),
+				ee_link,
+				goal_xyz,
+				q_ref=q.detach().clone().float(),
+			)
+			if q_goal_near is not None:
+				dm.set_goal(q_goal_near)
+				print(f"[GOAL][cross_pick] set_goal_to_blue_block_near_start=True goal_xyz={goal_xyz}")
+			else:
+				ik = p_.calculateInverseKinematics(robot.robotId, ee_link, goal_xyz)
+				dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
+				print(f"[GOAL][cross_pick] set_goal_to_blue_block=True goal_xyz={goal_xyz}")
 		except Exception as e:
 			print(f"[GOAL][cross_pick] WARN: failed to set blue-block goal from start_q: {e}")
 	# Save home configuration only when return-home behavior is enabled
