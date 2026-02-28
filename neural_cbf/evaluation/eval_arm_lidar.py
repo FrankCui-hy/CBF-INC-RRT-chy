@@ -1921,19 +1921,20 @@ def run_moving_obstacle_rollout(
 			except Exception:
 				pre_min_d = None
 
+		direct_nominal_mode = bool(use_stable_task_ctrl and mode == "none")
 		# 2) Compute control using current datax (q + obs + aux)
 		u_cbf = controller.u(x)[0]
 		u = u_cbf
 		# Hard mode switch requested by user:
 		# if close to blue block, use nominal control for grasp; switch back after grab.
 		ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
-		if (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))) and (ee_to_blue_now < 0.30):
+		if (not direct_nominal_mode) and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))) and (ee_to_blue_now < 0.30):
 			main_grasp_state["nominal_grasp_mode"] = True
 		if bool(main_grasp_state.get("grabbed", False)) or bool(main_return_state.get("returning", False)):
 			main_grasp_state["nominal_grasp_mode"] = False
 			main_grasp_state["nominal_grasp_qgoal"] = None
 		nominal_grasp_mode = bool(main_grasp_state.get("nominal_grasp_mode", False))
-		if nominal_grasp_mode:
+		if (not direct_nominal_mode) and nominal_grasp_mode:
 			try:
 				q_now_ng = x[0, :dm.n_dims]
 				q_goal_ng = main_grasp_state.get("nominal_grasp_qgoal", None)
@@ -1961,6 +1962,7 @@ def run_moving_obstacle_rollout(
 				pass
 		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
 		if (
+			(not direct_nominal_mode)
 			(not bool(pure_cbf_eval))
 			and (not nominal_grasp_mode)
 			and str(scene).lower() == "cross_pick"
@@ -1986,7 +1988,7 @@ def run_moving_obstacle_rollout(
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
-		if (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and str(scene).lower() == "cross_pick":
+		if (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and str(scene).lower() == "cross_pick":
 			try:
 				q_now_pre = x[0, :dm.n_dims]
 				q_goal_dev = q_goal.to(x.device)
@@ -2080,12 +2082,34 @@ def run_moving_obstacle_rollout(
 				else:
 					q_task = q_goal.to(x.device)
 
-				k_task = 5.5
-				u_nom = k_task * (q_task - q_now_task)
-
-				if mode == "none":
-					u = u_nom
+				if direct_nominal_mode:
+					# Strong deterministic nominal control in obstacle-free mode:
+					# recompute IK around current q each step to avoid branch jumps/stall.
+					_tz = float(table_top_z) if table_top_z is not None else 0.0
+					pre_xyz = [float(right_block[0]), float(right_block[1]), _tz + float(block_z) + 0.10]
+					grasp_xyz = [float(right_block[0]), float(right_block[1]), _tz + float(block_z) + 0.015]
+					ee_xy_now = float(main_grasp_state.get("ee_xy_dist", 1e9))
+					ee_dz_now = float(main_grasp_state.get("ee_dz", 1e9))
+					if phase == "pregrasp" and ee_xy_now < 0.08 and ee_dz_now < 0.16:
+						main_grasp_state["task_phase"] = "grasp"
+						phase = "grasp"
+					tgt_xyz = grasp_xyz if phase == "grasp" else pre_xyz
+					q_des_now = _ik_close_to_q(
+						p_,
+						int(robot.robotId),
+						int(main_ee_link_idx),
+						tgt_xyz,
+						q_ref=q_now_task.detach().clone().float(),
+					)
+					if q_des_now is None:
+						q_des_now = q_task
+					else:
+						q_des_now = q_des_now.to(x.device)
+					k_task = 6.5 if phase == "grasp" else 5.0
+					u = k_task * (q_des_now - q_now_task)
 				else:
+					k_task = 5.5
+					u_nom = k_task * (q_task - q_now_task)
 					w_nom = 0.35
 					if pre_min_d is not None:
 						if pre_min_d < 0.12:
@@ -2111,7 +2135,7 @@ def run_moving_obstacle_rollout(
 			u = u / float(speed_scale)
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
-		if (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
+		if (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
 			descent_mode = bool(main_grasp_state.get("descent_mode", False))
