@@ -1367,6 +1367,7 @@ def run_moving_obstacle_rollout(
 	table_top_z = None
 	left_block_id = None
 	right_block_id = None
+	obst_target_block_xyz = None
 	obst_grasp_state = {"grabbed": False}
 	main_grasp_state = {"grabbed": False}
 	# For cross_pick: track return-to-home after grasp
@@ -1429,6 +1430,7 @@ def run_moving_obstacle_rollout(
 		# Track blocks explicitly for visual grasp
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
+		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
 
@@ -1822,7 +1824,11 @@ def run_moving_obstacle_rollout(
 					else:
 					# Match the Z used when spawning blocks: table_top_z + block_z
 						_tz = float(table_top_z) if table_top_z is not None else 0.0
-						left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+						left_block_xyz = (
+							obst_target_block_xyz.copy()
+							if obst_target_block_xyz is not None
+							else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+						)
 						ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
 						ee_tgt = _obstacle_ee_target_cross_pick_nominal(
 							t=float(k * dm.dt),
