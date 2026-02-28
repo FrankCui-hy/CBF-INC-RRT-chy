@@ -1835,14 +1835,17 @@ def run_moving_obstacle_rollout(
 						else:
 							alpha = 0.0
 					else:
-						# GOAL phase (grasp): previous near-goal assist.
-						alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
-						u = (1.0 - alpha) * u + alpha * u_ref
-						if mode == "none" and d_goal_pre < 0.45:
-							k_track = 2.4
-							u_track = k_track * (q_goal_dev - q_now_pre)
-							beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
-							u = (1.0 - beta) * u + beta * u_track
+						# GOAL phase (grasp): keep pure CBF when obstacles exist.
+						if mode == "none":
+							alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
+							u = (1.0 - alpha) * u + alpha * u_ref
+							if d_goal_pre < 0.45:
+								k_track = 2.4
+								u_track = k_track * (q_goal_dev - q_now_pre)
+								beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
+								u = (1.0 - beta) * u + beta * u_track
+						else:
+							alpha = 0.0
 					if (k % max(int(print_every), 1)) == 0:
 						phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
 						print(f"[CTRL] near_goal_blend phase={phase} alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
