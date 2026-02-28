@@ -768,9 +768,11 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
         except Exception:
             pass
 
-def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0):
+def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0, with_collision=False):
     p_ = env.p
-    cshape = p_.createCollisionShape(p_.GEOM_BOX, halfExtents=[half, half, half])
+    cshape = -1
+    if bool(with_collision):
+        cshape = p_.createCollisionShape(p_.GEOM_BOX, halfExtents=[half, half, half])
     vshape = p_.createVisualShape(p_.GEOM_BOX, halfExtents=[half, half, half], rgbaColor=list(rgba))
     bid = p_.createMultiBody(
         baseMass=float(mass),
@@ -1439,8 +1441,8 @@ def run_moving_obstacle_rollout(
 		# - blue block (main arm task) on main-arm side (-y)
 		left_block = (float(block_x) + 0.04, +0.75 * float(block_y_off), float(table_top_z) + float(block_z))
 		right_block = (float(block_x) - 0.04, -0.55 * float(block_y_off), float(table_top_z) + float(block_z))
-		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
-		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
+		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0), with_collision=False)
+		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0), with_collision=False)
 		scene_block_ids = [int(lb_id), int(rb_id)]
 		print(f"[SCENE] blocks: left(id={lb_id})={left_block}, right(id={rb_id})={right_block}")
 		# Track blocks explicitly for visual grasp
