@@ -1753,7 +1753,7 @@ def run_moving_obstacle_rollout(
 
 	# Build stable task targets once (pregrasp -> grasp) to avoid per-step
 	# goal re-planning conflicts between multiple control branches.
-	use_stable_task_ctrl = (str(scene).lower() == "cross_pick")
+	use_stable_task_ctrl = (str(scene).lower() == "cross_pick") and (not bool(pure_cbf_eval))
 	if use_stable_task_ctrl:
 		try:
 			pre_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.10]
@@ -1925,6 +1925,49 @@ def run_moving_obstacle_rollout(
 		# 2) Compute control using current datax (q + obs + aux)
 		u_cbf = controller.u(x)[0]
 		u = u_cbf
+		# ---- PURE QP MODE: skip all task/nominal/blending overrides ----
+		if bool(pure_cbf_eval):
+			u = u_cbf
+
+			# count infeasible/NaN/Inf as QP issues and stop them from poisoning the rollout
+			if torch.isnan(u).any() or torch.isinf(u).any():
+				qp_infeasible_count += 1
+				u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
+
+			# apply user speed scaling
+			u = u * float(speed_scale)
+
+			# clamp by max_dq_per_step (rad per step) -> convert to rad/s bound
+			try:
+				u = torch.clamp(
+					u,
+					-float(max_dq_per_step) / float(dm.dt),
+					float(max_dq_per_step) / float(dm.dt),
+				)
+			except Exception:
+				pass
+
+			# optional controller hard clamp if present
+			try:
+				if hasattr(controller, "control_limits") and controller.control_limits is not None:
+					lo = float(controller.control_limits[0])
+					hi = float(controller.control_limits[1])
+					u = torch.clamp(u, lo, hi)
+			except Exception:
+				pass
+
+			# step dynamics + physics
+			x = dm.closed_loop_dynamics(
+				x,
+				u,
+				collect_dataset=False,
+				use_motor_control=bool(use_motor_control),
+				update_observation=True,
+			)
+			p_.stepSimulation()
+
+			# IMPORTANT: do not execute any of the task/nominal/blend code below
+			continue
 		# Hard mode switch requested by user:
 		# if close to blue block, use nominal control for grasp; switch back after grab.
 		ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
