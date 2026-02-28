@@ -815,7 +815,10 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Obstacle-arm task: go pick left/green block, then return to its own start pose."""
+    """Obstacle-arm task: pick green block, cut through center lane, then return home.
+
+    The center-lane segment is where we inject non-smooth y-jitter to stress FD baseline.
+    """
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
@@ -823,22 +826,30 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
+    cut = np.array([left_block_xyz[0] - 0.06, 0.0, left_block_xyz[2] + 0.10], dtype=np.float32)
     retreat = start.copy()
 
-    if s <= 0.30:
-        w = _smoothstep(s / 0.30)
+    if s <= 0.26:
+        w = _smoothstep(s / 0.26)
         xyz = (1.0 - w) * start + w * pre
-    elif s <= 0.46:
-        w = _smoothstep((s - 0.30) / 0.16)
+    elif s <= 0.42:
+        w = _smoothstep((s - 0.26) / 0.16)
         xyz = (1.0 - w) * pre + w * grasp
-    elif s <= 0.54:
+    elif s <= 0.50:
         xyz = grasp.copy()
-    elif s <= 0.66:
-        w = _smoothstep((s - 0.54) / 0.12)
+    elif s <= 0.60:
+        w = _smoothstep((s - 0.50) / 0.10)
         xyz = (1.0 - w) * grasp + w * lift
+    elif s <= 0.78:
+        w = _smoothstep((s - 0.60) / 0.18)
+        xyz = (1.0 - w) * lift + w * cut
+        # Non-smooth perturbation only in crossing segment.
+        if float(cross_jitter_amp) > 0.0:
+            sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0.0 else -1.0
+            xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
     else:
-        w = _smoothstep((s - 0.66) / 0.34)
-        xyz = (1.0 - w) * lift + w * retreat
+        w = _smoothstep((s - 0.78) / 0.22)
+        xyz = (1.0 - w) * cut + w * retreat
 
     return xyz
 
@@ -1412,8 +1423,10 @@ def run_moving_obstacle_rollout(
 		# Revert to pre-rollback asymmetric placement:
 		# green block (obstacle task) stays on obstacle side (+y),
 		# blue block (main task) stays on main side (-y).
-		left_block = (float(block_x) + 0.04, +0.75 * float(block_y_off), float(table_top_z) + float(block_z))
-		right_block = (float(block_x) - 0.04, -0.55 * float(block_y_off), float(table_top_z) + float(block_z))
+		# Symmetric cross-lane setup: obstacle arm picks green (negative y),
+		# main arm picks blue (positive y) so paths intersect near center.
+		left_block = (float(block_x) + 0.02, -0.08, float(table_top_z) + float(block_z))
+		right_block = (float(block_x) - 0.02, +0.08, float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
