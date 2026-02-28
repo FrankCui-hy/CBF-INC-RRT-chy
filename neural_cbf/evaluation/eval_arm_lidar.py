@@ -810,8 +810,15 @@ def _obstacle_ee_target_cross_pick_nominal(
     T: float,
     start_xyz,
     left_block_xyz,
+    cross_jitter_amp: float = 0.010,
+    cross_jitter_hz: float = 8.0,
+    cross_window_ratio: float = 0.12,
 ):
-    """Smooth nominal task for obstacle arm: pregrasp -> grasp -> lift -> retreat."""
+    """Nominal pick task with one controlled crossing window.
+
+    Designed to create 1-2 avoidance events (not continuous fighting):
+    pregrasp -> grasp -> lift -> cross-midline -> retreat.
+    """
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
@@ -819,22 +826,32 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.035], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.16], dtype=np.float32)
+    cross = np.array([left_block_xyz[0] - 0.05, 0.0, left_block_xyz[2] + 0.15], dtype=np.float32)
     retreat = np.array([start[0], start[1], max(float(start[2]), float(left_block_xyz[2]) + 0.18)], dtype=np.float32)
 
     if s <= 0.35:
         w = _smoothstep(s / 0.35)
         xyz = (1.0 - w) * start + w * pre
-    elif s <= 0.55:
-        w = _smoothstep((s - 0.35) / 0.20)
+    elif s <= 0.52:
+        w = _smoothstep((s - 0.35) / 0.17)
         xyz = (1.0 - w) * pre + w * grasp
-    elif s <= 0.68:
+    elif s <= 0.60:
         xyz = grasp.copy()
-    elif s <= 0.82:
-        w = _smoothstep((s - 0.68) / 0.14)
+    elif s <= 0.68:
+        w = _smoothstep((s - 0.60) / 0.08)
         xyz = (1.0 - w) * grasp + w * lift
+    elif s <= 0.78:
+        w = _smoothstep((s - 0.68) / 0.10)
+        xyz = (1.0 - w) * lift + w * cross
     else:
-        w = _smoothstep((s - 0.82) / 0.18)
-        xyz = (1.0 - w) * lift + w * retreat
+        w = _smoothstep((s - 0.78) / 0.22)
+        xyz = (1.0 - w) * cross + w * retreat
+
+    # Optional non-smooth perturbation only in the crossing window.
+    hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
+    if abs(s - 0.74) <= hw:
+        sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
+        xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
 
     return xyz
 
@@ -1771,6 +1788,9 @@ def run_moving_obstacle_rollout(
 						T=float(t_sim),
 						start_xyz=ee0,
 						left_block_xyz=left_block_xyz,
+						cross_jitter_amp=float(cross_jitter_amp),
+						cross_jitter_hz=float(cross_jitter_hz),
+						cross_window_ratio=float(cross_window_ratio),
 					)
 					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
 					if k in (0, int(0.35 * steps), int(0.55 * steps), int(0.82 * steps)):
