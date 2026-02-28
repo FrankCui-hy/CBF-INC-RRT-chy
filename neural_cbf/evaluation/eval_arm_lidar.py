@@ -1501,6 +1501,14 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
+	# In cross-pick scene, explicitly set goal to the blue block grasp pose.
+	if str(scene).lower() == "cross_pick":
+		try:
+			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
+			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
+			print(f"[GOAL][cross_pick] set_goal_to_blue_block=True goal_xyz={goal_xyz}")
+		except Exception as e:
+			print(f"[GOAL][cross_pick] WARN: failed to set blue-block goal from start_q: {e}")
 	# Save home configuration only when return-home behavior is enabled
 	if bool(main_return_state.get("enable_return", False)):
 		try:
