@@ -814,10 +814,9 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Nominal pick task with one controlled crossing window.
+    """Nominal pick task without lane crossing.
 
-    Designed to create 1-2 avoidance events (not continuous fighting):
-    pregrasp -> grasp -> lift -> cross-midline -> retreat.
+    Sequence: pregrasp -> grasp -> hold -> lift -> retreat on obstacle side.
     """
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
@@ -826,9 +825,7 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.035], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.22], dtype=np.float32)
-    # Reduce intrusion into the main arm lane (do not cross y=0 directly).
-    cross = np.array([left_block_xyz[0] - 0.03, -0.08, left_block_xyz[2] + 0.20], dtype=np.float32)
-    retreat = np.array([start[0], start[1], max(float(start[2]), float(left_block_xyz[2]) + 0.22)], dtype=np.float32)
+    retreat = np.array([left_block_xyz[0] - 0.10, left_block_xyz[1] - 0.10, left_block_xyz[2] + 0.24], dtype=np.float32)
 
     if s <= 0.35:
         w = _smoothstep(s / 0.35)
@@ -841,17 +838,13 @@ def _obstacle_ee_target_cross_pick_nominal(
     elif s <= 0.72:
         w = _smoothstep((s - 0.60) / 0.12)
         xyz = (1.0 - w) * grasp + w * lift
-    elif s <= 0.92:
-        # Late crossing to avoid early-time hard overlap around t~2s.
-        w = _smoothstep((s - 0.72) / 0.20)
-        xyz = (1.0 - w) * lift + w * cross
     else:
-        w = _smoothstep((s - 0.92) / 0.08)
-        xyz = (1.0 - w) * cross + w * retreat
+        w = _smoothstep((s - 0.72) / 0.28)
+        xyz = (1.0 - w) * lift + w * retreat
 
-    # Optional non-smooth perturbation only in the crossing window.
+    # Keep optional jitter tiny and only near transition to retreat.
     hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
-    if abs(s - 0.74) <= hw:
+    if abs(s - 0.76) <= hw:
         sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
         xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
 
