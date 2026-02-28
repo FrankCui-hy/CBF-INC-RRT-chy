@@ -1509,6 +1509,19 @@ def run_moving_obstacle_rollout(
 				ee_link = int(robot.body_joints[-1])
 			except Exception:
 				ee_link = int(p_.getNumJoints(robot.robotId) - 1)
+
+			def _eval_goal_err(q_goal_t: torch.Tensor) -> float:
+				q_save_local = q.detach().clone()
+				try:
+					robot.set_joint_position(robot.body_joints, q_goal_t)
+					p_.stepSimulation()
+					ee_now = _get_arm_ee_pos(int(robot.robotId), ee_link_index=ee_link, p_client=p_)
+					return float(np.linalg.norm(ee_now - np.array(goal_xyz, dtype=np.float32)))
+				finally:
+					robot.set_joint_position(robot.body_joints, q_save_local)
+					p_.stepSimulation()
+
+			cands = []
 			q_goal_near = _ik_close_to_q(
 				p_,
 				int(robot.robotId),
@@ -1517,12 +1530,38 @@ def run_moving_obstacle_rollout(
 				q_ref=q.detach().clone().float(),
 			)
 			if q_goal_near is not None:
-				dm.set_goal(q_goal_near)
-				print(f"[GOAL][cross_pick] set_goal_to_blue_block_near_start=True goal_xyz={goal_xyz}")
+				cands.append(("near_start", q_goal_near))
+
+			try:
+				ik = p_.calculateInverseKinematics(
+					robot.robotId,
+					ee_link,
+					goal_xyz,
+					maxNumIterations=200,
+					residualThreshold=1e-5,
+				)
+				cands.append(("plain_ik", torch.tensor(ik[:dm.n_dims]).float()))
+			except Exception:
+				pass
+
+			best_name = None
+			best_q = None
+			best_err = float("inf")
+			for name, q_cand in cands:
+				err = _eval_goal_err(q_cand)
+				if err < best_err:
+					best_err = err
+					best_q = q_cand
+					best_name = name
+
+			if best_q is not None:
+				dm.set_goal(best_q)
+				print(
+					f"[GOAL][cross_pick] set_goal_to_blue_block=True source={best_name} "
+					f"goal_xyz={goal_xyz} ee_err={best_err:.4f}"
+				)
 			else:
-				ik = p_.calculateInverseKinematics(robot.robotId, ee_link, goal_xyz)
-				dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
-				print(f"[GOAL][cross_pick] set_goal_to_blue_block=True goal_xyz={goal_xyz}")
+				print("[GOAL][cross_pick] WARN: no valid IK candidate for blue block")
 		except Exception as e:
 			print(f"[GOAL][cross_pick] WARN: failed to set blue-block goal from start_q: {e}")
 	# Save home configuration only when return-home behavior is enabled
