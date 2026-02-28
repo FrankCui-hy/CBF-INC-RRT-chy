@@ -1251,6 +1251,7 @@ def run_moving_obstacle_rollout(
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
+    pure_cbf_eval: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1819,7 +1820,7 @@ def run_moving_obstacle_rollout(
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
-		if str(scene).lower() == "cross_pick":
+		if (not bool(pure_cbf_eval)) and str(scene).lower() == "cross_pick":
 			try:
 				q_now_pre = x[0, :dm.n_dims]
 				q_goal_dev = q_goal.to(x.device)
@@ -1867,7 +1868,7 @@ def run_moving_obstacle_rollout(
 		u = u * float(speed_scale)
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
-		if (mode != "none") and (pre_min_d is not None):
+		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
 			if pre_min_d < 0.22:
 				slow = float(np.clip((pre_min_d - 0.06) / 0.16, 0.25, 1.0))
 				u = u * slow
@@ -2523,6 +2524,7 @@ if __name__ == "__main__":
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
+    parser.add_argument("--pure_cbf_eval", action="store_true", help="Disable all rollout helper policies; use pure controller.u(x).")
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -2664,6 +2666,7 @@ if __name__ == "__main__":
             cross_jitter_amp=float(args_cli.cross_jitter_amp),
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
+            pure_cbf_eval=bool(args_cli.pure_cbf_eval),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
