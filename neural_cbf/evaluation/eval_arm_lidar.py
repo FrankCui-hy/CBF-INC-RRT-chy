@@ -1806,6 +1806,14 @@ def run_moving_obstacle_rollout(
 				_update_obstacles(env, obstacle_ids, t_base, base, direction, omega, amp)
 			# else: mode == "none" -> do nothing
 
+		# Pre-control proximity check (for adaptive safety scaling).
+		pre_min_d = None
+		if mode != "none" and len(obstacle_ids) > 0:
+			try:
+				pre_min_d, _ = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
+			except Exception:
+				pre_min_d = None
+
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
 		# Near-goal stabilization for cross_pick:
@@ -1857,6 +1865,14 @@ def run_moving_obstacle_rollout(
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
+		# If we get too close to moving obstacles, reduce commanded speed to
+		# give CBF/QP more room to react (visible avoidance instead of late collision).
+		if (mode != "none") and (pre_min_d is not None):
+			if pre_min_d < 0.22:
+				slow = float(np.clip((pre_min_d - 0.06) / 0.16, 0.25, 1.0))
+				u = u * slow
+				if (k % max(int(print_every), 1)) == 0:
+					print(f"[SAFE] pre_min_d={pre_min_d:.4f} speed_scale_near_obs={slow:.3f}")
 
 		# Enforce a per-step max joint increment to avoid tunneling
 		dq_max = float(max_dq_per_step)
