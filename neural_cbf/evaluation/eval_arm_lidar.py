@@ -1214,6 +1214,18 @@ def run_moving_obstacle_rollout(
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
 		obstacle_ids = []
+		# Explicitly clear stale obstacle handles so observation/Jacobian code
+		# won't read invalid obstacle robot state in no-obstacle rollouts.
+		try:
+			if hasattr(env, "obstacle_ids"):
+				env.obstacle_ids = []
+		except Exception:
+			pass
+		try:
+			if hasattr(env, "obstacle_robot"):
+				env.obstacle_robot = None
+		except Exception:
+			pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
 
 	elif mode in ("arm", "arm_task"):
@@ -1694,6 +1706,22 @@ def run_moving_obstacle_rollout(
 
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
+		# Near-goal stabilization for cross_pick:
+		# blend toward nominal reference to avoid explicit/JVP stalling near the target.
+		if str(scene).lower() == "cross_pick":
+			try:
+				d_goal_pre = float(torch.norm(x[0, :dm.n_dims] - q_goal.to(x.device)).item())
+			except Exception:
+				d_goal_pre = None
+			if (d_goal_pre is not None) and (d_goal_pre < 0.25) and (not bool(main_return_state.get("returning", False))):
+				try:
+					u_ref = controller.u_reference(x)[0]
+					alpha = float(np.clip((0.25 - d_goal_pre) / 0.25, 0.0, 1.0))
+					u = (1.0 - alpha) * u + alpha * u_ref
+					if (k % max(int(print_every), 1)) == 0:
+						print(f"[CTRL] near_goal_blend alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
+				except Exception:
+					pass
 		if torch.isnan(u).any() or torch.isinf(u).any():
 			qp_infeasible_count += 1
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
