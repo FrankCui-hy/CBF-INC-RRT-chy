@@ -1417,11 +1417,11 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			pass
 
-		# Replanned asymmetric layout:
-		# - green block (obstacle arm task) farther forward
-		# - blue block (main arm task) closer to main arm side for faster pickup
-		left_block = (float(block_x) + 0.05, -float(block_y_off), float(table_top_z) + float(block_z))
-		right_block = (float(block_x) - 0.02, +0.65 * float(block_y_off), float(table_top_z) + float(block_z))
+		# Replanned asymmetric layout (stable grasp-first behavior):
+		# - green block (obstacle arm task) on obstacle side (+y)
+		# - blue block (main arm task) on main-arm side (-y)
+		left_block = (float(block_x) + 0.04, +0.75 * float(block_y_off), float(table_top_z) + float(block_z))
+		right_block = (float(block_x) - 0.04, -0.55 * float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
@@ -1979,7 +1979,7 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.06,
+				dist_thresh=0.08,
 				ee_z_offset=-0.035,
 			)
 			if (k % max(int(print_every), 1)) == 0:
@@ -1989,7 +1989,7 @@ def run_moving_obstacle_rollout(
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.06:
+				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.08:
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
