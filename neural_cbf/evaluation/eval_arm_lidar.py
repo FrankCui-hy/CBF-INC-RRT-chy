@@ -1921,11 +1921,11 @@ def run_moving_obstacle_rollout(
 								beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
 								u = (1.0 - beta) * u + beta * u_track
 						else:
-							# With obstacles: keep CBF dominant, but allow small approach
-							# assistance once we are close to the blue block and not too near obstacle.
+							# With obstacles: keep CBF dominant, but add stronger approach
+							# assistance near the blue block to avoid stalling.
 							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-							if (pre_min_d is not None) and (pre_min_d > 0.12) and (ee_to_blue < 0.25):
-								alpha = float(np.clip((0.25 - ee_to_blue) / 0.15, 0.0, 0.25))
+							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.29):
+								alpha = float(np.clip((0.29 - ee_to_blue) / 0.20, 0.20, 0.55))
 								u = (1.0 - alpha) * u + alpha * u_ref
 							else:
 								alpha = 0.0
