@@ -1433,7 +1433,7 @@ def run_moving_obstacle_rollout(
 		right_block_id = int(rb_id)
 		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf"), "approach_lock": False}
+		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf"), "approach_lock": False, "descent_goal_set": False}
 
 		# main arm goal xyz: lower pregrasp so EE can descend to the block.
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.025]
@@ -1875,7 +1875,7 @@ def run_moving_obstacle_rollout(
 		):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.22) and (not approach_lock):
+			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock):
 				try:
 					q_now = x[0, :dm.n_dims]
 					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
@@ -1926,8 +1926,8 @@ def run_moving_obstacle_rollout(
 							# With obstacles: keep CBF dominant, but add stronger approach
 							# assistance near the blue block to avoid stalling.
 							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.24):
-								alpha = float(np.clip((0.24 - ee_to_blue) / 0.20, 0.25, 0.65))
+							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.35):
+								alpha = float(np.clip((0.35 - ee_to_blue) / 0.25, 0.30, 0.75))
 								u = (1.0 - alpha) * u + alpha * u_ref
 							else:
 								alpha = 0.0
@@ -1946,7 +1946,7 @@ def run_moving_obstacle_rollout(
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.22) and (not approach_lock):
+			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock):
 				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
 				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
 				u = u * slow
@@ -2003,8 +2003,28 @@ def run_moving_obstacle_rollout(
 				z_align_thresh=0.08,
 			)
 			try:
-				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.22:
+				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.35:
 					main_grasp_state["approach_lock"] = True
+			except Exception:
+				pass
+			# One-shot descent stage: once near the blue block, lower the goal to an explicit
+			# down-reaching pose so the gripper actually moves down instead of hovering.
+			try:
+				ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
+				if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.30):
+					descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.005]
+					q_goal_down = _ik_close_to_q(
+						p_,
+						int(robot.robotId),
+						int(main_ee_link_idx),
+						descend_xyz,
+						q_ref=x[0, :dm.n_dims].detach().clone().float(),
+					)
+					if q_goal_down is not None:
+						dm.set_goal(q_goal_down)
+						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+						main_grasp_state["descent_goal_set"] = True
+						print(f"[TASK] set_descent_goal_xyz={descend_xyz}")
 			except Exception:
 				pass
 			if (k % max(int(print_every), 1)) == 0:
