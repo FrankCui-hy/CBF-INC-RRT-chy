@@ -1313,8 +1313,8 @@ def run_moving_obstacle_rollout(
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False}
 
-		# main arm goal xyz (IK will be solved after start_q is applied, biased to the start pose)
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
+		# main arm goal xyz: use near-grasp height so EE actually goes to the blue block.
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.06]
 		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
 
 	if start_q_override is not None:
