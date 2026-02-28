@@ -1893,9 +1893,15 @@ def run_moving_obstacle_rollout(
 		nominal_grasp_mode = bool(main_grasp_state.get("nominal_grasp_mode", False))
 		if nominal_grasp_mode:
 			try:
-				u = controller.u_reference(x)[0]
+				u_nom = controller.u_reference(x)[0]
+				q_now_ng = x[0, :dm.n_dims]
+				q_goal_ng = q_goal.to(x.device)
+				# Strong joint-space tracking to enforce descent, blended with nominal.
+				u_track = 3.5 * (q_goal_ng - q_now_ng)
+				u = 0.2 * u_nom + 0.8 * u_track
 				if (k % max(int(print_every), 1)) == 0:
-					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f}")
+					d_ng = float(torch.norm(q_now_ng - q_goal_ng).item())
+					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f} d_qgoal={d_ng:.4f}")
 			except Exception:
 				pass
 		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
