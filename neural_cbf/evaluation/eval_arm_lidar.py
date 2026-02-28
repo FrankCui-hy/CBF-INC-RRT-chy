@@ -2412,18 +2412,3 @@ if __name__ == "__main__":
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
             with open(args_cli.out, "w") as f:
                 json.dump(rollout_result, f, indent=2)
-
-	# For cross_pick: re-solve goal IK near the actual start pose to avoid large joint flips / "back-facing" starts
-	if str(scene).lower() == "cross_pick":
-		try:
-			ee_link = int(robot.body_joints[-1])
-		except Exception:
-			ee_link = int(p_.getNumJoints(robot.robotId) - 1)
-		q_goal_near = _ik_close_to_q(p_, int(robot.robotId), ee_link, goal_xyz, q_ref=q)
-		if q_goal_near is not None:
-			dm.set_goal(q_goal_near)
-			print("[GOAL][cross_pick] IK chosen near start_q (restPose IK)")
-		else:
-			print("[GOAL][cross_pick] WARN: restPose IK failed, keeping existing dm.goal_state")
-		# refresh q_goal used for progress checks
-		q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
