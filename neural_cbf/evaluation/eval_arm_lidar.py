@@ -1762,17 +1762,24 @@ def run_moving_obstacle_rollout(
 				# Visual-only grasp for obstacle arm in sinusoidal mode as well
 				if str(scene).lower() == "cross_pick":
 					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
-					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
-									  dist_thresh=0.05, ee_z_offset=-0.035)
-				elif mode == "arm_task" and obstacle_arm is not None:
-					if str(scene).lower() == "cross_pick":
-						# Match the Z used when spawning blocks: table_top_z + block_z
-						_tz = float(table_top_z) if table_top_z is not None else 0.0
-						left_block_xyz = (
-							obst_target_block_xyz.copy()
-							if obst_target_block_xyz is not None
-							else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
-						)
+					_update_visual_grasp_block(
+						p_,
+						int(obstacle_arm["arm_id"]),
+						ee_link,
+						left_block_id,
+						obst_grasp_state,
+						dist_thresh=0.05,
+						ee_z_offset=-0.035,
+					)
+			elif mode == "arm_task" and obstacle_arm is not None:
+				if str(scene).lower() == "cross_pick":
+					# Match the Z used when spawning blocks: table_top_z + block_z
+					_tz = float(table_top_z) if table_top_z is not None else 0.0
+					left_block_xyz = (
+						obst_target_block_xyz.copy()
+						if obst_target_block_xyz is not None
+						else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+					)
 					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
 					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
 						t=float(k * dm.dt),
@@ -1783,7 +1790,6 @@ def run_moving_obstacle_rollout(
 						cross_jitter_hz=float(cross_jitter_hz),
 						cross_window_ratio=float(cross_window_ratio),
 					)
-					# Use full tracking strength so obstacle arm clearly executes pick-and-return task.
 					_update_obstacle_arm_ik(
 						env,
 						int(obstacle_arm["arm_id"]),
