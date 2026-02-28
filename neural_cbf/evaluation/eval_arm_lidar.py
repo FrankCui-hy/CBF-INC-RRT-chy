@@ -814,7 +814,7 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Obstacle-arm task: pick on obstacle side, brief near-mid feint, then retreat."""
+    """Obstacle-arm task: go pick left/green block, then return to its own start pose."""
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
@@ -822,7 +822,6 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
-    feint = np.array([left_block_xyz[0] - 0.12, -0.05, left_block_xyz[2] + 0.26], dtype=np.float32)
     retreat = start.copy()
 
     if s <= 0.30:
@@ -836,17 +835,9 @@ def _obstacle_ee_target_cross_pick_nominal(
     elif s <= 0.66:
         w = _smoothstep((s - 0.54) / 0.12)
         xyz = (1.0 - w) * grasp + w * lift
-    elif s <= 0.78:
-        w = _smoothstep((s - 0.66) / 0.12)
-        xyz = (1.0 - w) * lift + w * feint
     else:
-        w = _smoothstep((s - 0.78) / 0.22)
-        xyz = (1.0 - w) * feint + w * retreat
-
-    hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
-    if abs(s - 0.74) <= hw:
-        sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
-        xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
+        w = _smoothstep((s - 0.66) / 0.34)
+        xyz = (1.0 - w) * lift + w * retreat
 
     return xyz
 
@@ -1762,11 +1753,15 @@ def run_moving_obstacle_rollout(
 					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
 									  dist_thresh=0.05, ee_z_offset=-0.035)
-			elif mode == "arm_task" and obstacle_arm is not None:
-				if str(scene).lower() == "cross_pick":
-					# Match the Z used when spawning blocks: table_top_z + block_z
-					_tz = float(table_top_z) if table_top_z is not None else 0.0
-					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+				elif mode == "arm_task" and obstacle_arm is not None:
+					if str(scene).lower() == "cross_pick":
+						# Match the Z used when spawning blocks: table_top_z + block_z
+						_tz = float(table_top_z) if table_top_z is not None else 0.0
+						left_block_xyz = (
+							obst_target_block_xyz.copy()
+							if obst_target_block_xyz is not None
+							else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+						)
 					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
 					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
 						t=float(k * dm.dt),
