@@ -1454,6 +1454,9 @@ def run_moving_obstacle_rollout(
 			"descent_mode": False,
 			"nominal_grasp_mode": False,
 			"nominal_grasp_qgoal": None,
+			"task_phase": "pregrasp",
+			"task_q_pre": None,
+			"task_q_grasp": None,
 		}
 
 		# main arm goal xyz: lower pregrasp so EE can descend to the block.
@@ -1748,6 +1751,42 @@ def run_moving_obstacle_rollout(
 	except Exception:
 		pass
 
+	# Build stable task targets once (pregrasp -> grasp) to avoid per-step
+	# goal re-planning conflicts between multiple control branches.
+	use_stable_task_ctrl = (str(scene).lower() == "cross_pick")
+	if use_stable_task_ctrl:
+		try:
+			pre_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.10]
+			grasp_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.015]
+			q_pre = _ik_close_to_q(
+				p_,
+				int(robot.robotId),
+				int(main_ee_link_idx),
+				pre_xyz,
+				q_ref=q.detach().clone().float(),
+			)
+			q_grasp = _ik_close_to_q(
+				p_,
+				int(robot.robotId),
+				int(main_ee_link_idx),
+				grasp_xyz,
+				q_ref=(q_pre.detach().clone().float() if q_pre is not None else q.detach().clone().float()),
+			)
+			if q_pre is not None:
+				main_grasp_state["task_q_pre"] = q_pre.detach().clone().float()
+			if q_grasp is not None:
+				main_grasp_state["task_q_grasp"] = q_grasp.detach().clone().float()
+			if main_grasp_state.get("task_q_pre", None) is not None:
+				dm.set_goal(main_grasp_state["task_q_pre"])
+				q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+			print(
+				f"[TASK_INIT] stable_ctrl={use_stable_task_ctrl} "
+				f"q_pre={'ok' if main_grasp_state.get('task_q_pre', None) is not None else 'none'} "
+				f"q_grasp={'ok' if main_grasp_state.get('task_q_grasp', None) is not None else 'none'}"
+			)
+		except Exception as e:
+			print(f"[TASK_INIT] WARN stable task init failed: {e}")
+
 	# --- moving obstacle source ---
 	base = direction = omega = amp = None
 	q_sidestep = None
@@ -1883,7 +1922,8 @@ def run_moving_obstacle_rollout(
 				pre_min_d = None
 
 		# 2) Compute control using current datax (q + obs + aux)
-		u = controller.u(x)[0]
+		u_cbf = controller.u(x)[0]
+		u = u_cbf
 		# Hard mode switch requested by user:
 		# if close to blue block, use nominal control for grasp; switch back after grab.
 		ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
@@ -1999,6 +2039,68 @@ def run_moving_obstacle_rollout(
 						print(f"[CTRL] near_goal_blend phase={phase} alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
 				except Exception:
 					pass
+		# Unified stable task controller:
+		# - no obstacle: pure nominal tracking (must move normally)
+		# - with obstacles: blend CBF and nominal so motion stays goal-directed
+		#   while preserving safety shaping from CBF.
+		if use_stable_task_ctrl:
+			try:
+				q_now_task = x[0, :dm.n_dims]
+				q_pre = main_grasp_state.get("task_q_pre", None)
+				q_grasp = main_grasp_state.get("task_q_grasp", None)
+				phase = str(main_grasp_state.get("task_phase", "pregrasp"))
+				if q_pre is None:
+					q_pre = q_goal.to(x.device)
+				else:
+					q_pre = q_pre.to(x.device)
+				if q_grasp is None:
+					q_grasp = q_goal.to(x.device)
+				else:
+					q_grasp = q_grasp.to(x.device)
+
+				if (not bool(main_grasp_state.get("grabbed", False))) and phase == "pregrasp":
+					d_pre = float(torch.norm(q_now_task - q_pre).item())
+					if d_pre < 0.22:
+						main_grasp_state["task_phase"] = "grasp"
+						phase = "grasp"
+						try:
+							dm.set_goal(q_grasp.detach().clone().float())
+							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+						except Exception:
+							pass
+				if bool(main_grasp_state.get("grabbed", False)) and bool(main_return_state.get("returning", False)):
+					phase = "return"
+				elif bool(main_grasp_state.get("grabbed", False)):
+					phase = "grasp"
+
+				if phase == "pregrasp":
+					q_task = q_pre
+				elif phase == "grasp":
+					q_task = q_grasp
+				else:
+					q_task = q_goal.to(x.device)
+
+				k_task = 5.5
+				u_nom = k_task * (q_task - q_now_task)
+
+				if mode == "none":
+					u = u_nom
+				else:
+					w_nom = 0.35
+					if pre_min_d is not None:
+						if pre_min_d < 0.12:
+							w_nom = 0.12
+						elif pre_min_d < 0.20:
+							w_nom = 0.22
+					u = (1.0 - w_nom) * u_cbf + w_nom * u_nom
+
+				if (k % max(int(print_every), 1)) == 0:
+					d_task = float(torch.norm(q_now_task - q_task).item())
+					print(f"[CTRL] stable_task phase={phase} mode={mode} d_task={d_task:.3f}")
+			except Exception as e:
+				if (k % max(int(print_every), 1)) == 0:
+					print(f"[CTRL] WARN stable task ctrl failed: {e}")
+
 		if torch.isnan(u).any() or torch.isinf(u).any():
 			qp_infeasible_count += 1
 			u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
@@ -2076,27 +2178,27 @@ def run_moving_obstacle_rollout(
 					main_grasp_state["approach_lock"] = True
 			except Exception:
 				pass
-			# One-shot descent stage: once near the blue block, lower the goal to an explicit
-			# down-reaching pose so the gripper actually moves down instead of hovering.
-			try:
-				ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
-				if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.40):
-					descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.015]
-					q_goal_down = _ik_close_to_q(
-						p_,
-						int(robot.robotId),
-						int(main_ee_link_idx),
-						descend_xyz,
-						q_ref=x[0, :dm.n_dims].detach().clone().float(),
-					)
-					if q_goal_down is not None:
-						dm.set_goal(q_goal_down)
-						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-						main_grasp_state["descent_goal_set"] = True
-						main_grasp_state["descent_mode"] = True
-						print(f"[TASK] set_descent_goal_xyz={descend_xyz}")
-			except Exception:
-				pass
+			# Legacy descent re-targeting (disabled when stable task controller is on)
+			if not use_stable_task_ctrl:
+				try:
+					ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
+					if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.40):
+						descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.015]
+						q_goal_down = _ik_close_to_q(
+							p_,
+							int(robot.robotId),
+							int(main_ee_link_idx),
+							descend_xyz,
+							q_ref=x[0, :dm.n_dims].detach().clone().float(),
+						)
+						if q_goal_down is not None:
+							dm.set_goal(q_goal_down)
+							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+							main_grasp_state["descent_goal_set"] = True
+							main_grasp_state["descent_mode"] = True
+							print(f"[TASK] set_descent_goal_xyz={descend_xyz}")
+				except Exception:
+					pass
 			if (k % max(int(print_every), 1)) == 0:
 				try:
 					print(
@@ -2119,22 +2221,23 @@ def run_moving_obstacle_rollout(
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
-			# In descent mode, refresh low-z IK goal periodically to avoid local stagnation.
-			try:
-				if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 120) == 0):
-					descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
-					q_goal_down = _ik_close_to_q(
-						p_,
-						int(robot.robotId),
-						int(main_ee_link_idx),
-						descend_xyz_refresh,
-						q_ref=x[0, :dm.n_dims].detach().clone().float(),
-					)
-					if q_goal_down is not None:
-						dm.set_goal(q_goal_down)
-						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-			except Exception:
-				pass
+			# Legacy periodic descent refresh (disabled when stable task controller is on)
+			if not use_stable_task_ctrl:
+				try:
+					if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 120) == 0):
+						descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
+						q_goal_down = _ik_close_to_q(
+							p_,
+							int(robot.robotId),
+							int(main_ee_link_idx),
+							descend_xyz_refresh,
+							q_ref=x[0, :dm.n_dims].detach().clone().float(),
+						)
+						if q_goal_down is not None:
+							dm.set_goal(q_goal_down)
+							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+				except Exception:
+					pass
 			# Optional behavior: after grasp, switch goal to return home
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
