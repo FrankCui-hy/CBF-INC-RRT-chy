@@ -2024,11 +2024,11 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.12,
+				dist_thresh=0.14,
 				ee_z_offset=-0.035,
-				z_align_thresh=0.05,
-				xy_align_thresh=0.06,
-				grasp_z_max_offset=0.04,
+				z_align_thresh=0.07,
+				xy_align_thresh=0.10,
+				grasp_z_max_offset=0.05,
 			)
 			try:
 				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.35:
@@ -2058,19 +2058,40 @@ def run_moving_obstacle_rollout(
 				pass
 			if (k % max(int(print_every), 1)) == 0:
 				try:
-					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
+					print(
+						f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} "
+						f"xy={float(main_grasp_state.get('ee_xy_dist', float('nan'))):.4f} "
+						f"dz={float(main_grasp_state.get('ee_dz', float('nan'))):.4f} "
+						f"grabbed={bool(main_grasp_state.get('grabbed', False))}"
+					)
 				except Exception:
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
 				if (
 					(not bool(main_grasp_state.get("grabbed", False)))
-					and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.12
-					and float(main_grasp_state.get("ee_xy_dist", 1e9)) <= 0.06
-					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.05
-					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.04
+					and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.14
+					and float(main_grasp_state.get("ee_xy_dist", 1e9)) <= 0.10
+					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.07
+					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.05
 				):
 					main_grasp_state["grabbed"] = True
+			except Exception:
+				pass
+			# In descent mode, refresh low-z IK goal periodically to avoid local stagnation.
+			try:
+				if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 30) == 0):
+					descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
+					q_goal_down = _ik_close_to_q(
+						p_,
+						int(robot.robotId),
+						int(main_ee_link_idx),
+						descend_xyz_refresh,
+						q_ref=x[0, :dm.n_dims].detach().clone().float(),
+					)
+					if q_goal_down is not None:
+						dm.set_goal(q_goal_down)
+						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
 			except Exception:
 				pass
 			# Optional behavior: after grasp, switch goal to return home
