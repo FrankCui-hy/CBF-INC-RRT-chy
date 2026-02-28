@@ -1949,7 +1949,7 @@ def run_moving_obstacle_rollout(
 							descent_mode = bool(main_grasp_state.get("descent_mode", False))
 							if descent_mode:
 								# Force a stronger down-reaching motion once descent starts.
-								alpha = 0.85 if ((pre_min_d is None) or (pre_min_d > 0.03)) else 0.55
+								alpha = 0.65 if ((pre_min_d is None) or (pre_min_d > 0.03)) else 0.45
 								u = (1.0 - alpha) * u + alpha * u_ref
 							elif (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.35):
 								alpha = float(np.clip((0.35 - ee_to_blue) / 0.25, 0.30, 0.75))
@@ -2026,9 +2026,9 @@ def run_moving_obstacle_rollout(
 				main_grasp_state,
 				dist_thresh=0.14,
 				ee_z_offset=-0.035,
-				z_align_thresh=0.07,
+				z_align_thresh=0.08,
 				xy_align_thresh=0.10,
-				grasp_z_max_offset=0.05,
+				grasp_z_max_offset=0.08,
 			)
 			try:
 				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.35:
@@ -2072,15 +2072,15 @@ def run_moving_obstacle_rollout(
 					(not bool(main_grasp_state.get("grabbed", False)))
 					and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.14
 					and float(main_grasp_state.get("ee_xy_dist", 1e9)) <= 0.10
-					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.07
-					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.05
+					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.08
+					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.08
 				):
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
 			# In descent mode, refresh low-z IK goal periodically to avoid local stagnation.
 			try:
-				if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 30) == 0):
+				if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 120) == 0):
 					descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
 					q_goal_down = _ik_close_to_q(
 						p_,
