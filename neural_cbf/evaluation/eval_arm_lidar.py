@@ -815,10 +815,7 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Obstacle-arm task: pick green block, cut through center lane, then return home.
-
-    The center-lane segment is where we inject non-smooth y-jitter to stress FD baseline.
-    """
+    """Obstacle-arm task: pick green block, detour from right side, then return home."""
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
@@ -826,7 +823,8 @@ def _obstacle_ee_target_cross_pick_nominal(
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
     lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
-    cut = np.array([left_block_xyz[0] - 0.06, 0.0, left_block_xyz[2] + 0.10], dtype=np.float32)
+    # Right-side detour waypoint: shift to +x/+y corridor before returning.
+    side = np.array([left_block_xyz[0] + 0.10, start[1] + 0.10, left_block_xyz[2] + 0.18], dtype=np.float32)
     retreat = start.copy()
 
     if s <= 0.26:
@@ -842,14 +840,14 @@ def _obstacle_ee_target_cross_pick_nominal(
         xyz = (1.0 - w) * grasp + w * lift
     elif s <= 0.78:
         w = _smoothstep((s - 0.60) / 0.18)
-        xyz = (1.0 - w) * lift + w * cut
-        # Non-smooth perturbation only in crossing segment.
+        xyz = (1.0 - w) * lift + w * side
+        # Optional non-smooth perturbation in detour segment.
         if float(cross_jitter_amp) > 0.0:
             sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0.0 else -1.0
             xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
     else:
         w = _smoothstep((s - 0.78) / 0.22)
-        xyz = (1.0 - w) * cut + w * retreat
+        xyz = (1.0 - w) * side + w * retreat
 
     return xyz
 
@@ -1517,6 +1515,7 @@ def run_moving_obstacle_rollout(
 					"omega": omega,
 					"phase": phase,
 					"base_xyz": np.array([0.0, float(obst_base_y), 0.0], dtype=np.float32),
+					"task_done": False,
 				}
 
 				# Ensure evaluation collision checks include the obstacle arm
@@ -1569,6 +1568,7 @@ def run_moving_obstacle_rollout(
 					omega_scale=float(obstacle_arm_omega_scale),
 				)
 				# Include obstacle arm in collision checks
+				obstacle_arm["task_done"] = False
 				if obstacle_arm["arm_id"] not in obstacle_ids:
 					obstacle_ids = [obstacle_arm["arm_id"]] + list(obstacle_ids)
 				# Don't treat the scene blocks as obstacles for collision/distance checks
@@ -1584,6 +1584,7 @@ def run_moving_obstacle_rollout(
 					obstacle_arm["ee_link_index"] = int(ee_link_idx)
 					ee0 = _get_arm_ee_pos(obstacle_arm["arm_id"], ee_link_index=ee_link_idx, p_client=p_)
 					obstacle_arm["ee0"] = ee0.copy()
+					obstacle_arm["task_done"] = False
 					print(f"[OBST_ARM] ee0={ee0.tolist()}")
 				except Exception:
 					pass
@@ -1805,18 +1806,25 @@ def run_moving_obstacle_rollout(
 					)
 					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
 					T_task = float(max(0.5, obstacle_task_T))
-					t_task = float((k * dm.dt) % T_task)
+					t_raw = float(k * dm.dt)
 					if k == 0:
 						print(f"[OBST_ARM_TASK] using obstacle_task_T={T_task:.3f}s")
-					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
-						t=t_task,
-						T=T_task,
-						start_xyz=ee0,
-						left_block_xyz=left_block_xyz,
-						cross_jitter_amp=float(cross_jitter_amp),
-						cross_jitter_hz=float(cross_jitter_hz),
-						cross_window_ratio=float(cross_window_ratio),
-					)
+					if bool(obstacle_arm.get("task_done", False)):
+						ee_tgt = np.array(ee0, dtype=np.float32)
+					else:
+						t_task = float(min(t_raw, T_task))
+						ee_tgt = _obstacle_ee_target_cross_pick_nominal(
+							t=t_task,
+							T=T_task,
+							start_xyz=ee0,
+							left_block_xyz=left_block_xyz,
+							cross_jitter_amp=float(cross_jitter_amp),
+							cross_jitter_hz=float(cross_jitter_hz),
+							cross_window_ratio=float(cross_window_ratio),
+						)
+						if t_raw >= T_task:
+							obstacle_arm["task_done"] = True
+							print("[OBST_ARM_TASK] reached home pose; holding still.")
 					if k < 5:
 						ee_now = _get_arm_ee_pos(
 							int(obstacle_arm["arm_id"]),
