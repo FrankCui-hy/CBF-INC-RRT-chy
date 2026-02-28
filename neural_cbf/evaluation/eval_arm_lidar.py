@@ -1113,11 +1113,11 @@ def run_moving_obstacle_rollout(
 	pause_on_floor_penetration: bool = True,
 	floor_z_tol: float = -0.005,
     scene: str = "plain",
-    block_x: float = 0.55,
-    block_y_off: float = 0.12,
+    block_x: float = 0.50,
+    block_y_off: float = 0.10,
     block_z: float = 0.03,
-    main_base_y: float = -0.18,
-    obst_base_y: float = +0.18,
+    main_base_y: float = -0.20,
+    obst_base_y: float = +0.20,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
@@ -1203,6 +1203,9 @@ def run_moving_obstacle_rollout(
 	left_block_id = None
 	right_block_id = None
 	obst_grasp_state = {"grabbed": False}
+	main_grasp_state = {"grabbed": False}
+	# For cross_pick: track return-to-home after grasp
+	main_return_state = {"returning": False, "home_q": None}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1259,9 +1262,10 @@ def run_moving_obstacle_rollout(
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
 		obst_grasp_state = {"grabbed": False}
+		main_grasp_state = {"grabbed": False}
 
 		# main arm goal = right block pregrasp
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.12]
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
 		try:
 			ik = p_.calculateInverseKinematics(robot.robotId, robot.body_joints[-1], goal_xyz)
 			dm.set_goal(torch.tensor(ik[:dm.n_dims]).float())
@@ -1453,6 +1457,11 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
+	# Save home configuration for return-to-home after grasp
+	try:
+		main_return_state["home_q"] = q.detach().clone().float()
+	except Exception:
+		main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
 	start_ee = _get_ee_pos(robot)
@@ -1614,6 +1623,33 @@ def run_moving_obstacle_rollout(
 
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
+		# Visual-only grasp for MAIN arm: attach the RIGHT block when close
+		if str(scene).lower() == "cross_pick":
+			try:
+				main_ee_link = int(robot.body_joints[-1])
+			except Exception:
+				main_ee_link = -1
+			_update_visual_grasp_block(
+				p_,
+				int(robot.robotId),
+				main_ee_link,
+				right_block_id,
+				main_grasp_state,
+				dist_thresh=0.05,
+				ee_z_offset=-0.035,
+			)
+			# After first successful grasp, switch goal to return home
+			if str(scene).lower() == "cross_pick" and (not main_return_state.get("returning", False)):
+				if bool(main_grasp_state.get("grabbed", False)):
+					hq = main_return_state.get("home_q", None)
+					if hq is not None:
+						try:
+							dm.set_goal(hq)
+							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+							main_return_state["returning"] = True
+							print("[TASK] main grasped right block -> switching goal to HOME")
+						except Exception as e:
+							print(f"[TASK] WARN: failed to switch goal to HOME: {e}")
 
 		# Detect obvious floor penetration (debug)
 		if pause_on_floor_penetration:
@@ -1662,7 +1698,8 @@ def run_moving_obstacle_rollout(
 					time.sleep(0.1)
 			# If you prefer to stop instead of pause, keep stop_on_goal=True
 		if stop_on_goal and (d_goal <= float(goal_tol)):
-			print(f"[ROLL] reached goal: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
+			phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
+			print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
 			break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
@@ -2177,11 +2214,11 @@ if __name__ == "__main__":
     parser.add_argument("--speed_scale", type=float, default=1.8)
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
-    parser.add_argument("--block_x", type=float, default=0.55)
-    parser.add_argument("--block_y_off", type=float, default=0.12)
+    parser.add_argument("--block_x", type=float, default=0.50)
+    parser.add_argument("--block_y_off", type=float, default=0.10)
     parser.add_argument("--block_z", type=float, default=0.03)
-    parser.add_argument("--main_base_y", type=float, default=-0.18)
-    parser.add_argument("--obst_base_y", type=float, default=+0.18)
+    parser.add_argument("--main_base_y", type=float, default=-0.20)
+    parser.add_argument("--obst_base_y", type=float, default=+0.20)
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
