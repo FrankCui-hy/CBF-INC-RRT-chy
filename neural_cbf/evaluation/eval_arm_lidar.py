@@ -1995,7 +1995,7 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.08,
+				dist_thresh=0.18,
 				ee_z_offset=-0.035,
 			)
 			if (k % max(int(print_every), 1)) == 0:
@@ -2005,7 +2005,7 @@ def run_moving_obstacle_rollout(
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.08:
+				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.18:
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
