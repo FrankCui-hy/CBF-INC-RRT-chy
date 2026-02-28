@@ -1254,6 +1254,7 @@ def run_moving_obstacle_rollout(
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
     pure_cbf_eval: bool = False,
+    obst_freeze_on_close: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1775,12 +1776,23 @@ def run_moving_obstacle_rollout(
 		"hit_low": [],
 		"hit_high": [],
 	}
+	obst_task_freeze_steps = 0
+	obst_task_freeze_hold = max(1, int(0.4 / float(dm.dt)))  # ~0.4s
 
 	for k in range(steps):
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
 		# Optionally speed up ONLY the obstacle arm (separate from rigid obstacles)
 		t_arm = t_base * float(obstacle_arm_speed_scale)
+		# Proximity check before moving obstacles (used by arm_task freeze gate)
+		pre_min_d_gate = None
+		if mode != "none" and len(obstacle_ids) > 0:
+			try:
+				pre_min_d_gate, _ = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
+			except Exception:
+				pre_min_d_gate = None
+		if bool(obst_freeze_on_close) and mode == "arm_task" and (pre_min_d_gate is not None) and (pre_min_d_gate < 0.08):
+			obst_task_freeze_steps = int(obst_task_freeze_hold)
 
 		# 1) Move the obstacle(s) first (so observation sees the new positions)
 		if move_obstacles:
@@ -1801,22 +1813,27 @@ def run_moving_obstacle_rollout(
 									  dist_thresh=0.05, ee_z_offset=-0.035)
 			elif mode == "arm_task" and obstacle_arm is not None:
 				if str(scene).lower() == "cross_pick":
+					if bool(obst_freeze_on_close) and obst_task_freeze_steps > 0:
+						obst_task_freeze_steps -= 1
+						if (k % max(int(print_every), 1)) == 0:
+							print(f"[OBST_ARM_TASK] freeze_hold active steps_left={obst_task_freeze_steps}")
+					else:
 					# Match the Z used when spawning blocks: table_top_z + block_z
-					_tz = float(table_top_z) if table_top_z is not None else 0.0
-					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
-					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
-					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
-						t=float(k * dm.dt),
-						T=float(t_sim),
-						start_xyz=ee0,
-						left_block_xyz=left_block_xyz,
-						cross_jitter_amp=float(cross_jitter_amp),
-						cross_jitter_hz=float(cross_jitter_hz),
-						cross_window_ratio=float(cross_window_ratio),
-					)
-					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
-					if k in (0, int(0.35 * steps), int(0.55 * steps), int(0.82 * steps)):
-						print(f"[OBST_ARM_TASK] nominal_pick ee_tgt={ee_tgt.tolist()}")
+						_tz = float(table_top_z) if table_top_z is not None else 0.0
+						left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
+						ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
+						ee_tgt = _obstacle_ee_target_cross_pick_nominal(
+							t=float(k * dm.dt),
+							T=float(t_sim),
+							start_xyz=ee0,
+							left_block_xyz=left_block_xyz,
+							cross_jitter_amp=float(cross_jitter_amp),
+							cross_jitter_hz=float(cross_jitter_hz),
+							cross_window_ratio=float(cross_window_ratio),
+						)
+						_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
+						if k in (0, int(0.35 * steps), int(0.55 * steps), int(0.82 * steps)):
+							print(f"[OBST_ARM_TASK] nominal_pick ee_tgt={ee_tgt.tolist()}")
 					# Visual-only grasp: obstacle arm attaches left block when close
 					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
@@ -2565,6 +2582,7 @@ if __name__ == "__main__":
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
     parser.add_argument("--pure_cbf_eval", action="store_true", help="Disable all rollout helper policies; use pure controller.u(x).")
+    parser.add_argument("--obst_freeze_on_close", action="store_true", help="Freeze obstacle arm briefly when too close (debug safety helper).")
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -2707,6 +2725,7 @@ if __name__ == "__main__":
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
             pure_cbf_eval=bool(args_cli.pure_cbf_eval),
+            obst_freeze_on_close=bool(args_cli.obst_freeze_on_close),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
