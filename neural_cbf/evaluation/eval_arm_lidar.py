@@ -891,7 +891,6 @@ def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_ind
     p_ = env.p
     if ee_link_index is None:
         ee_link_index = _find_ee_link_index(p_, int(arm_id))
-
     ik = p_.calculateInverseKinematics(
         arm_id,
         ee_link_index,
@@ -1311,6 +1310,17 @@ def run_moving_obstacle_rollout(
 		removed = _remove_all_obstacles(env, robot.robotId, exclude_ids=_keep)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
+		if mode == "arm_task":
+			# IMPORTANT: disable ArmEnv's built-in obstacle trajectory playback.
+			# Otherwise dm.closed_loop_dynamics() calls env.step_obstacle() every step
+			# and overrides our nominal pick task IK commands.
+			try:
+				env.obstacle_traj = None
+				env.obstacle_traj_dt = None
+				env.obstacle_qdot = None
+				print("[OBST_ARM_TASK] disabled env obstacle trajectory playback")
+			except Exception as e:
+				print(f"[OBST_ARM_TASK] WARN: failed to disable env obstacle traj: {e}")
 
 	else:
 		# mode == "rigid": keep existing rigid obstacles (boxes/meshes)
