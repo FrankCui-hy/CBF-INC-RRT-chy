@@ -1845,11 +1845,11 @@ def run_moving_obstacle_rollout(
 			and (not bool(main_return_state.get("returning", False)))
 			and (not bool(main_grasp_state.get("grabbed", False)))
 		):
-			if pre_min_d < 0.20:
+			if pre_min_d < 0.35:
 				try:
 					q_now = x[0, :dm.n_dims]
-					u_side = 2.2 * (q_sidestep.to(x.device) - q_now)
-					gamma = 0.55 * float(np.clip((0.20 - pre_min_d) / 0.10, 0.0, 1.0))
+					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
+					gamma = 0.75 * float(np.clip((0.35 - pre_min_d) / 0.22, 0.0, 1.0))
 					u = (1.0 - gamma) * u + gamma * u_side
 					if (k % max(int(print_every), 1)) == 0:
 						print(f"[DODGE] pre_min_d={pre_min_d:.4f} sidestep_blend={gamma:.3f}")
@@ -1907,8 +1907,8 @@ def run_moving_obstacle_rollout(
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
-			if pre_min_d < 0.22:
-				slow = float(np.clip((pre_min_d - 0.06) / 0.16, 0.25, 1.0))
+			if pre_min_d < 0.35:
+				slow = float(np.clip((pre_min_d - 0.05) / 0.30, 0.15, 1.0))
 				u = u * slow
 				if (k % max(int(print_every), 1)) == 0:
 					print(f"[SAFE] pre_min_d={pre_min_d:.4f} speed_scale_near_obs={slow:.3f}")
