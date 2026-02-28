@@ -1822,7 +1822,7 @@ def run_moving_obstacle_rollout(
 						if (k % max(int(print_every), 1)) == 0:
 							print(f"[OBST_ARM_TASK] freeze_hold active steps_left={obst_task_freeze_steps}")
 					else:
-					# Match the Z used when spawning blocks: table_top_z + block_z
+						# Match the Z used when spawning blocks: table_top_z + block_z
 						_tz = float(table_top_z) if table_top_z is not None else 0.0
 						left_block_xyz = (
 							obst_target_block_xyz.copy()
@@ -1873,7 +1873,7 @@ def run_moving_obstacle_rollout(
 			and (not bool(main_grasp_state.get("grabbed", False)))
 		):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			if pre_min_d < 0.35 and ee_to_blue > 0.18:
+			if pre_min_d < 0.35 and ee_to_blue > 0.29:
 				try:
 					q_now = x[0, :dm.n_dims]
 					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
@@ -1943,7 +1943,7 @@ def run_moving_obstacle_rollout(
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			if pre_min_d < 0.35:
+			if pre_min_d < 0.35 and ee_to_blue > 0.29:
 				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
 				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
 				u = u * slow
