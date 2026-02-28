@@ -1265,10 +1265,11 @@ def run_moving_obstacle_rollout(
     obst_base_y: float = +0.20,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
-    cross_window_ratio: float = 0.35,
-    pure_cbf_eval: bool = False,
-    obst_freeze_on_close: bool = False,
-    continue_after_collision: bool = False,
+	    cross_window_ratio: float = 0.35,
+	    pure_cbf_eval: bool = False,
+	    legacy_control_overrides: bool = False,
+	    obst_freeze_on_close: bool = False,
+	    continue_after_collision: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1753,7 +1754,8 @@ def run_moving_obstacle_rollout(
 
 	# Build stable task targets once (pregrasp -> grasp) to avoid per-step
 	# goal re-planning conflicts between multiple control branches.
-	use_stable_task_ctrl = (str(scene).lower() == "cross_pick") and (not bool(pure_cbf_eval))
+	legacy_ctrl = bool(legacy_control_overrides) and (not bool(pure_cbf_eval))
+	use_stable_task_ctrl = (str(scene).lower() == "cross_pick") and legacy_ctrl
 	if use_stable_task_ctrl:
 		try:
 			pre_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.10]
@@ -1921,63 +1923,20 @@ def run_moving_obstacle_rollout(
 			except Exception:
 				pre_min_d = None
 
-		direct_nominal_mode = bool(use_stable_task_ctrl and mode == "none")
+		direct_nominal_mode = bool(legacy_ctrl and use_stable_task_ctrl and mode == "none")
 		# 2) Compute control using current datax (q + obs + aux)
 		u_cbf = controller.u(x)[0]
 		u = u_cbf
-		# ---- PURE QP MODE: skip all task/nominal/blending overrides ----
-		if bool(pure_cbf_eval):
-			u = u_cbf
-
-			# count infeasible/NaN/Inf as QP issues and stop them from poisoning the rollout
-			if torch.isnan(u).any() or torch.isinf(u).any():
-				qp_infeasible_count += 1
-				u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
-
-			# apply user speed scaling
-			u = u * float(speed_scale)
-
-			# clamp by max_dq_per_step (rad per step) -> convert to rad/s bound
-			try:
-				u = torch.clamp(
-					u,
-					-float(max_dq_per_step) / float(dm.dt),
-					float(max_dq_per_step) / float(dm.dt),
-				)
-			except Exception:
-				pass
-
-			# optional controller hard clamp if present
-			try:
-				if hasattr(controller, "control_limits") and controller.control_limits is not None:
-					lo = float(controller.control_limits[0])
-					hi = float(controller.control_limits[1])
-					u = torch.clamp(u, lo, hi)
-			except Exception:
-				pass
-
-			# step dynamics + physics
-			x = dm.closed_loop_dynamics(
-				x,
-				u,
-				collect_dataset=False,
-				use_motor_control=bool(use_motor_control),
-				update_observation=True,
-			)
-			p_.stepSimulation()
-
-			# IMPORTANT: do not execute any of the task/nominal/blend code below
-			continue
 		# Hard mode switch requested by user:
 		# if close to blue block, use nominal control for grasp; switch back after grab.
 		ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
-		if (not direct_nominal_mode) and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))) and (ee_to_blue_now < 0.30):
+		if legacy_ctrl and (not direct_nominal_mode) and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))) and (ee_to_blue_now < 0.30):
 			main_grasp_state["nominal_grasp_mode"] = True
 		if bool(main_grasp_state.get("grabbed", False)) or bool(main_return_state.get("returning", False)):
 			main_grasp_state["nominal_grasp_mode"] = False
 			main_grasp_state["nominal_grasp_qgoal"] = None
 		nominal_grasp_mode = bool(main_grasp_state.get("nominal_grasp_mode", False))
-		if (not direct_nominal_mode) and nominal_grasp_mode:
+		if legacy_ctrl and (not direct_nominal_mode) and nominal_grasp_mode:
 			try:
 				q_now_ng = x[0, :dm.n_dims]
 				q_goal_ng = main_grasp_state.get("nominal_grasp_qgoal", None)
@@ -2004,7 +1963,7 @@ def run_moving_obstacle_rollout(
 			except Exception:
 				pass
 			# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
-			if (
+			if legacy_ctrl and (
 				(not direct_nominal_mode)
 				and (not bool(pure_cbf_eval))
 				and (not nominal_grasp_mode)
@@ -2031,7 +1990,7 @@ def run_moving_obstacle_rollout(
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
-		if (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and str(scene).lower() == "cross_pick":
+		if legacy_ctrl and (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and str(scene).lower() == "cross_pick":
 			try:
 				q_now_pre = x[0, :dm.n_dims]
 				q_goal_dev = q_goal.to(x.device)
@@ -2088,7 +2047,7 @@ def run_moving_obstacle_rollout(
 		# - no obstacle: pure nominal tracking (must move normally)
 		# - with obstacles: blend CBF and nominal so motion stays goal-directed
 		#   while preserving safety shaping from CBF.
-		if use_stable_task_ctrl:
+		if legacy_ctrl and use_stable_task_ctrl:
 			try:
 				q_now_task = x[0, :dm.n_dims]
 				q_pre = main_grasp_state.get("task_q_pre", None)
@@ -2174,11 +2133,11 @@ def run_moving_obstacle_rollout(
 		# Make the arm move faster/slower (visual + actual) while keeping it bounded
 		u = u * float(speed_scale)
 		# In fixed nominal grasp mode, neutralize user speed scaling to keep descent authority.
-		if nominal_grasp_mode and float(speed_scale) > 1e-6:
+		if legacy_ctrl and nominal_grasp_mode and float(speed_scale) > 1e-6:
 			u = u / float(speed_scale)
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
-		if (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
+		if legacy_ctrl and (not direct_nominal_mode) and (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
 			descent_mode = bool(main_grasp_state.get("descent_mode", False))
@@ -2898,6 +2857,7 @@ if __name__ == "__main__":
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
     parser.add_argument("--pure_cbf_eval", action="store_true", help="Disable all rollout helper policies; use pure controller.u(x).")
+    parser.add_argument("--legacy_control_overrides", action="store_true", help="Enable old nominal/blending control overrides (off by default).")
     parser.add_argument("--obst_freeze_on_close", action="store_true", help="Freeze obstacle arm briefly when too close (debug safety helper).")
     parser.add_argument("--continue_after_collision", action="store_true", help="Do not stop rollout when collision is detected; keep running to task end.")
     parser.add_argument("--pause_on_collision", action="store_true")
@@ -3042,6 +3002,7 @@ if __name__ == "__main__":
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
             pure_cbf_eval=bool(args_cli.pure_cbf_eval),
+            legacy_control_overrides=bool(args_cli.legacy_control_overrides),
             obst_freeze_on_close=bool(args_cli.obst_freeze_on_close),
             continue_after_collision=bool(args_cli.continue_after_collision),
         )
