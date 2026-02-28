@@ -1707,17 +1707,27 @@ def run_moving_obstacle_rollout(
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
 		# Near-goal stabilization for cross_pick:
-		# blend toward nominal reference to avoid explicit/JVP stalling near the target.
+		# explicit/JVP can stall around d_goal~0.2; progressively blend in a
+		# reference/track term to force final convergence onto the blue-block IK goal.
 		if str(scene).lower() == "cross_pick":
 			try:
-				d_goal_pre = float(torch.norm(x[0, :dm.n_dims] - q_goal.to(x.device)).item())
+				q_now_pre = x[0, :dm.n_dims]
+				q_goal_dev = q_goal.to(x.device)
+				d_goal_pre = float(torch.norm(q_now_pre - q_goal_dev).item())
 			except Exception:
 				d_goal_pre = None
-			if (d_goal_pre is not None) and (d_goal_pre < 0.25) and (not bool(main_return_state.get("returning", False))):
+			if (d_goal_pre is not None) and (not bool(main_return_state.get("returning", False))):
 				try:
 					u_ref = controller.u_reference(x)[0]
-					alpha = float(np.clip((0.25 - d_goal_pre) / 0.25, 0.0, 1.0))
+					# Start blending earlier to avoid getting stuck at ~0.2.
+					alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
 					u = (1.0 - alpha) * u + alpha * u_ref
+					# Final pull-to-goal in joint space (safe in no-obstacle phase).
+					if mode == "none" and d_goal_pre < 0.45:
+						k_track = 2.4
+						u_track = k_track * (q_goal_dev - q_now_pre)
+						beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
+						u = (1.0 - beta) * u + beta * u_track
 					if (k % max(int(print_every), 1)) == 0:
 						print(f"[CTRL] near_goal_blend alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
 				except Exception:
@@ -1784,6 +1794,12 @@ def run_moving_obstacle_rollout(
 					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
 				except Exception:
 					pass
+			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
+			try:
+				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.06:
+					main_grasp_state["grabbed"] = True
+			except Exception:
+				pass
 			# Optional behavior: after grasp, switch goal to return home
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
