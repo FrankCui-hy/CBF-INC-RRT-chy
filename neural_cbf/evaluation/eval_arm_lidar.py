@@ -1742,8 +1742,8 @@ def run_moving_obstacle_rollout(
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
 		# Near-goal stabilization for cross_pick:
-		# explicit/JVP can stall around d_goal~0.2; progressively blend in a
-		# reference/track term to force final convergence onto the blue-block IK goal.
+		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
+		# reference/track term to force final convergence.
 		if str(scene).lower() == "cross_pick":
 			try:
 				q_now_pre = x[0, :dm.n_dims]
@@ -1751,20 +1751,31 @@ def run_moving_obstacle_rollout(
 				d_goal_pre = float(torch.norm(q_now_pre - q_goal_dev).item())
 			except Exception:
 				d_goal_pre = None
-			if (d_goal_pre is not None) and (not bool(main_return_state.get("returning", False))):
+			if d_goal_pre is not None:
 				try:
 					u_ref = controller.u_reference(x)[0]
-					# Start blending earlier to avoid getting stuck at ~0.2.
-					alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
-					u = (1.0 - alpha) * u + alpha * u_ref
-					# Final pull-to-goal in joint space (safe in no-obstacle phase).
-					if mode == "none" and d_goal_pre < 0.45:
-						k_track = 2.4
-						u_track = k_track * (q_goal_dev - q_now_pre)
-						beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
-						u = (1.0 - beta) * u + beta * u_track
+					is_return = bool(main_return_state.get("returning", False))
+					if is_return:
+						# HOME phase: stronger assist to avoid stopping before reaching start/home.
+						alpha = float(np.clip((0.90 - d_goal_pre) / 0.70, 0.0, 1.0))
+						u = (1.0 - alpha) * u + alpha * u_ref
+						if mode == "none" and d_goal_pre < 0.80:
+							k_track = 3.2
+							u_track = k_track * (q_goal_dev - q_now_pre)
+							beta = float(np.clip((0.80 - d_goal_pre) / 0.65, 0.0, 1.0))
+							u = (1.0 - beta) * u + beta * u_track
+					else:
+						# GOAL phase (grasp): previous near-goal assist.
+						alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
+						u = (1.0 - alpha) * u + alpha * u_ref
+						if mode == "none" and d_goal_pre < 0.45:
+							k_track = 2.4
+							u_track = k_track * (q_goal_dev - q_now_pre)
+							beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
+							u = (1.0 - beta) * u + beta * u_track
 					if (k % max(int(print_every), 1)) == 0:
-						print(f"[CTRL] near_goal_blend alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
+						phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
+						print(f"[CTRL] near_goal_blend phase={phase} alpha={alpha:.3f} d_goal={d_goal_pre:.3f}")
 				except Exception:
 					pass
 		if torch.isnan(u).any() or torch.isinf(u).any():
@@ -1880,6 +1891,8 @@ def run_moving_obstacle_rollout(
 			else:
 				md = float("nan")
 			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
+			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("returning", False)):
+				print(f"[TASK] return_q_dist={d_goal:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
 		if d_goal <= float(goal_pause_tol):
 			print(f"[ROLL] GOAL reached (pause): ||q-goal||={d_goal:.6f} <= {float(goal_pause_tol):.6f} at step {k}")
