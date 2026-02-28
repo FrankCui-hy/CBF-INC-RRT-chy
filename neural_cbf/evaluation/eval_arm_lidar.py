@@ -1452,6 +1452,7 @@ def run_moving_obstacle_rollout(
 			"approach_lock": False,
 			"descent_goal_set": False,
 			"descent_mode": False,
+			"nominal_grasp_mode": False,
 		}
 
 		# main arm goal xyz: lower pregrasp so EE can descend to the block.
@@ -1882,9 +1883,25 @@ def run_moving_obstacle_rollout(
 
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
+		# Hard mode switch requested by user:
+		# if close to blue block, use nominal control for grasp; switch back after grab.
+		ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
+		if (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))) and (ee_to_blue_now < 0.30):
+			main_grasp_state["nominal_grasp_mode"] = True
+		if bool(main_grasp_state.get("grabbed", False)) or bool(main_return_state.get("returning", False)):
+			main_grasp_state["nominal_grasp_mode"] = False
+		nominal_grasp_mode = bool(main_grasp_state.get("nominal_grasp_mode", False))
+		if nominal_grasp_mode:
+			try:
+				u = controller.u_reference(x)[0]
+				if (k % max(int(print_every), 1)) == 0:
+					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f}")
+			except Exception:
+				pass
 		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
 		if (
 			(not bool(pure_cbf_eval))
+			and (not nominal_grasp_mode)
 			and str(scene).lower() == "cross_pick"
 			and (mode != "none")
 			and (pre_min_d is not None)
@@ -1908,7 +1925,7 @@ def run_moving_obstacle_rollout(
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
-		if (not bool(pure_cbf_eval)) and str(scene).lower() == "cross_pick":
+		if (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and str(scene).lower() == "cross_pick":
 			try:
 				q_now_pre = x[0, :dm.n_dims]
 				q_goal_dev = q_goal.to(x.device)
@@ -1968,7 +1985,7 @@ def run_moving_obstacle_rollout(
 		u = u * float(speed_scale)
 		# If we get too close to moving obstacles, reduce commanded speed to
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
-		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
+		if (not bool(pure_cbf_eval)) and (not nominal_grasp_mode) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
 			descent_mode = bool(main_grasp_state.get("descent_mode", False))
