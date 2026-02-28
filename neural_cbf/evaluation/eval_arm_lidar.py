@@ -1960,31 +1960,31 @@ def run_moving_obstacle_rollout(
 					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f} d_qdes={d_ng:.4f}")
 			except Exception:
 				pass
-		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
-		if (
-			(not direct_nominal_mode)
-			(not bool(pure_cbf_eval))
-			and (not nominal_grasp_mode)
-			and str(scene).lower() == "cross_pick"
-			and (mode != "none")
-			and (pre_min_d is not None)
-			and (q_sidestep is not None)
-			and (not bool(main_return_state.get("returning", False)))
-			and (not bool(main_grasp_state.get("grabbed", False)))
-		):
-			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			descent_mode = bool(main_grasp_state.get("descent_mode", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
-				try:
-					q_now = x[0, :dm.n_dims]
-					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
-					gamma = 0.75 * float(np.clip((0.35 - pre_min_d) / 0.22, 0.0, 1.0))
-					u = (1.0 - gamma) * u + gamma * u_side
-					if (k % max(int(print_every), 1)) == 0:
-						print(f"[DODGE] pre_min_d={pre_min_d:.4f} sidestep_blend={gamma:.3f}")
-				except Exception:
-					pass
+			# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
+			if (
+				(not direct_nominal_mode)
+				and (not bool(pure_cbf_eval))
+				and (not nominal_grasp_mode)
+				and str(scene).lower() == "cross_pick"
+				and (mode != "none")
+				and (pre_min_d is not None)
+				and (q_sidestep is not None)
+				and (not bool(main_return_state.get("returning", False)))
+				and (not bool(main_grasp_state.get("grabbed", False)))
+			):
+				ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
+				approach_lock = bool(main_grasp_state.get("approach_lock", False))
+				descent_mode = bool(main_grasp_state.get("descent_mode", False))
+				if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
+					try:
+						q_now = x[0, :dm.n_dims]
+						u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
+						gamma = 0.75 * float(np.clip((0.35 - pre_min_d) / 0.22, 0.0, 1.0))
+						u = (1.0 - gamma) * u + gamma * u_side
+						if (k % max(int(print_every), 1)) == 0:
+							print(f"[DODGE] pre_min_d={pre_min_d:.4f} sidestep_blend={gamma:.3f}")
+					except Exception:
+						pass
 		# Near-goal stabilization for cross_pick:
 		# explicit/JVP can stall near GOAL/HOME; progressively blend in a
 		# reference/track term to force final convergence.
