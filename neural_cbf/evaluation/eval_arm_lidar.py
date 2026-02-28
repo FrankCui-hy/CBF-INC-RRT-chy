@@ -1895,13 +1895,26 @@ def run_moving_obstacle_rollout(
 			try:
 				u_nom = controller.u_reference(x)[0]
 				q_now_ng = x[0, :dm.n_dims]
-				q_goal_ng = q_goal.to(x.device)
+				# Recompute a Cartesian descent IK target every step to avoid
+				# getting stuck on a stale joint-space goal.
+				descend_xyz_nom = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
+				try:
+					ik_nom = p_.calculateInverseKinematics(
+						int(robot.robotId),
+						int(main_ee_link_idx),
+						descend_xyz_nom,
+						maxNumIterations=220,
+						residualThreshold=1e-5,
+					)
+					q_goal_ng = torch.tensor(ik_nom[:dm.n_dims], dtype=torch.float32, device=x.device)
+				except Exception:
+					q_goal_ng = q_goal.to(x.device)
 				# Strong joint-space tracking to enforce descent, blended with nominal.
-				u_track = 3.5 * (q_goal_ng - q_now_ng)
-				u = 0.2 * u_nom + 0.8 * u_track
+				u_track = 4.5 * (q_goal_ng - q_now_ng)
+				u = 0.1 * u_nom + 0.9 * u_track
 				if (k % max(int(print_every), 1)) == 0:
 					d_ng = float(torch.norm(q_now_ng - q_goal_ng).item())
-					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f} d_qgoal={d_ng:.4f}")
+					print(f"[CTRL] nominal_grasp_mode=True ee_to_blue={ee_to_blue_now:.4f} d_qdes={d_ng:.4f}")
 			except Exception:
 				pass
 		# Visual detour assist: near moving obstacle, blend toward a side-step waypoint.
