@@ -804,6 +804,40 @@ def _obstacle_ee_target_cross_pick(
 
     return xyz
 
+
+def _obstacle_ee_target_cross_pick_nominal(
+    t: float,
+    T: float,
+    start_xyz,
+    left_block_xyz,
+):
+    """Smooth nominal task for obstacle arm: pregrasp -> grasp -> lift -> retreat."""
+    t = float(np.clip(t, 0.0, T))
+    s = t / max(T, 1e-6)
+
+    start = np.array(start_xyz, dtype=np.float32)
+    pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
+    grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.035], dtype=np.float32)
+    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.16], dtype=np.float32)
+    retreat = np.array([start[0], start[1], max(float(start[2]), float(left_block_xyz[2]) + 0.18)], dtype=np.float32)
+
+    if s <= 0.35:
+        w = _smoothstep(s / 0.35)
+        xyz = (1.0 - w) * start + w * pre
+    elif s <= 0.55:
+        w = _smoothstep((s - 0.35) / 0.20)
+        xyz = (1.0 - w) * pre + w * grasp
+    elif s <= 0.68:
+        xyz = grasp.copy()
+    elif s <= 0.82:
+        w = _smoothstep((s - 0.68) / 0.14)
+        xyz = (1.0 - w) * grasp + w * lift
+    else:
+        w = _smoothstep((s - 0.82) / 0.18)
+        xyz = (1.0 - w) * lift + w * retreat
+
+    return xyz
+
 def _ik_close_to_q(p_client, robot_id: int, ee_link: int, target_pos, q_ref, target_orn=None):
     """Compute IK biased toward q_ref using pybullet restPoses + joint limits.
 
@@ -1719,16 +1753,15 @@ def run_moving_obstacle_rollout(
 					_tz = float(table_top_z) if table_top_z is not None else 0.0
 					left_block_xyz = np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
 					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
-					ee_tgt = _obstacle_ee_target_cross_pick(
+					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
 						t=float(k * dm.dt),
 						T=float(t_sim),
 						start_xyz=ee0,
 						left_block_xyz=left_block_xyz,
-						cross_jitter_amp=float(cross_jitter_amp),
-						cross_jitter_hz=float(cross_jitter_hz),
-						cross_window_ratio=float(cross_window_ratio),
 					)
 					_update_obstacle_arm_ik(env, int(obstacle_arm["arm_id"]), ee_tgt, strength=float(obstacle_arm_strength))
+					if k in (0, int(0.35 * steps), int(0.55 * steps), int(0.82 * steps)):
+						print(f"[OBST_ARM_TASK] nominal_pick ee_tgt={ee_tgt.tolist()}")
 					# Visual-only grasp: obstacle arm attaches left block when close
 					ee_link = int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"]))))
 					_update_visual_grasp_block(p_, int(obstacle_arm["arm_id"]), ee_link, left_block_id, obst_grasp_state,
