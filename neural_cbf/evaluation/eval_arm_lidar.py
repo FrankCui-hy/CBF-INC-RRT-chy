@@ -1424,7 +1424,7 @@ def run_moving_obstacle_rollout(
 		# Symmetric cross-lane setup: obstacle arm picks green (negative y),
 		# main arm picks blue (positive y) so paths intersect near center.
 		left_block = (float(block_x) + 0.02, -0.08, float(table_top_z) + float(block_z))
-		right_block = (float(block_x) - 0.02, +0.08, float(table_top_z) + float(block_z))
+		right_block = (float(block_x) + 0.06, +0.04, float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
@@ -1885,7 +1885,7 @@ def run_moving_obstacle_rollout(
 						ee_link,
 						left_block_id,
 						obst_grasp_state,
-						dist_thresh=0.12,
+						dist_thresh=0.08,
 						ee_z_offset=-0.035,
 					)
 				else:
