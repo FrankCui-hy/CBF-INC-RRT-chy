@@ -1315,6 +1315,7 @@ def run_moving_obstacle_rollout(
 	#   - "rigid": use existing rigid obstacles and optionally move them
 	#   - "arm": spawn a second arm as a moving obstacle (and remove rigid boxes)
 	mode = (obstacle_mode or "none").lower()
+	legacy_ctrl = bool(legacy_control_overrides) and (not bool(pure_cbf_eval))
 
 	if mode == "none":
 		removed = _remove_all_obstacles(env, robot.robotId)
@@ -1406,7 +1407,7 @@ def run_moving_obstacle_rollout(
 			pass
 		return None
 
-	if legacy_ctrl and str(scene).lower() == "cross_pick":
+	if str(scene).lower() == "cross_pick":
 		# move main robot base to left in Y for visual separation
 		try:
 			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
@@ -1754,7 +1755,6 @@ def run_moving_obstacle_rollout(
 
 	# Build stable task targets once (pregrasp -> grasp) to avoid per-step
 	# goal re-planning conflicts between multiple control branches.
-	legacy_ctrl = bool(legacy_control_overrides) and (not bool(pure_cbf_eval))
 	use_stable_task_ctrl = (str(scene).lower() == "cross_pick") and legacy_ctrl
 	if use_stable_task_ctrl:
 		try:
@@ -1792,7 +1792,7 @@ def run_moving_obstacle_rollout(
 	# --- moving obstacle source ---
 	base = direction = omega = amp = None
 	q_sidestep = None
-	if str(scene).lower() == "cross_pick":
+	if legacy_ctrl and str(scene).lower() == "cross_pick":
 		# Side-step waypoint (joint-space) to make avoidance visibly detour around obstacle arm.
 		try:
 			away_sign = -1.0 if float(obst_base_y) >= 0.0 else 1.0
