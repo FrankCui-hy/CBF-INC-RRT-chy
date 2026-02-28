@@ -1432,7 +1432,7 @@ def run_moving_obstacle_rollout(
 		right_block_id = int(rb_id)
 		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
+		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf"), "approach_lock": False}
 
 		# main arm goal xyz: near the block center so distance-threshold grasp can trigger.
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04]
@@ -1873,7 +1873,8 @@ def run_moving_obstacle_rollout(
 			and (not bool(main_grasp_state.get("grabbed", False)))
 		):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			if pre_min_d < 0.35 and ee_to_blue > 0.29:
+			approach_lock = bool(main_grasp_state.get("approach_lock", False))
+			if pre_min_d < 0.35 and (ee_to_blue > 0.33) and (not approach_lock):
 				try:
 					q_now = x[0, :dm.n_dims]
 					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
@@ -1924,8 +1925,8 @@ def run_moving_obstacle_rollout(
 							# With obstacles: keep CBF dominant, but add stronger approach
 							# assistance near the blue block to avoid stalling.
 							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.29):
-								alpha = float(np.clip((0.29 - ee_to_blue) / 0.20, 0.20, 0.55))
+							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.33):
+								alpha = float(np.clip((0.33 - ee_to_blue) / 0.24, 0.20, 0.60))
 								u = (1.0 - alpha) * u + alpha * u_ref
 							else:
 								alpha = 0.0
@@ -1943,7 +1944,8 @@ def run_moving_obstacle_rollout(
 		# give CBF/QP more room to react (visible avoidance instead of late collision).
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-			if pre_min_d < 0.35 and ee_to_blue > 0.29:
+			approach_lock = bool(main_grasp_state.get("approach_lock", False))
+			if pre_min_d < 0.35 and (ee_to_blue > 0.33) and (not approach_lock):
 				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
 				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
 				u = u * slow
@@ -1995,9 +1997,14 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.18,
+				dist_thresh=0.26,
 				ee_z_offset=-0.035,
 			)
+			try:
+				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.33:
+					main_grasp_state["approach_lock"] = True
+			except Exception:
+				pass
 			if (k % max(int(print_every), 1)) == 0:
 				try:
 					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
@@ -2005,7 +2012,7 @@ def run_moving_obstacle_rollout(
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.18:
+				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.26:
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
