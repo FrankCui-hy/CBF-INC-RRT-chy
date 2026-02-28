@@ -1254,7 +1254,7 @@ def run_moving_obstacle_rollout(
 	obst_grasp_state = {"grabbed": False}
 	main_grasp_state = {"grabbed": False}
 	# For cross_pick: track return-to-home after grasp
-	main_return_state = {"returning": False, "home_q": None}
+	main_return_state = {"returning": False, "home_q": None, "enable_return": True}
 
 	def _find_table_top_z(p_):
 		# best-effort: find a body whose name contains "table" and return its AABB top z
@@ -1315,7 +1315,7 @@ def run_moving_obstacle_rollout(
 
 		# main arm goal xyz (IK will be solved after start_q is applied, biased to the start pose)
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.14]
-		print(f"[GOAL][cross_pick] main_goal_xyz={goal_xyz} (will solve IK after start_q)")
+		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
 
 	if start_q_override is not None:
 		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
@@ -1501,11 +1501,12 @@ def run_moving_obstacle_rollout(
 	q = x[0, :dm.n_dims]
 	print(f"[ROLL] start_q_used={q.detach().cpu().tolist()}")
 	robot.set_joint_position(robot.body_joints, q)
-	# Save home configuration for return-to-home after grasp
-	try:
-		main_return_state["home_q"] = q.detach().clone().float()
-	except Exception:
-		main_return_state["home_q"] = None
+	# Save home configuration only when return-home behavior is enabled
+	if bool(main_return_state.get("enable_return", False)):
+		try:
+			main_return_state["home_q"] = q.detach().clone().float()
+		except Exception:
+			main_return_state["home_q"] = None
 	p_.stepSimulation()
 	# Visualize and print start/goal (end-effector markers)
 	start_ee = _get_arm_ee_pos(int(robot.robotId), ee_link_index=int(robot.body_joints[-1]), p_client=p_)
@@ -1682,8 +1683,8 @@ def run_moving_obstacle_rollout(
 				dist_thresh=0.05,
 				ee_z_offset=-0.035,
 			)
-			# After first successful grasp, switch goal to return home
-			if str(scene).lower() == "cross_pick" and (not main_return_state.get("returning", False)):
+			# Optional behavior: after grasp, switch goal to return home
+			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
 					hq = main_return_state.get("home_q", None)
 					if hq is not None:
