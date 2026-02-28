@@ -825,9 +825,10 @@ def _obstacle_ee_target_cross_pick_nominal(
     start = np.array(start_xyz, dtype=np.float32)
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.035], dtype=np.float32)
-    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.16], dtype=np.float32)
-    cross = np.array([left_block_xyz[0] - 0.05, 0.0, left_block_xyz[2] + 0.15], dtype=np.float32)
-    retreat = np.array([start[0], start[1], max(float(start[2]), float(left_block_xyz[2]) + 0.18)], dtype=np.float32)
+    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.22], dtype=np.float32)
+    # Reduce intrusion into the main arm lane (do not cross y=0 directly).
+    cross = np.array([left_block_xyz[0] - 0.03, -0.08, left_block_xyz[2] + 0.20], dtype=np.float32)
+    retreat = np.array([start[0], start[1], max(float(start[2]), float(left_block_xyz[2]) + 0.22)], dtype=np.float32)
 
     if s <= 0.35:
         w = _smoothstep(s / 0.35)
@@ -837,14 +838,15 @@ def _obstacle_ee_target_cross_pick_nominal(
         xyz = (1.0 - w) * pre + w * grasp
     elif s <= 0.60:
         xyz = grasp.copy()
-    elif s <= 0.68:
-        w = _smoothstep((s - 0.60) / 0.08)
+    elif s <= 0.72:
+        w = _smoothstep((s - 0.60) / 0.12)
         xyz = (1.0 - w) * grasp + w * lift
-    elif s <= 0.78:
-        w = _smoothstep((s - 0.68) / 0.10)
+    elif s <= 0.92:
+        # Late crossing to avoid early-time hard overlap around t~2s.
+        w = _smoothstep((s - 0.72) / 0.20)
         xyz = (1.0 - w) * lift + w * cross
     else:
-        w = _smoothstep((s - 0.78) / 0.22)
+        w = _smoothstep((s - 0.92) / 0.08)
         xyz = (1.0 - w) * cross + w * retreat
 
     # Optional non-smooth perturbation only in the crossing window.
