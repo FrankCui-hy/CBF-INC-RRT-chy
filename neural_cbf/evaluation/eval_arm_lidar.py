@@ -899,8 +899,8 @@ def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_ind
         arm_id,
         ee_link_index,
         targetPosition=[float(ee_target_xyz[0]), float(ee_target_xyz[1]), float(ee_target_xyz[2])],
-        maxNumIterations=80,
-        residualThreshold=1e-4,
+        maxNumIterations=120,
+        residualThreshold=1e-5,
     )
 
     joints = []
@@ -911,14 +911,22 @@ def _update_obstacle_arm_ik(env: ArmEnv, arm_id: int, ee_target_xyz, ee_link_ind
             joints.append(j)
             q_des.append(float(ik[len(q_des)]))
 
+    # Kinematic apply first to guarantee visible motion (env/robot code may overwrite motors)
+    try:
+        for jj, qv in zip(joints, q_des):
+            p_.resetJointState(int(arm_id), int(jj), targetValue=float(qv))
+    except Exception:
+        pass
+
+    # Also set motors so dynamics stays consistent if physics uses motor integration
     p_.setJointMotorControlArray(
         bodyUniqueId=arm_id,
         jointIndices=joints,
         controlMode=p_.POSITION_CONTROL,
         targetPositions=q_des,
         forces=[float(strength)] * len(joints),
-        positionGains=[0.12] * len(joints),
-        velocityGains=[0.80] * len(joints),
+        positionGains=[0.20] * len(joints),
+        velocityGains=[0.90] * len(joints),
     )
 
 # ---- Moving obstacle = second robot arm (kinematic obstacle) ----
@@ -1790,6 +1798,13 @@ def run_moving_obstacle_rollout(
 						cross_jitter_hz=float(cross_jitter_hz),
 						cross_window_ratio=float(cross_window_ratio),
 					)
+					if k < 5:
+						ee_now = _get_arm_ee_pos(
+							int(obstacle_arm["arm_id"]),
+							ee_link_index=int(obstacle_arm.get("ee_link_index", _find_ee_link_index(p_, int(obstacle_arm["arm_id"])))),
+							p_client=p_,
+						)
+						print(f"[OBST_ARM_TASK] k={k} ee_now={ee_now.tolist()} ee_tgt={ee_tgt.tolist()}")
 					_update_obstacle_arm_ik(
 						env,
 						int(obstacle_arm["arm_id"]),
