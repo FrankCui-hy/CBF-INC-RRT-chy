@@ -706,8 +706,11 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
 
     grabbed = bool(grasp_state.get("grabbed", False))
 
+    ee_block_dist = float(np.linalg.norm(ee_pos - bpos))
+    grasp_state["ee_block_dist"] = ee_block_dist
+
     # Trigger grasp once within threshold
-    if (not grabbed) and (float(np.linalg.norm(ee_pos - bpos)) <= float(dist_thresh)):
+    if (not grabbed) and (ee_block_dist <= float(dist_thresh)):
         grasp_state["grabbed"] = True
         # Disable collisions for the block so it won't affect control/contacts
         try:
@@ -1311,10 +1314,10 @@ def run_moving_obstacle_rollout(
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {"grabbed": False}
+		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
 
-		# main arm goal xyz: use near-grasp height so EE actually goes to the blue block.
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.06]
+		# main arm goal xyz: near the block center so distance-threshold grasp can trigger.
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04]
 		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
 
 	if start_q_override is not None:
@@ -1745,9 +1748,14 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.05,
+				dist_thresh=0.06,
 				ee_z_offset=-0.035,
 			)
+			if (k % max(int(print_every), 1)) == 0:
+				try:
+					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
+				except Exception:
+					pass
 			# Optional behavior: after grasp, switch goal to return home
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("enable_return", False)) and (not main_return_state.get("returning", False)):
 				if bool(main_grasp_state.get("grabbed", False)):
@@ -1808,9 +1816,13 @@ def run_moving_obstacle_rollout(
 					time.sleep(0.1)
 			# If you prefer to stop instead of pause, keep stop_on_goal=True
 		if stop_on_goal and (d_goal <= float(goal_tol)):
-			phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
-			print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
-			break
+			# In cross_pick, do not stop at pre-grasp goal before actual grasp trigger.
+			if str(scene).lower() == "cross_pick" and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))):
+				pass
+			else:
+				phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
+				print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
+				break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
 		if mode != "none" and len(obstacle_ids) > 0:
