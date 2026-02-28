@@ -779,6 +779,7 @@ def _obstacle_ee_target_cross_pick(
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
+    obstacle_task_T: float = 4.0,
 ):
     # start -> pregrasp -> descend -> hold
     t = float(np.clip(t, 0.0, T))
@@ -1246,6 +1247,7 @@ def run_moving_obstacle_rollout(
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
+    obstacle_task_T: float = 4.0,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1348,8 +1350,8 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			print(f"[ROLL] obstacle_ids ({len(obstacle_ids)}): {obstacle_ids}")
 
-	if len(obstacle_ids) == 0:
-		print("[ROLL] WARNING: obstacle_ids is empty after filtering; obstacles will not move and collision checks will be skipped.")
+	if len(obstacle_ids) == 0 and mode == "rigid":
+		print("[ROLL] WARNING: obstacle_ids is empty after filtering; rigid obstacles will not move and collision checks will be skipped.")
 
 	# --- Cross-pick scene: spawn blocks AFTER obstacle cleanup so they won't be removed ---
 	scene_block_ids = []
@@ -1789,9 +1791,13 @@ def run_moving_obstacle_rollout(
 						else np.array([float(block_x), -float(block_y_off), _tz + float(block_z)], dtype=np.float32)
 					)
 					ee0 = obstacle_arm.get("ee0", _get_arm_ee_pos(obstacle_arm["arm_id"], p_client=p_))
+					T_task = float(max(0.5, obstacle_task_T))
+					t_task = float((k * dm.dt) % T_task)
+					if k == 0:
+						print(f"[OBST_ARM_TASK] using obstacle_task_T={T_task:.3f}s")
 					ee_tgt = _obstacle_ee_target_cross_pick_nominal(
-						t=float(k * dm.dt),
-						T=float(t_sim),
+						t=t_task,
+						T=T_task,
 						start_xyz=ee0,
 						left_block_xyz=left_block_xyz,
 						cross_jitter_amp=float(cross_jitter_amp),
@@ -2522,6 +2528,12 @@ if __name__ == "__main__":
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
+    parser.add_argument(
+        "--obstacle_task_T",
+        type=float,
+        default=4.0,
+        help="Seconds per obstacle-arm task cycle in arm_task mode (cross_pick).",
+    )
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -2663,6 +2675,7 @@ if __name__ == "__main__":
             cross_jitter_amp=float(args_cli.cross_jitter_amp),
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
+            obstacle_task_T=getattr(args_cli, "obstacle_task_T", 4.0),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
