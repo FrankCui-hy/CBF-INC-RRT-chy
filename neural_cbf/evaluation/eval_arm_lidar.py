@@ -1414,7 +1414,8 @@ def run_moving_obstacle_rollout(
 			pass
 
 		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
-		right_block = (float(block_x), +float(block_y_off), float(table_top_z) + float(block_z))
+		# Move BLUE block slightly forward (+x) to separate it from obstacle-arm workspace.
+		right_block = (float(block_x) + 0.08, +float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
