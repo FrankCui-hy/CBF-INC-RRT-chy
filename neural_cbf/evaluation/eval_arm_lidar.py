@@ -1257,11 +1257,11 @@ def run_moving_obstacle_rollout(
 	except Exception:
 		print(f"[EE] main_ee_link_index={int(main_ee_link_idx)}")
 
-	# --- Sync speeds: by default, keep both arms and obstacle motion on the same scale ---
+	# --- Sync speeds: main arm can be sped up independently; obstacle arm keeps stable default ---
 	if obstacle_speed_scale is None:
 		obstacle_speed_scale = float(speed_scale)
 	if obstacle_arm_speed_scale is None:
-		obstacle_arm_speed_scale = float(speed_scale)
+		obstacle_arm_speed_scale = 1.0
 
 	# Use the same start state used by the rollout experiment if available
 	start_x = None
@@ -1314,6 +1314,15 @@ def run_moving_obstacle_rollout(
 		removed = _remove_all_obstacles(env, robot.robotId, exclude_ids=_keep)
 		obstacle_ids = []
 		print(f"[ROLL] obstacle_mode={mode} -> removed {len(removed)} rigid obstacles: {removed}")
+		if mode == "arm_task":
+			# Disable env-provided obstacle trajectory playback, otherwise it overrides our IK task updates.
+			try:
+				env.obstacle_traj = None
+				env.obstacle_traj_dt = None
+				env.obstacle_qdot = None
+				print("[OBST_ARM_TASK] disabled env obstacle trajectory playback")
+			except Exception as e:
+				print(f"[OBST_ARM_TASK] WARN: failed to disable env obstacle traj: {e}")
 
 	else:
 		# mode == "rigid": keep existing rigid obstacles (boxes/meshes)
@@ -1339,6 +1348,7 @@ def run_moving_obstacle_rollout(
 	table_top_z = None
 	left_block_id = None
 	right_block_id = None
+	obst_target_block_xyz = None
 	obst_grasp_state = {"grabbed": False}
 	main_grasp_state = {"grabbed": False}
 	# For cross_pick: track return-to-home after grasp
@@ -1401,6 +1411,7 @@ def run_moving_obstacle_rollout(
 		# Track blocks explicitly for visual grasp
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
+		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
 
