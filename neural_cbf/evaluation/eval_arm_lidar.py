@@ -814,37 +814,43 @@ def _obstacle_ee_target_cross_pick_nominal(
     cross_jitter_hz: float = 8.0,
     cross_window_ratio: float = 0.12,
 ):
-    """Nominal pick task without lane crossing.
+    """Obstacle-arm task: pick on obstacle side, brief near-mid feint, then retreat.
 
-    Sequence: pregrasp -> grasp -> hold -> lift -> retreat on obstacle side.
+    Designed to create one brief avoidance event (helps separate JVP vs FD)
+    without long-duration entanglement.
     """
     t = float(np.clip(t, 0.0, T))
     s = t / max(T, 1e-6)
 
     start = np.array(start_xyz, dtype=np.float32)
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
-    grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.035], dtype=np.float32)
-    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.22], dtype=np.float32)
-    retreat = np.array([left_block_xyz[0] - 0.10, left_block_xyz[1] - 0.10, left_block_xyz[2] + 0.24], dtype=np.float32)
+    grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
+    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.24], dtype=np.float32)
+    # Brief "feint" near midline, high-z, then quickly leave to obstacle side.
+    feint = np.array([left_block_xyz[0] - 0.12, -0.05, left_block_xyz[2] + 0.26], dtype=np.float32)
+    retreat = np.array([left_block_xyz[0] - 0.22, left_block_xyz[1] - 0.14, left_block_xyz[2] + 0.24], dtype=np.float32)
 
-    if s <= 0.35:
-        w = _smoothstep(s / 0.35)
+    if s <= 0.30:
+        w = _smoothstep(s / 0.30)
         xyz = (1.0 - w) * start + w * pre
-    elif s <= 0.52:
-        w = _smoothstep((s - 0.35) / 0.17)
+    elif s <= 0.46:
+        w = _smoothstep((s - 0.30) / 0.16)
         xyz = (1.0 - w) * pre + w * grasp
-    elif s <= 0.60:
+    elif s <= 0.54:
         xyz = grasp.copy()
-    elif s <= 0.72:
-        w = _smoothstep((s - 0.60) / 0.12)
+    elif s <= 0.66:
+        w = _smoothstep((s - 0.54) / 0.12)
         xyz = (1.0 - w) * grasp + w * lift
+    elif s <= 0.78:
+        w = _smoothstep((s - 0.66) / 0.12)
+        xyz = (1.0 - w) * lift + w * feint
     else:
-        w = _smoothstep((s - 0.72) / 0.28)
-        xyz = (1.0 - w) * lift + w * retreat
+        w = _smoothstep((s - 0.78) / 0.22)
+        xyz = (1.0 - w) * feint + w * retreat
 
-    # Keep optional jitter tiny and only near transition to retreat.
+    # Non-smooth jitter only around the brief feint window.
     hw = 0.5 * float(np.clip(cross_window_ratio, 0.0, 1.0))
-    if abs(s - 0.76) <= hw:
+    if abs(s - 0.74) <= hw:
         sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0 else -1.0
         xyz = xyz + np.array([0.0, sig * float(cross_jitter_amp), 0.0], dtype=np.float32)
 
@@ -1411,9 +1417,11 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			pass
 
-		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
-		# Move BLUE block slightly forward (+x) to separate it from obstacle-arm workspace.
-		right_block = (float(block_x) + 0.08, +float(block_y_off), float(table_top_z) + float(block_z))
+		# Replanned asymmetric layout:
+		# - green block (obstacle arm task) farther forward
+		# - blue block (main arm task) closer to main arm side for faster pickup
+		left_block = (float(block_x) + 0.05, -float(block_y_off), float(table_top_z) + float(block_z))
+		right_block = (float(block_x) - 0.02, +0.65 * float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
