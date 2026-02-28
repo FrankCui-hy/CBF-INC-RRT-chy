@@ -822,10 +822,9 @@ def _obstacle_ee_target_cross_pick_nominal(
     start = np.array(start_xyz, dtype=np.float32)
     pre = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.12], dtype=np.float32)
     grasp = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.04], dtype=np.float32)
-    lift = np.array([left_block_xyz[0], left_block_xyz[1], left_block_xyz[2] + 0.28], dtype=np.float32)
-    # CCW return arc in XY, with elevated Z to avoid blocking main-arm descent.
-    arc_a = np.array([left_block_xyz[0] + 0.14, left_block_xyz[1] - 0.02, left_block_xyz[2] + 0.30], dtype=np.float32)
-    arc_b = np.array([left_block_xyz[0] + 0.12, start[1] + 0.08, left_block_xyz[2] + 0.26], dtype=np.float32)
+    # CCW return arc in XY without extra lift.
+    arc_a = np.array([left_block_xyz[0] + 0.14, left_block_xyz[1] - 0.02, left_block_xyz[2] + 0.08], dtype=np.float32)
+    arc_b = np.array([left_block_xyz[0] + 0.12, start[1] + 0.08, left_block_xyz[2] + 0.08], dtype=np.float32)
     retreat = start.copy()
 
     if s <= 0.26:
@@ -836,21 +835,18 @@ def _obstacle_ee_target_cross_pick_nominal(
         xyz = (1.0 - w) * pre + w * grasp
     elif s <= 0.50:
         xyz = grasp.copy()
-    elif s <= 0.60:
-        w = _smoothstep((s - 0.50) / 0.10)
-        xyz = (1.0 - w) * grasp + w * lift
-    elif s <= 0.78:
-        w = _smoothstep((s - 0.60) / 0.18)
-        xyz = (1.0 - w) * lift + w * arc_a
+    elif s <= 0.74:
+        w = _smoothstep((s - 0.50) / 0.24)
+        xyz = (1.0 - w) * grasp + w * arc_a
         # Optional non-smooth perturbation in arc segment.
         if float(cross_jitter_amp) > 0.0:
             sig = 1.0 if np.sin(2 * np.pi * float(cross_jitter_hz) * t) >= 0.0 else -1.0
             xyz = xyz + np.array([0.0, sig * (0.5 * float(cross_jitter_amp)), 0.0], dtype=np.float32)
-    elif s <= 0.90:
-        w = _smoothstep((s - 0.78) / 0.12)
+    elif s <= 0.88:
+        w = _smoothstep((s - 0.74) / 0.14)
         xyz = (1.0 - w) * arc_a + w * arc_b
     else:
-        w = _smoothstep((s - 0.90) / 0.10)
+        w = _smoothstep((s - 0.88) / 0.12)
         xyz = (1.0 - w) * arc_b + w * retreat
 
     return xyz
