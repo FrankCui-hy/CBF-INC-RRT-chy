@@ -1414,10 +1414,7 @@ def run_moving_obstacle_rollout(
 			pass
 
 		left_block = (float(block_x), -float(block_y_off), float(table_top_z) + float(block_z))
-		# Keep blue block farther from obstacle-arm base side for clearer separation.
-		right_y_nom = float(block_y_off)
-		right_y_far = float(obst_base_y) - 0.22
-		right_block = (float(block_x), float(min(right_y_nom, right_y_far)), float(table_top_z) + float(block_z))
+		right_block = (float(block_x), +float(block_y_off), float(table_top_z) + float(block_z))
 		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
 		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
 		scene_block_ids = [int(lb_id), int(rb_id)]
@@ -1582,39 +1579,42 @@ def run_moving_obstacle_rollout(
 				print(f"[OBST_ARM] ERROR spawning obstacle arm (pre-start): {e}")
 				obstacle_arm = None
 
-	# Make sure we don't start in collision
-	x = _ensure_noncolliding_start(
-		controller,
-		x,
-		min_clearance=float(start_min_clearance),
-		max_tries=int(max_start_resample),
-		abort_on_fail=bool(require_clean_start),
-		exclude_obstacle_ids=scene_block_ids,
-	)
-	if x is None:
-		result = {
-			"collided": None,
-			"skipped": True,
-			"skip_reason": "no_clean_start",
-			"seed": int(seed),
-			"start_q": start_q_override.tolist() if isinstance(start_q_override, np.ndarray) else None,
-			"clean_start": False,
-			"steps_ran": 0,
-			"min_dist_min": None,
-			"min_dist_mean": None,
-			"qp_infeasible_count": 0,
-			"u_jitter_mean": None,
-			"diagnostic_samples": 0,
-		}
-		print("[ROLL] skipped=True reason=no_clean_start")
-		try:
-			p_.disconnect()
-		except Exception:
+	# Make sure we don't start in collision (unless start_q is explicitly fixed).
+	if start_q_override is not None:
+		print("[ROLL] lock_start_q=True -> skip start resampling")
+	else:
+		x = _ensure_noncolliding_start(
+			controller,
+			x,
+			min_clearance=float(start_min_clearance),
+			max_tries=int(max_start_resample),
+			abort_on_fail=bool(require_clean_start),
+			exclude_obstacle_ids=scene_block_ids,
+		)
+		if x is None:
+			result = {
+				"collided": None,
+				"skipped": True,
+				"skip_reason": "no_clean_start",
+				"seed": int(seed),
+				"start_q": start_q_override.tolist() if isinstance(start_q_override, np.ndarray) else None,
+				"clean_start": False,
+				"steps_ran": 0,
+				"min_dist_min": None,
+				"min_dist_mean": None,
+				"qp_infeasible_count": 0,
+				"u_jitter_mean": None,
+				"diagnostic_samples": 0,
+			}
+			print("[ROLL] skipped=True reason=no_clean_start")
 			try:
-				p.disconnect()
+				p_.disconnect()
 			except Exception:
-				pass
-		return result
+				try:
+					p.disconnect()
+				except Exception:
+					pass
+			return result
 
 	# Ensure robot is in sync with x at t=0
 	q = x[0, :dm.n_dims]
@@ -1822,14 +1822,18 @@ def run_moving_obstacle_rollout(
 					u_ref = controller.u_reference(x)[0]
 					is_return = bool(main_return_state.get("returning", False))
 					if is_return:
-						# HOME phase: stronger assist to avoid stopping before reaching start/home.
-						alpha = float(np.clip((0.90 - d_goal_pre) / 0.70, 0.0, 1.0))
-						u = (1.0 - alpha) * u + alpha * u_ref
-						if mode == "none" and d_goal_pre < 0.80:
-							k_track = 3.2
-							u_track = k_track * (q_goal_dev - q_now_pre)
-							beta = float(np.clip((0.80 - d_goal_pre) / 0.65, 0.0, 1.0))
-							u = (1.0 - beta) * u + beta * u_track
+						# During return, keep obstacle avoidance active.
+						# If obstacles exist, do NOT blend in nominal/reference terms.
+						if mode == "none":
+							alpha = float(np.clip((0.90 - d_goal_pre) / 0.70, 0.0, 1.0))
+							u = (1.0 - alpha) * u + alpha * u_ref
+							if d_goal_pre < 0.80:
+								k_track = 3.2
+								u_track = k_track * (q_goal_dev - q_now_pre)
+								beta = float(np.clip((0.80 - d_goal_pre) / 0.65, 0.0, 1.0))
+								u = (1.0 - beta) * u + beta * u_track
+						else:
+							alpha = 0.0
 					else:
 						# GOAL phase (grasp): previous near-goal assist.
 						alpha = float(np.clip((0.60 - d_goal_pre) / 0.45, 0.0, 1.0))
