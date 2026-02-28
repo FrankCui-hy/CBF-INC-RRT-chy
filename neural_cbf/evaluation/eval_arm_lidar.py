@@ -1406,7 +1406,7 @@ def run_moving_obstacle_rollout(
 			pass
 		return None
 
-	if str(scene).lower() == "cross_pick":
+	if legacy_ctrl and str(scene).lower() == "cross_pick":
 		# move main robot base to left in Y for visual separation
 		try:
 			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
@@ -2205,7 +2205,7 @@ def run_moving_obstacle_rollout(
 			except Exception:
 				pass
 			# Legacy descent re-targeting (disabled when stable task controller is on)
-			if not use_stable_task_ctrl:
+			if legacy_ctrl and (not use_stable_task_ctrl):
 				try:
 					ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
 					if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.40):
@@ -2248,7 +2248,7 @@ def run_moving_obstacle_rollout(
 			except Exception:
 				pass
 			# Legacy periodic descent refresh (disabled when stable task controller is on)
-			if not use_stable_task_ctrl:
+			if legacy_ctrl and (not use_stable_task_ctrl):
 				try:
 					if bool(main_grasp_state.get("descent_mode", False)) and (not bool(main_grasp_state.get("grabbed", False))) and ((k % 120) == 0):
 						descend_xyz_refresh = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.000]
