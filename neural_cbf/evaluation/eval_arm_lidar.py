@@ -1255,6 +1255,7 @@ def run_moving_obstacle_rollout(
     cross_window_ratio: float = 0.35,
     pure_cbf_eval: bool = False,
     obst_freeze_on_close: bool = False,
+    continue_after_collision: bool = False,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -2069,7 +2070,8 @@ def run_moving_obstacle_rollout(
 				(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
 			if hit:
 				collided = True
-				collide_step = k
+				if collide_step is None:
+					collide_step = k
 				print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
 				if pause_on_collision:
 					# Keep the GUI open and pause here. Press Ctrl+C in the terminal to exit.
@@ -2079,7 +2081,8 @@ def run_moving_obstacle_rollout(
 						pass
 					while True:
 						time.sleep(0.1)
-				break
+				if not bool(continue_after_collision):
+					break
 
 		if realtime:
 			# realtime_scale > 1 slows down the visualization (e.g., 2.0 means 2x slower than real time)
@@ -2092,7 +2095,7 @@ def run_moving_obstacle_rollout(
 		"t_sim": t_sim,
 		"start_q": q.detach().cpu().tolist(),
 		"clean_start": True,
-		"steps_ran": (collide_step if collided else (k + 1)),
+		"steps_ran": ((collide_step + 1) if (collided and (not bool(continue_after_collision)) and (collide_step is not None)) else (k + 1)),
 		"collided": collided,
 		"min_dist_min": float(np.min(min_dist_hist)) if len(min_dist_hist) else None,
 		"min_dist_mean": float(np.mean(min_dist_hist)) if len(min_dist_hist) else None,
@@ -2583,6 +2586,7 @@ if __name__ == "__main__":
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
     parser.add_argument("--pure_cbf_eval", action="store_true", help="Disable all rollout helper policies; use pure controller.u(x).")
     parser.add_argument("--obst_freeze_on_close", action="store_true", help="Freeze obstacle arm briefly when too close (debug safety helper).")
+    parser.add_argument("--continue_after_collision", action="store_true", help="Do not stop rollout when collision is detected; keep running to task end.")
     parser.add_argument("--pause_on_collision", action="store_true")
     parser.add_argument(
         "--start_q",
@@ -2726,6 +2730,7 @@ if __name__ == "__main__":
             cross_window_ratio=float(args_cli.cross_window_ratio),
             pure_cbf_eval=bool(args_cli.pure_cbf_eval),
             obst_freeze_on_close=bool(args_cli.obst_freeze_on_close),
+            continue_after_collision=bool(args_cli.continue_after_collision),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
