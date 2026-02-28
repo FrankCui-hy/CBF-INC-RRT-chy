@@ -710,7 +710,9 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 
 # ---- Visual grasp helper for cross-pick ----
 def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_id: int, grasp_state: dict,
-                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035, z_align_thresh: float = 0.08):
+                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035,
+                              z_align_thresh: float = 0.08, xy_align_thresh: float = 1.0,
+                              grasp_z_max_offset: float = 1.0):
     """Visual-only grasp: when EE is close, disable block collisions and make block follow EE.
 
     grasp_state: dict that will store keys {"grabbed": bool}.
@@ -736,10 +738,21 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
 
     ee_block_dist = float(np.linalg.norm(ee_pos - bpos))
     grasp_state["ee_block_dist"] = ee_block_dist
+    ee_xy_dist = float(np.linalg.norm(ee_pos[:2] - bpos[:2]))
+    ee_dz = float(abs(ee_pos[2] - bpos[2]))
+    grasp_state["ee_xy_dist"] = ee_xy_dist
+    grasp_state["ee_dz"] = ee_dz
+    grasp_state["ee_z"] = float(ee_pos[2])
+    grasp_state["block_z"] = float(bpos[2])
 
     # Trigger grasp only when close in 3D and reasonably aligned in Z
-    dz = float(abs(ee_pos[2] - bpos[2]))
-    if (not grabbed) and (ee_block_dist <= float(dist_thresh)) and (dz <= float(z_align_thresh)):
+    if (
+        (not grabbed)
+        and (ee_block_dist <= float(dist_thresh))
+        and (ee_dz <= float(z_align_thresh))
+        and (ee_xy_dist <= float(xy_align_thresh))
+        and (float(ee_pos[2]) <= float(bpos[2]) + float(grasp_z_max_offset))
+    ):
         grasp_state["grabbed"] = True
         # Disable collisions for the block so it won't affect control/contacts
         try:
@@ -1433,7 +1446,13 @@ def run_moving_obstacle_rollout(
 		right_block_id = int(rb_id)
 		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
-		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf"), "approach_lock": False, "descent_goal_set": False}
+		main_grasp_state = {
+			"grabbed": False,
+			"ee_block_dist": float("inf"),
+			"approach_lock": False,
+			"descent_goal_set": False,
+			"descent_mode": False,
+		}
 
 		# main arm goal xyz: lower pregrasp so EE can descend to the block.
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.025]
@@ -1875,7 +1894,8 @@ def run_moving_obstacle_rollout(
 		):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock):
+			descent_mode = bool(main_grasp_state.get("descent_mode", False))
+			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
 				try:
 					q_now = x[0, :dm.n_dims]
 					u_side = 2.8 * (q_sidestep.to(x.device) - q_now)
@@ -1926,7 +1946,12 @@ def run_moving_obstacle_rollout(
 							# With obstacles: keep CBF dominant, but add stronger approach
 							# assistance near the blue block to avoid stalling.
 							ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
-							if (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.35):
+							descent_mode = bool(main_grasp_state.get("descent_mode", False))
+							if descent_mode:
+								# Force a stronger down-reaching motion once descent starts.
+								alpha = 0.85 if ((pre_min_d is None) or (pre_min_d > 0.03)) else 0.55
+								u = (1.0 - alpha) * u + alpha * u_ref
+							elif (pre_min_d is not None) and (pre_min_d > 0.05) and (ee_to_blue < 0.35):
 								alpha = float(np.clip((0.35 - ee_to_blue) / 0.25, 0.30, 0.75))
 								u = (1.0 - alpha) * u + alpha * u_ref
 							else:
@@ -1946,7 +1971,8 @@ def run_moving_obstacle_rollout(
 		if (not bool(pure_cbf_eval)) and (mode != "none") and (pre_min_d is not None):
 			ee_to_blue = float(main_grasp_state.get("ee_block_dist", 1e9))
 			approach_lock = bool(main_grasp_state.get("approach_lock", False))
-			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock):
+			descent_mode = bool(main_grasp_state.get("descent_mode", False))
+			if pre_min_d < 0.35 and (ee_to_blue > 0.35) and (not approach_lock) and (not descent_mode):
 				slow_floor = 0.15 if ee_to_blue > 0.18 else 0.35
 				slow = float(np.clip((pre_min_d - 0.05) / 0.30, slow_floor, 1.0))
 				u = u * slow
@@ -1998,9 +2024,11 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.10,
+				dist_thresh=0.12,
 				ee_z_offset=-0.035,
-				z_align_thresh=0.08,
+				z_align_thresh=0.05,
+				xy_align_thresh=0.06,
+				grasp_z_max_offset=0.04,
 			)
 			try:
 				if float(main_grasp_state.get("ee_block_dist", 1e9)) < 0.35:
@@ -2011,8 +2039,8 @@ def run_moving_obstacle_rollout(
 			# down-reaching pose so the gripper actually moves down instead of hovering.
 			try:
 				ee_to_blue_now = float(main_grasp_state.get("ee_block_dist", 1e9))
-				if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.30):
-					descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.005]
+				if (not bool(main_grasp_state.get("grabbed", False))) and (not bool(main_grasp_state.get("descent_goal_set", False))) and (ee_to_blue_now < 0.40):
+					descend_xyz = [float(right_block[0]), float(right_block[1]), float(right_block[2]) + 0.015]
 					q_goal_down = _ik_close_to_q(
 						p_,
 						int(robot.robotId),
@@ -2024,6 +2052,7 @@ def run_moving_obstacle_rollout(
 						dm.set_goal(q_goal_down)
 						q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
 						main_grasp_state["descent_goal_set"] = True
+						main_grasp_state["descent_mode"] = True
 						print(f"[TASK] set_descent_goal_xyz={descend_xyz}")
 			except Exception:
 				pass
@@ -2034,7 +2063,13 @@ def run_moving_obstacle_rollout(
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.10:
+				if (
+					(not bool(main_grasp_state.get("grabbed", False)))
+					and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.12
+					and float(main_grasp_state.get("ee_xy_dist", 1e9)) <= 0.06
+					and float(main_grasp_state.get("ee_dz", 1e9)) <= 0.05
+					and float(main_grasp_state.get("ee_z", 1e9)) <= float(main_grasp_state.get("block_z", -1e9)) + 0.04
+				):
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
