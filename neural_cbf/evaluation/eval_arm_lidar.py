@@ -1545,7 +1545,9 @@ def run_moving_obstacle_rollout(
 	p_.stepSimulation()
 	print(f"[START/GOAL] start_ee={start_ee.tolist()}  goal_ee={goal_ee.tolist()}")
 	_spawn_marker(start_ee, rgba=(0, 1, 0, 0.8), radius=0.035)
-	_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
+	# In cross_pick, blue block itself is the visual goal; hide red goal marker.
+	if str(scene).lower() != "cross_pick":
+		_spawn_marker(goal_ee, rgba=(1, 0, 0, 0.8), radius=0.035)
 	# Make sim stepping consistent with the dynamics dt
 	try:
 		p_.setRealTimeSimulation(0)
