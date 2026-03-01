@@ -708,10 +708,14 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return -1
 
 
-def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.42, 0.34, 0.015), rgba=(0.72, 0.62, 0.48, 0.92)) -> int:
-	"""Spawn a visualization-only table (no collision shape)."""
+def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.62, 0.48, 0.02), rgba=(0.72, 0.62, 0.48, 0.95)) -> int:
+	"""Spawn a real tabletop (collision + visual), with top surface at center_z + half_extents[2]."""
 	try:
 		p_ = env.p
+		cshape = p_.createCollisionShape(
+			p_.GEOM_BOX,
+			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
+		)
 		vshape = p_.createVisualShape(
 			p_.GEOM_BOX,
 			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
@@ -719,7 +723,7 @@ def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.42, 0.34, 0.015
 		)
 		bid = p_.createMultiBody(
 			baseMass=0.0,
-			baseCollisionShapeIndex=-1,
+			baseCollisionShapeIndex=cshape,
 			baseVisualShapeIndex=vshape,
 			basePosition=[float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])],
 			baseOrientation=[0, 0, 0, 1],
@@ -1431,36 +1435,35 @@ def run_moving_obstacle_rollout(
 		return None
 
 	if str(scene).lower() == "cross_pick":
-		# move main robot base to left in Y for visual separation
-		try:
-			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
-			p_.resetBasePositionAndOrientation(
-				robot.robotId,
-				[float(bpos[0]), float(main_base_y), float(bpos[2])],
-				born,
-			)
-			print(f"[SCENE] main_base_y={float(main_base_y):.3f}")
-		except Exception as e:
-			print(f"[SCENE] WARN: cannot reset main base y: {e}")
-		# Make main arm visually distinctive.
-		try:
-			_tint_robot_visual(p_, int(robot.robotId), rgba=(1.0, 0.55, 0.10, 1.0))
-			bpos2, _ = p_.getBasePositionAndOrientation(robot.robotId)
-			_spawn_marker([float(bpos2[0]), float(bpos2[1]), float(bpos2[2]) + 0.42], rgba=(1.0, 0.35, 0.05, 0.95), radius=0.025)
-		except Exception:
-			pass
-
 		table_top_z = _find_table_top_z(p_)
 		if table_top_z is None:
 			# fallback: assume z=0 is support surface
 			table_top_z = 0.0
-		# Always add a visualization-only table so the task appears on tabletop.
+		# Spawn a larger real tabletop; place everything on/above it.
 		try:
-			_table_center = [float(block_x), 0.0, float(table_top_z) - 0.015]
-			_table_id = _spawn_visual_table(env, _table_center, half_extents=(0.44, 0.36, 0.015))
+			_table_half = (0.62, 0.48, 0.02)
+			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
+			_table_id = _spawn_visual_table(env, _table_center, half_extents=_table_half)
 			if int(_table_id) >= 0:
 				scene_visual_ids.append(int(_table_id))
-				print(f"[SCENE] visual_table id={int(_table_id)} top_z={float(table_top_z):.3f}")
+				print(f"[SCENE] table id={int(_table_id)} top_z={float(table_top_z):.3f} size=({2*_table_half[0]:.2f},{2*_table_half[1]:.2f})")
+		except Exception:
+			pass
+		# Move main robot base onto tabletop and make it visually distinctive.
+		try:
+			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
+			p_.resetBasePositionAndOrientation(
+				robot.robotId,
+				[float(bpos[0]), float(main_base_y), float(table_top_z)],
+				born,
+			)
+			print(f"[SCENE] main_base_y={float(main_base_y):.3f}")
+		except Exception as e:
+			print(f"[SCENE] WARN: cannot reset main base y/z: {e}")
+		try:
+			_tint_robot_visual(p_, int(robot.robotId), rgba=(1.0, 0.55, 0.10, 1.0))
+			bpos2, _ = p_.getBasePositionAndOrientation(robot.robotId)
+			_spawn_marker([float(bpos2[0]), float(bpos2[1]), float(bpos2[2]) + 0.42], rgba=(1.0, 0.35, 0.05, 0.95), radius=0.025)
 		except Exception:
 			pass
 
@@ -1522,13 +1525,14 @@ def run_moving_obstacle_rollout(
 					oid = -1
 			except Exception:
 				oid = -1
-			if oid >= 0:
-				# Reposition obstacle robot base to the right
-				try:
-					bpos, born = p_.getBasePositionAndOrientation(oid)
-					p_.resetBasePositionAndOrientation(oid, [float(bpos[0]), float(obst_base_y), float(bpos[2])], born)
-				except Exception:
-					pass
+				if oid >= 0:
+					# Reposition obstacle robot base to the right
+					try:
+						bpos, born = p_.getBasePositionAndOrientation(oid)
+						_z = float(table_top_z) if (str(scene).lower() == "cross_pick" and table_top_z is not None) else float(bpos[2])
+						p_.resetBasePositionAndOrientation(oid, [float(bpos[0]), float(obst_base_y), _z], born)
+					except Exception:
+						pass
 
 				# Build an obstacle_arm spec that matches our helper expectations
 				joints = []
@@ -1614,6 +1618,8 @@ def run_moving_obstacle_rollout(
 					setattr(env, "obstacle_arm_urdf", obstacle_arm_urdf)
 				_b = list(obstacle_arm_base_xyz)
 				_b[1] = float(obst_base_y)
+				if str(scene).lower() == "cross_pick" and table_top_z is not None:
+					_b[2] = float(table_top_z)
 				obstacle_arm = _spawn_obstacle_arm(
 					env,
 					main_robot=robot,
