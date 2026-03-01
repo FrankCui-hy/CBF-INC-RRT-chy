@@ -1436,9 +1436,9 @@ def run_moving_obstacle_rollout(
 
 	if str(scene).lower() == "cross_pick":
 		table_top_z = _find_table_top_z(p_)
-		if table_top_z is None:
-			# fallback: assume z=0 is support surface
-			table_top_z = 0.0
+		if (table_top_z is None) or (float(table_top_z) < 0.10):
+			# No valid table found in scene: build a standalone tabletop at a visible height.
+			table_top_z = 0.32
 		# Spawn a larger real tabletop; place everything on/above it.
 		try:
 			_table_half = (0.62, 0.48, 0.02)
@@ -1525,14 +1525,15 @@ def run_moving_obstacle_rollout(
 					oid = -1
 			except Exception:
 				oid = -1
-				if oid >= 0:
-					# Reposition obstacle robot base to the right
-					try:
-						bpos, born = p_.getBasePositionAndOrientation(oid)
-						_z = float(table_top_z) if (str(scene).lower() == "cross_pick" and table_top_z is not None) else float(bpos[2])
-						p_.resetBasePositionAndOrientation(oid, [float(bpos[0]), float(obst_base_y), _z], born)
-					except Exception:
-						pass
+
+			if oid >= 0:
+				# Reposition obstacle robot base to the right (and onto tabletop in cross_pick)
+				try:
+					bpos, born = p_.getBasePositionAndOrientation(oid)
+					_z = float(table_top_z) if (str(scene).lower() == "cross_pick" and table_top_z is not None) else float(bpos[2])
+					p_.resetBasePositionAndOrientation(oid, [float(bpos[0]), float(obst_base_y), _z], born)
+				except Exception:
+					pass
 
 				# Build an obstacle_arm spec that matches our helper expectations
 				joints = []
@@ -1631,6 +1632,17 @@ def run_moving_obstacle_rollout(
 					amp_scale=float(obstacle_arm_amp_scale),
 					omega_scale=float(obstacle_arm_omega_scale),
 				)
+				# If we had a stale env.obstacle_robot and just spawned a new one, remove stale body
+				# to avoid showing three arms in GUI.
+				try:
+					_env_obst2 = getattr(env, "obstacle_robot", None)
+					_old_oid = int(getattr(_env_obst2, "robotId", -1)) if _env_obst2 is not None else -1
+					_new_oid = int(obstacle_arm["arm_id"])
+					if _old_oid >= 0 and _old_oid != _new_oid:
+						p_.removeBody(int(_old_oid))
+						print(f"[OBST_ARM] removed stale env.obstacle_robot id={_old_oid}")
+				except Exception:
+					pass
 				# Include obstacle arm in collision checks
 				obstacle_arm["task_done"] = False
 				obstacle_arm["returning"] = False
