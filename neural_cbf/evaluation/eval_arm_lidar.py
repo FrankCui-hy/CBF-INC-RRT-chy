@@ -708,6 +708,44 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return -1
 
 
+def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.42, 0.34, 0.015), rgba=(0.72, 0.62, 0.48, 0.92)) -> int:
+	"""Spawn a visualization-only table (no collision shape)."""
+	try:
+		p_ = env.p
+		vshape = p_.createVisualShape(
+			p_.GEOM_BOX,
+			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
+			rgbaColor=list(rgba),
+		)
+		bid = p_.createMultiBody(
+			baseMass=0.0,
+			baseCollisionShapeIndex=-1,
+			baseVisualShapeIndex=vshape,
+			basePosition=[float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])],
+			baseOrientation=[0, 0, 0, 1],
+		)
+		return int(bid)
+	except Exception:
+		return -1
+
+
+def _tint_robot_visual(p_client, body_id: int, rgba=(1.0, 0.55, 0.10, 1.0)):
+	"""Tint robot links for easier visual identification."""
+	try:
+		p_client.changeVisualShape(int(body_id), -1, rgbaColor=list(rgba))
+	except Exception:
+		pass
+	try:
+		nj = int(p_client.getNumJoints(int(body_id)))
+		for j in range(nj):
+			try:
+				p_client.changeVisualShape(int(body_id), int(j), rgbaColor=list(rgba))
+			except Exception:
+				pass
+	except Exception:
+		pass
+
+
 # ---- Visual grasp helper for cross-pick ----
 def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_id: int, grasp_state: dict,
                               dist_thresh: float = 0.05, ee_z_offset: float = -0.035):
@@ -1364,6 +1402,7 @@ def run_moving_obstacle_rollout(
 
 	# --- Cross-pick scene: spawn blocks AFTER obstacle cleanup so they won't be removed ---
 	scene_block_ids = []
+	scene_visual_ids = []
 	table_top_z = None
 	left_block_id = None
 	right_block_id = None
@@ -1403,11 +1442,27 @@ def run_moving_obstacle_rollout(
 			print(f"[SCENE] main_base_y={float(main_base_y):.3f}")
 		except Exception as e:
 			print(f"[SCENE] WARN: cannot reset main base y: {e}")
+		# Make main arm visually distinctive.
+		try:
+			_tint_robot_visual(p_, int(robot.robotId), rgba=(1.0, 0.55, 0.10, 1.0))
+			bpos2, _ = p_.getBasePositionAndOrientation(robot.robotId)
+			_spawn_marker([float(bpos2[0]), float(bpos2[1]), float(bpos2[2]) + 0.42], rgba=(1.0, 0.35, 0.05, 0.95), radius=0.025)
+		except Exception:
+			pass
 
 		table_top_z = _find_table_top_z(p_)
 		if table_top_z is None:
 			# fallback: assume z=0 is support surface
 			table_top_z = 0.0
+		# Always add a visualization-only table so the task appears on tabletop.
+		try:
+			_table_center = [float(block_x), 0.0, float(table_top_z) - 0.015]
+			_table_id = _spawn_visual_table(env, _table_center, half_extents=(0.44, 0.36, 0.015))
+			if int(_table_id) >= 0:
+				scene_visual_ids.append(int(_table_id))
+				print(f"[SCENE] visual_table id={int(_table_id)} top_z={float(table_top_z):.3f}")
+		except Exception:
+			pass
 
 		# Print kept obstacle robot id for debugging
 		try:
@@ -1526,6 +1581,8 @@ def run_moving_obstacle_rollout(
 				# Do not treat blocks as obstacles for collision/distance
 				if scene_block_ids:
 					obstacle_ids = [x for x in obstacle_ids if int(x) not in set(scene_block_ids)]
+				if scene_visual_ids:
+					obstacle_ids = [x for x in obstacle_ids if int(x) not in set(scene_visual_ids)]
 
 				# Keep observation focused on the obstacle arm
 				try:
@@ -1576,6 +1633,8 @@ def run_moving_obstacle_rollout(
 				# Don't treat the scene blocks as obstacles for collision/distance checks
 				if scene_block_ids:
 					obstacle_ids = [oid for oid in obstacle_ids if int(oid) not in set(scene_block_ids)]
+				if scene_visual_ids:
+					obstacle_ids = [oid for oid in obstacle_ids if int(oid) not in set(scene_visual_ids)]
 				# IMPORTANT: make observation only "see" the obstacle arm by restricting env.obstacle_ids
 				try:
 					env.obstacle_ids = [int(obstacle_arm["arm_id"])]
@@ -1603,7 +1662,7 @@ def run_moving_obstacle_rollout(
 		min_clearance=float(start_min_clearance),
 		max_tries=int(max_start_resample),
 		abort_on_fail=bool(require_clean_start),
-		exclude_obstacle_ids=scene_block_ids,
+		exclude_obstacle_ids=(list(scene_block_ids) + list(scene_visual_ids)),
 	)
 	if x is None:
 		result = {
