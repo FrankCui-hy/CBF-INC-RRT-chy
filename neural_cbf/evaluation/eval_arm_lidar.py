@@ -708,29 +708,67 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return -1
 
 
-def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.62, 0.48, 0.02), rgba=(0.72, 0.62, 0.48, 0.95)) -> int:
-	"""Spawn a real tabletop (collision + visual), with top surface at center_z + half_extents[2]."""
+def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025), rgba=(0.72, 0.62, 0.48, 0.95)):
+	"""Spawn a real table (top + 4 legs), all with collision + visual.
+
+	Returns a list of body ids [top, leg1, leg2, leg3, leg4].
+	"""
 	try:
 		p_ = env.p
-		cshape = p_.createCollisionShape(
+		ids = []
+		top_cshape = p_.createCollisionShape(
 			p_.GEOM_BOX,
 			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
 		)
-		vshape = p_.createVisualShape(
+		top_vshape = p_.createVisualShape(
 			p_.GEOM_BOX,
 			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
 			rgbaColor=list(rgba),
 		)
-		bid = p_.createMultiBody(
+		top_id = p_.createMultiBody(
 			baseMass=0.0,
-			baseCollisionShapeIndex=cshape,
-			baseVisualShapeIndex=vshape,
+			baseCollisionShapeIndex=top_cshape,
+			baseVisualShapeIndex=top_vshape,
 			basePosition=[float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])],
 			baseOrientation=[0, 0, 0, 1],
 		)
-		return int(bid)
+		ids.append(int(top_id))
+
+		# Legs
+		leg_h = 0.28
+		leg_half = (0.035, 0.035, leg_h / 2.0)
+		leg_cshape = p_.createCollisionShape(
+			p_.GEOM_BOX,
+			halfExtents=[float(leg_half[0]), float(leg_half[1]), float(leg_half[2])],
+		)
+		leg_vshape = p_.createVisualShape(
+			p_.GEOM_BOX,
+			halfExtents=[float(leg_half[0]), float(leg_half[1]), float(leg_half[2])],
+			rgbaColor=[0.34, 0.24, 0.16, 0.98],
+		)
+		xc, yc, zc = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
+		hx, hy, hz = float(half_extents[0]), float(half_extents[1]), float(half_extents[2])
+		z_bottom = zc - hz
+		leg_z = z_bottom - float(leg_half[2])
+		inset = 0.06
+		leg_xy = [
+			(xc - hx + inset, yc - hy + inset),
+			(xc - hx + inset, yc + hy - inset),
+			(xc + hx - inset, yc - hy + inset),
+			(xc + hx - inset, yc + hy - inset),
+		]
+		for lx, ly in leg_xy:
+			lid = p_.createMultiBody(
+				baseMass=0.0,
+				baseCollisionShapeIndex=leg_cshape,
+				baseVisualShapeIndex=leg_vshape,
+				basePosition=[float(lx), float(ly), float(leg_z)],
+				baseOrientation=[0, 0, 0, 1],
+			)
+			ids.append(int(lid))
+		return ids
 	except Exception:
-		return -1
+		return []
 
 
 def _tint_robot_visual(p_client, body_id: int, rgba=(1.0, 0.55, 0.10, 1.0)):
@@ -1441,12 +1479,15 @@ def run_moving_obstacle_rollout(
 			table_top_z = 0.32
 		# Spawn a larger real tabletop; place everything on/above it.
 		try:
-			_table_half = (0.62, 0.48, 0.02)
+			_table_half = (0.75, 0.58, 0.025)
 			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
-			_table_id = _spawn_visual_table(env, _table_center, half_extents=_table_half)
-			if int(_table_id) >= 0:
-				scene_visual_ids.append(int(_table_id))
-				print(f"[SCENE] table id={int(_table_id)} top_z={float(table_top_z):.3f} size=({2*_table_half[0]:.2f},{2*_table_half[1]:.2f})")
+			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half)
+			if len(_table_ids) > 0:
+				scene_visual_ids.extend([int(i) for i in _table_ids])
+				print(
+					f"[SCENE] table ids={_table_ids} top_z={float(table_top_z):.3f} "
+					f"size=({2*_table_half[0]:.2f},{2*_table_half[1]:.2f})"
+				)
 		except Exception:
 			pass
 		# Move main robot base onto tabletop and make it visually distinctive.
