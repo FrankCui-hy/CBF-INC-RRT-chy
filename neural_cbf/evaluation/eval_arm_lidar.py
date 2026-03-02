@@ -2290,6 +2290,11 @@ def run_moving_obstacle_rollout(
 				collide_step = k
 				print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
 				print(f"[H] collision_instant t={k*dm.dt:.3f}s  h={h_now:.6f}")
+				try:
+					h_post = float(controller.h(x).reshape(-1)[0].detach().cpu().item())
+				except Exception:
+					h_post = float("nan")
+				print(f"[H] collision_postcheck t={k*dm.dt:.3f}s  h={h_post:.6f}")
 				# Save h(t) immediately on collision (for both baseline/JVP).
 				try:
 					_hp = _save_h_plot_once()
