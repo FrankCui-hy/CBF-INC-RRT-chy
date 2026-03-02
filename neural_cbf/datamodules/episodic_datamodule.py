@@ -243,6 +243,13 @@ class EpisodicDataModule(pl.LightningDataModule):
 			return True
 
 		x = x_init.clone()
+		# closed_loop_dynamics(update_observation=False) expects full datax, not raw q.
+		# sample_trajectories currently passes x_init as q-only; upgrade it here.
+		if x.ndim == 2 and x.shape[1] == self.model.q_dims:
+			try:
+				x = self.model.complete_sample_with_observations(x, x.shape[0])
+			except Exception:
+				return True
 		for _ in range(self.obstacle_block_check_steps):
 			self.model.robot.set_joint_position(self.model.robot.body_joints, x[0, :self.model.q_dims])
 			if self.model.env.robots_within_distance(
