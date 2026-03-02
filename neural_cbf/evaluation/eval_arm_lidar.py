@@ -2111,7 +2111,7 @@ def run_moving_obstacle_rollout(
 
 	def _closest_distance_self(threshold=0.1):
 		"""Approx self-distance via link-pair closest points, skipping adjacent links."""
-		IGNORE_SELF_PAIRS = {(6, 8), (8, 6)}
+		IGNORE_SELF_PAIRS = {(6, 8), (8, 6), (8, 10), (10, 8)}
 		try:
 			nj = int(p_.getNumJoints(int(robot.robotId)))
 		except Exception:
