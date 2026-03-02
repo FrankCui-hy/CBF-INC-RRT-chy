@@ -162,7 +162,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     ray_mix_enabled = bool(ray_mix_cfg.get("enabled", False))
     ray_mix_sphere_ratio = float(ray_mix_cfg.get("sphere_ratio", 0.7))
     ray_mix_cone_ratio = 1.0 - ray_mix_sphere_ratio
-    obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.0, 0.0)))
+    # Keep base-relative layout aligned with eval defaults (main y=-0.20, obstacle y=+0.20).
+    ego_base_pos = tuple(real_cfg.get("ego_robot_base_pos", (0.0, -0.2, 0.0)))
+    ego_base_orn = tuple(real_cfg.get("ego_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
+    obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.2, 0.0)))
     obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
     near_episode_ratio = float(real_cfg.get("near_episode_ratio", 0.0))
     near_base_mode = str(real_cfg.get("near_base_mode", "fixed")).lower()
@@ -185,6 +188,13 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     obs_robot = env.obstacle_robot
     if obs_robot is None:
         raise RuntimeError("Real sampler requires obstacle_robot_name to be set.")
+    # Force both robot bases so g_phi sampling geometry matches evaluation geometry.
+    try:
+        env.p.resetBasePositionAndOrientation(ego_robot.robotId, ego_base_pos, ego_base_orn)
+        env.p.resetBasePositionAndOrientation(obs_robot.robotId, obstacle_base_pos, obstacle_base_orn)
+        env.p.performCollisionDetection()
+    except Exception:
+        pass
 
     n_ego = int(ego_robot.body_dim)
     n_obs = int(obs_robot.body_dim)
@@ -326,7 +336,10 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
         "cone_axis_mode": "target_tracking" if ray_mode == "cone" else "sensor_frame",
         "ray_mode_effective": "mixture" if ray_mix_enabled else ray_mode,
         "cone_half_angle_deg": cone_half_angle_deg,
+        "ego_robot_base_pos": ego_base_pos,
+        "ego_robot_base_orn": ego_base_orn,
         "obstacle_robot_base_pos": obstacle_base_pos,
+        "obstacle_robot_base_orn": obstacle_base_orn,
         "near_episode_ratio": near_episode_ratio,
         "near_base_mode": near_base_mode,
         "near_obstacle_base_pos": near_obstacle_base_pos,
