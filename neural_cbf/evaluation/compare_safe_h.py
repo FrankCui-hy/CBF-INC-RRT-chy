@@ -201,8 +201,18 @@ def summarize_violation_observation(name: str, dm, data_x_in: torch.Tensor, vio_
         print(f"[{name}] no safe-violation samples.")
         return
 
-    o = data_x_in[vio_idx, dm.n_dims : dm.n_dims + dm.o_dims].reshape(vio_idx.numel(), -1, dm.point_dims)
-    if dm.point_dims == 4:
+    obs_seg = data_x_in[vio_idx, dm.n_dims : dm.n_dims + dm.o_dims]
+    obs_len = int(obs_seg.shape[1])
+    pd = int(getattr(dm, "point_dims", 4))
+    # If configured point_dims doesn't divide the observation length, infer a plausible one.
+    if obs_len % pd != 0:
+        # Prefer common point dimensions used in this repo.
+        for cand in (4, 3, 6, 7, 8, 9, 10, 12):
+            if obs_len % cand == 0:
+                pd = cand
+                break
+    o = obs_seg.reshape(vio_idx.numel(), -1, pd)
+    if pd == 4:
         ranges = o[..., 0]
         hit_ch = o[..., -1]
         hit_ratio = float((hit_ch > 0.5).float().mean().item())
@@ -224,11 +234,42 @@ def render_violations(ctrl, data_x_in: torch.Tensor, vio_idx: torch.Tensor, save
         return
     os.makedirs(save_dir, exist_ok=True)
     take = vio_idx[: min(int(topk), vio_idx.numel())]
-    for i in take.tolist():
+
+    # Infer per-point dimension from the observation segment length; needed for draw_environment.
+    try:
+        dm = ctrl.dynamics_model
+        obs_len = int(data_x_in.shape[1] - int(dm.n_dims) - int(getattr(dm, "aux_dims", 0)))
+        pd = int(getattr(dm, "point_dims", 4))
+        if obs_len % pd != 0:
+            for cand in (4, 3, 6, 7, 8, 9, 10, 12):
+                if obs_len % cand == 0:
+                    pd = cand
+                    break
+        _old_pd = int(getattr(dm, "point_dims", pd))
+        _old_pdim = int(getattr(dm, "point_dim", pd)) if hasattr(dm, "point_dim") else _old_pd
+        dm.point_dims = pd
+        if hasattr(dm, "point_dim"):
+            dm.point_dim = pd
+    except Exception:
+        dm = None
+        pd = None
+        _old_pd = None
+        _old_pdim = None
+
+    try:
+        for i in take.tolist():
+            try:
+                draw_environment(ctrl, data_x_in[i].detach().cpu(), int(i), save_dir)
+            except Exception as e:
+                print(f"[WARN] draw_environment failed at idx={i}: {e}")
+    finally:
         try:
-            draw_environment(ctrl, data_x_in[i].detach().cpu(), int(i), save_dir)
-        except Exception as e:
-            print(f"[WARN] draw_environment failed at idx={i}: {e}")
+            if dm is not None and _old_pd is not None:
+                dm.point_dims = _old_pd
+            if dm is not None and _old_pdim is not None and hasattr(dm, "point_dim"):
+                dm.point_dim = _old_pdim
+        except Exception:
+            pass
 
 
 @torch.no_grad()
