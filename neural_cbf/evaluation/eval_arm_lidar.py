@@ -1437,6 +1437,63 @@ def run_moving_obstacle_rollout(
 		# Some env implementations may not support reset; ignore
 		pass
 
+	def _refresh_x_from_sim() -> torch.Tensor:
+		"""Refresh datax from current simulator joint state."""
+		try:
+			q_now = torch.tensor(
+				[p_.getJointState(int(robot.robotId), int(j))[0] for j in robot.body_joints],
+				dtype=torch.float32,
+			).reshape(1, -1)
+			return dm.complete_sample_with_observations(q_now, num_samples=1)
+		except Exception:
+			# Fallback to current x if sim query fails
+			return x
+
+	def _force_far_observation(x_in: torch.Tensor) -> torch.Tensor:
+		"""In obstacle_mode=none, overwrite the observation part of datax with a max-range 'far' pattern.
+
+		This avoids out-of-distribution all-zeros observations when rays miss everything after we remove
+		plane/table/blocks collisions.
+
+		Assumptions (consistent with draw_environment() in this file):
+		  - If point_dims==4, observation is spherical and O[...,0] is range.
+		  - Else, observation is Cartesian in sensor frame (x,y,z) and we place points far along +x.
+		"""
+		try:
+			x_out = x_in.clone()
+			n_dims = int(getattr(dm, "n_dims", 0))
+			o_dims = int(getattr(dm, "o_dims", 0))
+			if o_dims <= 0:
+				return x_out
+
+			r_max = float(getattr(dm, "dis_threshold", 1.0))
+			r_far = 0.95 * r_max  # slightly under max to avoid edge-case clipping
+
+			point_dims = int(getattr(dm, "point_dims", 4))
+			ray_per = int(getattr(dm, "ray_per_sensor", 1))
+			n_sensor = len(getattr(dm, "list_sensor", []))
+			if n_sensor <= 0:
+				return x_out
+
+			obs = torch.zeros((n_sensor, ray_per, point_dims), dtype=x_out.dtype, device=x_out.device)
+
+			if point_dims == 4:
+				# spherical: [range, theta, phi, hit] (or similar)
+				obs[:, :, 0] = float(r_far)
+			else:
+				# cartesian local endpoints
+				obs[:, :, 0] = float(r_far)
+				if point_dims > 1:
+					obs[:, :, 1] = 0.0
+				if point_dims > 2:
+					obs[:, :, 2] = 0.0
+
+			obs_flat = obs.reshape(1, -1)
+			x_out[:, n_dims:n_dims + o_dims] = obs_flat[:, :o_dims]
+			return x_out
+		except Exception:
+			return x_in
+
 	# Decide obstacle behavior
 	# obstacle_mode:
 	#   - "none": remove all obstacles and skip collision/distance checks
@@ -1824,6 +1881,9 @@ def run_moving_obstacle_rollout(
 		abort_on_fail=bool(require_clean_start),
 		exclude_obstacle_ids=(list(scene_block_ids) + list(scene_visual_ids)),
 	)
+	# In obstacle_mode=none, force observation to look like "all rays hit far" so h(x) stays in-distribution.
+	if bool(mode == "none") and x is not None:
+		x = _force_far_observation(x)
 	if x is None:
 		result = {
 			"collided": None,
@@ -2135,6 +2195,15 @@ def run_moving_obstacle_rollout(
 				_update_obstacles(env, obstacle_ids, t_base, base, direction, omega, amp)
 			# else: mode == "none" -> do nothing
 
+		# IMPORTANT: refresh observation AFTER physics stepping so h(x) corresponds to the
+		# same world state that collision/contact queries see.
+		try:
+			x = _refresh_x_from_sim()
+		except Exception:
+			pass
+		# In obstacle_mode=none, keep observation as max-range (far) each step.
+		if bool(mode == "none"):
+			x = _force_far_observation(x)
 		# 2) Compute control using current datax (q + obs + aux)
 		u = controller.u(x)[0]
 		# Near-goal stabilization for cross_pick:
