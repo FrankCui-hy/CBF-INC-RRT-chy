@@ -1520,20 +1520,11 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
-		# Also try to remove/disable the ground plane so LiDAR/raycast observations are empty.
-		try:
-			# body 0 is commonly the ground plane in PyBullet.
-			cs = p_.getCollisionShapeData(0, -1) or []
-			is_plane = False
-			for c in cs:
-				if c[2] == p_.GEOM_PLANE:
-					is_plane = True
-					break
-			if is_plane:
-				p_.removeBody(0)
-				print("[ROLL] obstacle_mode=none -> removed ground plane (body 0)")
-		except Exception:
-			pass
+		# NOTE: Do NOT remove the ground plane in obstacle_mode=none.
+		# The LiDAR/observation model is typically trained with the floor/plane present.
+		# Removing it makes the observation highly out-of-distribution (often all-miss / zeros),
+		# which can bias h(x) to be > 0 even though there are no obstacles.
+		# We already exclude plane/floor from collision evaluation in `_get_eval_obstacle_ids`.
 
 	elif mode in ("arm", "arm_task"):
 		# Keep ArmEnv's built-in obstacle robot (if present) so explicit/JVP observation pipeline stays consistent
