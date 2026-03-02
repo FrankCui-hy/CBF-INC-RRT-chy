@@ -1599,9 +1599,19 @@ def run_moving_obstacle_rollout(
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
 
-		# main arm goal xyz: near the block center so distance-threshold grasp can trigger.
-		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04]
-		print(f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} (will solve IK after start_q)")
+		# --- Main-arm grasp configuration (must be consistent across IK goal + grasp trigger) ---
+		# `_update_visual_grasp_block` measures distance between (EE_pos + ee_z_offset) and block center.
+		# To make the grasp trigger achievable, set the IK goal such that (EE_pos + ee_z_offset) reaches
+		# the block center with a small lift.
+		main_grasp_dist_thresh = 0.08  # was 0.06; slightly looser to avoid stall near goal
+		main_ee_z_offset = -0.035      # must match the offset passed to `_update_visual_grasp_block`
+		# Target the EE link position so that (EE_pos + main_ee_z_offset) is near the block center.
+		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04 - float(main_ee_z_offset)]
+		print(
+			f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} "
+			f"(dist_thresh={main_grasp_dist_thresh:.3f}, ee_z_offset={main_ee_z_offset:.3f}) "
+			"(will solve IK after start_q)"
+		)
 
 	if start_q_override is not None:
 		q0 = torch.tensor(start_q_override, dtype=torch.float32).reshape(1, -1)
@@ -2188,8 +2198,8 @@ def run_moving_obstacle_rollout(
 				main_ee_link,
 				right_block_id,
 				main_grasp_state,
-				dist_thresh=0.06,
-				ee_z_offset=-0.035,
+				dist_thresh=float(locals().get("main_grasp_dist_thresh", 0.08)),
+				ee_z_offset=float(locals().get("main_ee_z_offset", -0.035)),
 			)
 			if (k % max(int(print_every), 1)) == 0:
 				try:
@@ -2198,7 +2208,8 @@ def run_moving_obstacle_rollout(
 					pass
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= 0.06:
+				_thresh = float(locals().get("main_grasp_dist_thresh", 0.08))
+				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= _thresh:
 					main_grasp_state["grabbed"] = True
 			except Exception:
 				pass
@@ -2274,6 +2285,15 @@ def run_moving_obstacle_rollout(
 		if stop_on_goal and (d_goal <= float(goal_tol)):
 			# In cross_pick, do not stop at pre-grasp goal before actual grasp trigger.
 			if str(scene).lower() == "cross_pick" and (not bool(main_return_state.get("returning", False))) and (not bool(main_grasp_state.get("grabbed", False))):
+				# We reached the joint-space IK goal but have not satisfied the EE grasp trigger.
+				# Keep running; print diagnostics so we can see whether the EE-to-block distance is stuck above threshold.
+				if (k % max(int(print_every), 1)) == 0:
+					try:
+						db = float(main_grasp_state.get("ee_block_dist", float("nan")))
+						th = float(locals().get("main_grasp_dist_thresh", 0.08))
+						print(f"[TASK][WARN] at joint-goal but not grasped: ee_block_dist={db:.4f} > thresh={th:.4f}")
+					except Exception:
+						pass
 				pass
 			else:
 				phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
