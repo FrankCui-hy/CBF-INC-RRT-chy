@@ -1532,9 +1532,10 @@ def run_moving_obstacle_rollout(
 		if (table_top_z is None) or (float(table_top_z) < 0.10):
 			# No valid table found in scene: build a standalone tabletop at a visible height.
 			table_top_z = 0.32
-		# Spawn a smaller real tabletop for obstacle arm + blocks.
+		# Spawn a shorter (not narrower) tabletop for obstacle arm + blocks.
 		try:
-			_table_half = (0.46, 0.34, 0.025)
+			# keep width (x) same, shorten length (y)
+			_table_half = (0.46, 0.24, 0.025)
 			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
 			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half)
 			if len(_table_ids) > 0:
@@ -1568,8 +1569,6 @@ def run_moving_obstacle_rollout(
 			print(f"[SCENE] WARN: cannot place main arm on cart: {e}")
 		try:
 			_tint_robot_visual(p_, int(robot.robotId), rgba=(1.0, 0.55, 0.10, 1.0))
-			bpos2, _ = p_.getBasePositionAndOrientation(robot.robotId)
-			_spawn_marker([float(bpos2[0]), float(bpos2[1]), float(bpos2[2]) + 0.42], rgba=(1.0, 0.35, 0.05, 0.95), radius=0.025)
 		except Exception:
 			pass
 
@@ -1938,6 +1937,8 @@ def run_moving_obstacle_rollout(
 
 	steps = int(t_sim / dm.dt)
 	min_dist_hist = []
+	h_hist = []
+	h_t_hist = []
 	collided = False
 	collide_step = None
 	qp_infeasible_count = 0
@@ -2223,12 +2224,20 @@ def run_moving_obstacle_rollout(
 		# Goal progress (in joint space)
 		q_now = x[0, :dm.n_dims]
 		d_goal = torch.norm(q_now - q_goal.to(q_now.device)).item()
+		# h logging (visualization/debug only; does not affect control)
+		try:
+			h_now = float(controller.h(x).reshape(-1)[0].detach().cpu().item())
+		except Exception:
+			h_now = float("nan")
+		h_hist.append(h_now)
+		h_t_hist.append(float(k * dm.dt))
 		if (k % max(int(print_every), 1)) == 0:
 			if mode != "none" and len(min_dist_hist) > 0:
 				md = min_dist_hist[-1]
 			else:
 				md = float("nan")
 			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
+			print(f"[H] t={k*dm.dt:6.3f}s  h={h_now:.6f}")
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("returning", False)):
 				print(f"[TASK] return_q_dist={d_goal:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
@@ -2324,6 +2333,23 @@ def run_moving_obstacle_rollout(
 				vals = [d[k] for d in blist if k in d]
 				if len(vals) > 0:
 					result[f"{k}_{bk}"] = float(np.mean(vals))
+	# Save h(t) line plot into repo working directory
+	try:
+		if len(h_hist) > 0:
+			h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
+			plt.figure(figsize=(8, 3))
+			plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
+			plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
+			plt.xlabel("t (s)")
+			plt.ylabel("h")
+			plt.title("CBF h over rollout")
+			plt.tight_layout()
+			plt.savefig(h_plot_path, dpi=150)
+			plt.close()
+			result["h_plot_path"] = h_plot_path
+			print(f"[H] saved plot: {h_plot_path}")
+	except Exception as e:
+		print(f"[H] WARN: failed to save h plot: {e}")
 	print("[ROLL] move_obstacles=", move_obstacles,
 			" seed=", seed,
 			" collided=", collided,
