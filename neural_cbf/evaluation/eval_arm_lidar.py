@@ -2289,6 +2289,7 @@ def run_moving_obstacle_rollout(
 				collided = True
 				collide_step = k
 				print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
+				print(f"[H] collision_instant t={k*dm.dt:.3f}s  h={h_now:.6f}")
 				# Save h(t) immediately on collision (for both baseline/JVP).
 				try:
 					_hp = _save_h_plot_once()
