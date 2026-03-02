@@ -2114,10 +2114,11 @@ def run_moving_obstacle_rollout(
 		try:
 			nj = int(p_.getNumJoints(int(robot.robotId)))
 		except Exception:
-			return float("nan")
+			return float("nan"), None
 		if nj <= 1:
-			return float("nan")
+			return float("nan"), None
 		md = float("inf")
+		best_pair = None
 		for ia in range(nj):
 			for ib in range(ia + 1, nj):
 				# Adjacent links are kinematically connected; skip noisy near-zero pairs.
@@ -2138,9 +2139,10 @@ def run_moving_obstacle_rollout(
 						d = float(pt[8])
 						if d < md:
 							md = d
+							best_pair = (int(ia), int(ib))
 					except Exception:
 						continue
-		return md if np.isfinite(md) else float("nan")
+		return (md if np.isfinite(md) else float("nan")), best_pair
 
 	def _obs_hit_ratio_and_min_range(x_in: torch.Tensor):
 		try:
@@ -2505,7 +2507,7 @@ def run_moving_obstacle_rollout(
 					if ("plane" in nm) or ("floor" in nm) or ("ground" in nm):
 						plane_ids.append(bid_u)
 				table_ids = list(scene_table_ids)
-				self_md = _closest_distance_self(threshold=0.1)
+				self_md, self_pair = _closest_distance_self(threshold=0.1)
 				plane_md = _closest_distance_to_body_ids(plane_ids, threshold=0.1)
 				table_md = _closest_distance_to_body_ids(table_ids, threshold=0.1)
 				arm_md = float("nan")
@@ -2517,6 +2519,7 @@ def run_moving_obstacle_rollout(
 					f"[TRIAD] min_d@0.1m plane={plane_md:.4f} table={table_md:.4f} "
 					f"self={self_md:.4f} obst_arm={arm_md:.4f}"
 				)
+				print(f"[TRIAD] self={self_md:.4f} pair={self_pair}")
 				print(
 					f"[TRIAD] obs hit_ratio={hit_ratio:.4f} min_range={min_range:.4f}  "
 					f"mask safe={safe_now} unsafe={unsafe_now}"
