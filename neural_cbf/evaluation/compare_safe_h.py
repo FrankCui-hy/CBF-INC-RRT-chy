@@ -143,7 +143,7 @@ def main():
     ap.add_argument("--n_observation", type=int, default=5)
     ap.add_argument("--point_dim", type=int, default=4)
     ap.add_argument("--n_observation_dataset", type=int, default=5)
-    ap.add_argument("--observation_type", default="lidar")
+    ap.add_argument("--observation_type", default="uniform_lidar")
 
     args = ap.parse_args()
 
