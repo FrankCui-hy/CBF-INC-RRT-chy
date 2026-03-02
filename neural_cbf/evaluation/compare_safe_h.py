@@ -165,6 +165,33 @@ def load_controller(ckpt_path, dm, suite, args):
     return ctrl
 
 
+def build_eval_batch(ctrl, dm, n: int):
+    """Get a batch with masks either from datamodule or by on-the-fly sampling."""
+    # Preferred path: use datamodule training_data if present.
+    if getattr(ctrl, "datamodule", None) is not None:
+        ctrl.datamodule.prepare_data()
+        td = ctrl.datamodule.training_data
+        N_total = len(td)
+        n_use = min(int(n), int(N_total))
+        idx = torch.randperm(N_total)[:n_use]
+        data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask, JP, JR = td[idx]
+        return data_x, goal_mask.bool(), safe_mask.bool(), unsafe_mask.bool(), boundary_mask.bool()
+
+    # Fallback path: sample q uniformly and label with system masks.
+    ul, ll = dm.state_limits
+    ul = ul.detach().clone().float().reshape(1, -1)
+    ll = ll.detach().clone().float().reshape(1, -1)
+    hi = torch.maximum(ul, ll)
+    lo = torch.minimum(ul, ll)
+    q = lo + torch.rand(int(n), dm.n_dims) * (hi - lo)
+    data_x = dm.complete_sample_with_observations(q, num_samples=int(n))
+    safe_mask = dm.safe_mask(q).bool()
+    unsafe_mask = dm.unsafe_mask(q).bool()
+    goal_mask = torch.zeros_like(safe_mask)
+    boundary_mask = torch.logical_not(torch.logical_or(safe_mask, unsafe_mask))
+    return data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask
+
+
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
@@ -191,22 +218,13 @@ def main():
     ctrl_a = load_controller(args.ckpt_a, dm, suite, args)
     ctrl_b = load_controller(args.ckpt_b, dm, suite, args)
 
-    # 关键：用同一个 datamodule 的数据（来自 ctrl_a 或 ctrl_b 都行，但必须“同一个”）
-    ctrl_a.datamodule.prepare_data()
-    td = ctrl_a.datamodule.training_data
-
     eps = float(ctrl_a.safe_level)  # 你说 safe 要 <= -0.1，这里就会是 0.1
     thr = -eps
 
-    # 采样一批 indices（从 training_data 里抽）
-    N_total = len(td)
-    n = min(args.n, N_total)
-    idx = torch.randperm(N_total)[:n]
-
-    # 拉一批数据
-    data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask, JP, JR = td[idx]
+    # Build one shared batch for both controllers.
+    data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask = build_eval_batch(ctrl_a, dm, int(args.n))
     # 你之前代码里有 data_x = data_x[:, :-1]，保持一致
-    if data_x.ndim == 2 and data_x.shape[1] > 1:
+    if data_x.ndim == 2 and data_x.shape[1] == int(getattr(ctrl_a, "n_dims_extended", data_x.shape[1])) + 1:
         data_x_in = data_x[:, :-1]
     else:
         data_x_in = data_x
