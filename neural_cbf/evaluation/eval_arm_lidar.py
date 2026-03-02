@@ -873,7 +873,10 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
 
     grabbed = bool(grasp_state.get("grabbed", False))
 
-    ee_block_dist = float(np.linalg.norm(ee_pos - bpos))
+    # Distance is measured between the *grasp point* (EE_pos + ee_z_offset) and the block center.
+    # This keeps the grasp trigger consistent with the kinematic attachment position.
+    ee_grasp_pos = ee_pos + np.array([0.0, 0.0, float(ee_z_offset)], dtype=np.float32)
+    ee_block_dist = float(np.linalg.norm(ee_grasp_pos - bpos))
     grasp_state["ee_block_dist"] = ee_block_dist
 
     # Trigger grasp once within threshold
