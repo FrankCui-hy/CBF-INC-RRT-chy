@@ -1939,6 +1939,7 @@ def run_moving_obstacle_rollout(
 	min_dist_hist = []
 	h_hist = []
 	h_t_hist = []
+	h_plot_saved = False
 	collided = False
 	collide_step = None
 	qp_infeasible_count = 0
@@ -1951,6 +1952,24 @@ def run_moving_obstacle_rollout(
 		"hit_low": [],
 		"hit_high": [],
 	}
+
+	def _save_h_plot_once():
+		nonlocal h_plot_saved
+		if h_plot_saved or len(h_hist) == 0:
+			return None
+		h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
+		plt.figure(figsize=(8, 3))
+		plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
+		plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
+		plt.xlabel("t (s)")
+		plt.ylabel("h")
+		plt.title("CBF h over rollout")
+		plt.tight_layout()
+		plt.savefig(h_plot_path, dpi=150)
+		plt.close()
+		h_plot_saved = True
+		print(f"[H] saved plot: {h_plot_path}")
+		return h_plot_path
 
 	for k in range(steps):
 		# Base time used for obstacle motion
@@ -2270,6 +2289,13 @@ def run_moving_obstacle_rollout(
 				collided = True
 				collide_step = k
 				print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
+				# Save h(t) immediately on collision (for both baseline/JVP).
+				try:
+					_hp = _save_h_plot_once()
+					if _hp is not None:
+						print(f"[H] collision plot saved: {_hp}")
+				except Exception as e:
+					print(f"[H] WARN: failed to save collision h plot: {e}")
 				if pause_on_collision:
 					# Keep the GUI open and pause here. Press Ctrl+C in the terminal to exit.
 					try:
@@ -2333,21 +2359,11 @@ def run_moving_obstacle_rollout(
 				vals = [d[k] for d in blist if k in d]
 				if len(vals) > 0:
 					result[f"{k}_{bk}"] = float(np.mean(vals))
-	# Save h(t) line plot into repo working directory
+	# Save h(t) line plot into repo working directory (if not already saved)
 	try:
-		if len(h_hist) > 0:
-			h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
-			plt.figure(figsize=(8, 3))
-			plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
-			plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
-			plt.xlabel("t (s)")
-			plt.ylabel("h")
-			plt.title("CBF h over rollout")
-			plt.tight_layout()
-			plt.savefig(h_plot_path, dpi=150)
-			plt.close()
+		h_plot_path = _save_h_plot_once()
+		if h_plot_path is not None:
 			result["h_plot_path"] = h_plot_path
-			print(f"[H] saved plot: {h_plot_path}")
 	except Exception as e:
 		print(f"[H] WARN: failed to save h plot: {e}")
 	print("[ROLL] move_obstacles=", move_obstacles,
