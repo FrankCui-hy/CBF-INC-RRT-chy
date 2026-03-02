@@ -2110,42 +2110,8 @@ def run_moving_obstacle_rollout(
 		return md if np.isfinite(md) else float("nan")
 
 	def _closest_distance_self(threshold=0.1):
-		"""Approx self-distance via link-pair closest points, skipping adjacent links."""
-		IGNORE_SELF_PAIRS = {(6, 8), (8, 6), (8, 10), (10, 8)}
-		try:
-			nj = int(p_.getNumJoints(int(robot.robotId)))
-		except Exception:
-			return float("nan"), None
-		if nj <= 1:
-			return float("nan"), None
-		md = float("inf")
-		best_pair = None
-		for ia in range(nj):
-			for ib in range(ia + 1, nj):
-				if (int(ia), int(ib)) in IGNORE_SELF_PAIRS:
-					continue
-				# Adjacent links are kinematically connected; skip noisy near-zero pairs.
-				if abs(ia - ib) <= 1:
-					continue
-				try:
-					pts = p_.getClosestPoints(
-						bodyA=int(robot.robotId),
-						bodyB=int(robot.robotId),
-						distance=float(threshold),
-						linkIndexA=int(ia),
-						linkIndexB=int(ib),
-					)
-				except Exception:
-					pts = []
-				for pt in pts:
-					try:
-						d = float(pt[8])
-						if d < md:
-							md = d
-							best_pair = (int(ia), int(ib))
-					except Exception:
-						continue
-		return (md if np.isfinite(md) else float("nan")), best_pair
+		"""Self-collision is intentionally ignored in TRIAD diagnostics."""
+		return float("nan"), None
 
 	def _obs_hit_ratio_and_min_range(x_in: torch.Tensor):
 		try:
