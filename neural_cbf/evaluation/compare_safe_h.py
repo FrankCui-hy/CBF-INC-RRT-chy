@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -8,6 +10,7 @@ from neural_cbf.controllers import NeuralLidarCBFController
 from environment import ArmEnv
 from neural_cbf.systems import ArmLidar
 from neural_cbf.experiments import ExperimentSuite, BFContourExperiment, LidarRolloutExperiment
+from neural_cbf.evaluation.eval_arm_lidar import draw_environment
 
 
 @contextlib.contextmanager
@@ -175,7 +178,7 @@ def build_eval_batch(ctrl, dm, n: int):
         n_use = min(int(n), int(N_total))
         idx = torch.randperm(N_total)[:n_use]
         data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask, JP, JR = td[idx]
-        return data_x, goal_mask.bool(), safe_mask.bool(), unsafe_mask.bool(), boundary_mask.bool()
+        return data_x, goal_mask.bool(), safe_mask.bool(), unsafe_mask.bool(), boundary_mask.bool(), idx
 
     # Fallback path: sample q uniformly and label with system masks.
     ul, ll = dm.state_limits
@@ -189,7 +192,43 @@ def build_eval_batch(ctrl, dm, n: int):
     unsafe_mask = dm.unsafe_mask(q).bool()
     goal_mask = torch.zeros_like(safe_mask)
     boundary_mask = torch.logical_not(torch.logical_or(safe_mask, unsafe_mask))
-    return data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask
+    idx = torch.arange(int(n), dtype=torch.long)
+    return data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask, idx
+
+
+def summarize_violation_observation(name: str, dm, data_x_in: torch.Tensor, vio_idx: torch.Tensor):
+    if vio_idx.numel() == 0:
+        print(f"[{name}] no safe-violation samples.")
+        return
+
+    o = data_x_in[vio_idx, dm.n_dims : dm.n_dims + dm.o_dims].reshape(vio_idx.numel(), -1, dm.point_dims)
+    if dm.point_dims == 4:
+        ranges = o[..., 0]
+        hit_ch = o[..., -1]
+        hit_ratio = float((hit_ch > 0.5).float().mean().item())
+    else:
+        ranges = torch.linalg.norm(o[..., :3], dim=-1)
+        hit_ratio = float((ranges < 0.95 * float(dm.dis_threshold)).float().mean().item())
+
+    min_r = ranges.min(dim=1).values
+    near_ratio = float((ranges < 0.2).float().mean().item())
+    p = torch.quantile(min_r, torch.tensor([0.05, 0.5, 0.95], device=min_r.device))
+    print(
+        f"[{name}] obs_pattern: hit_ratio={hit_ratio:.4f}, near_ratio(r<0.2)={near_ratio:.4f}, "
+        f"min_r(p05/p50/p95)=({float(p[0]):.4f}, {float(p[1]):.4f}, {float(p[2]):.4f})"
+    )
+
+
+def render_violations(ctrl, data_x_in: torch.Tensor, vio_idx: torch.Tensor, save_dir: str, topk: int):
+    if vio_idx.numel() == 0 or topk <= 0:
+        return
+    os.makedirs(save_dir, exist_ok=True)
+    take = vio_idx[: min(int(topk), vio_idx.numel())]
+    for i in take.tolist():
+        try:
+            draw_environment(ctrl, data_x_in[i].detach().cpu(), int(i), save_dir)
+        except Exception as e:
+            print(f"[WARN] draw_environment failed at idx={i}: {e}")
 
 
 @torch.no_grad()
@@ -199,6 +238,8 @@ def main():
     ap.add_argument("--ckpt_b", required=True, help="jvp ckpt path (or vice versa)")
     ap.add_argument("--n", type=int, default=4096)
     ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--vis_topk", type=int, default=20)
+    ap.add_argument("--save_dir", type=str, default="compare_safe_h_outputs")
 
     # 必要 args（保持和你训练/评估一致）
     ap.add_argument("--robot_name", default="panda")
@@ -222,7 +263,7 @@ def main():
     thr = -eps
 
     # Build one shared batch for both controllers.
-    data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask = build_eval_batch(ctrl_a, dm, int(args.n))
+    data_x, goal_mask, safe_mask, unsafe_mask, boundary_mask, sample_idx = build_eval_batch(ctrl_a, dm, int(args.n))
     # 你之前代码里有 data_x = data_x[:, :-1]，保持一致
     if data_x.ndim == 2 and data_x.shape[1] == int(getattr(ctrl_a, "n_dims_extended", data_x.shape[1])) + 1:
         data_x_in = data_x[:, :-1]
@@ -256,6 +297,39 @@ def main():
 
     summarize("A", ha_s)
     summarize("B", hb_s)
+
+    safe_violate_a = torch.logical_and(safe_mask, h_a > thr)
+    safe_violate_b = torch.logical_and(safe_mask, h_b > thr)
+    vio_local_a = torch.where(safe_violate_a)[0]
+    vio_local_b = torch.where(safe_violate_b)[0]
+    vio_global_a = sample_idx[vio_local_a]
+    vio_global_b = sample_idx[vio_local_b]
+
+    print(f"\n[SAFE-VIOLATION] baseline(A) count={vio_local_a.numel()} / safe={n_safe}")
+    print(f"[SAFE-VIOLATION] jvp(B)      count={vio_local_b.numel()} / safe={n_safe}")
+    summarize_violation_observation("A", dm, data_x_in, vio_local_a)
+    summarize_violation_observation("B", dm, data_x_in, vio_local_b)
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    out_json = os.path.join(args.save_dir, "safe_violation_indices.json")
+    payload = {
+        "thr": float(thr),
+        "n_total": int(data_x_in.shape[0]),
+        "n_safe": int(n_safe),
+        "baseline_count": int(vio_local_a.numel()),
+        "jvp_count": int(vio_local_b.numel()),
+        "baseline_local_idx": [int(i) for i in vio_local_a.tolist()],
+        "jvp_local_idx": [int(i) for i in vio_local_b.tolist()],
+        "baseline_global_idx": [int(i) for i in vio_global_a.tolist()],
+        "jvp_global_idx": [int(i) for i in vio_global_b.tolist()],
+    }
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"[SAVE] safe-violation indices -> {out_json}")
+
+    render_violations(ctrl_a, data_x_in, vio_local_a, os.path.join(args.save_dir, "vis_baseline"), int(args.vis_topk))
+    render_violations(ctrl_b, data_x_in, vio_local_b, os.path.join(args.save_dir, "vis_jvp"), int(args.vis_topk))
+    print(f"[SAVE] violation visualizations -> {os.path.abspath(args.save_dir)}")
 
     # 可选：再看一下 unsafe 子集（验证方向正确）
     n_unsafe = int(unsafe_mask.sum().item())
