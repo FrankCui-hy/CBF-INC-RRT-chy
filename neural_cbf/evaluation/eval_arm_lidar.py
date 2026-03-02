@@ -708,18 +708,20 @@ def _spawn_marker(pos, rgba=(1, 0, 0, 0.8), radius=0.03) -> int:
 		return -1
 
 
-def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025), rgba=(0.72, 0.62, 0.48, 0.95)):
-	"""Spawn a real table (top + 4 legs), all with collision + visual.
+def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025), rgba=(0.72, 0.62, 0.48, 0.95), collision: bool = True):
+	"""Spawn a real table (top + 4 legs), all with collision + visual unless collision=False.
 
 	Returns a list of body ids [top, leg1, leg2, leg3, leg4].
 	"""
 	try:
 		p_ = env.p
 		ids = []
-		top_cshape = p_.createCollisionShape(
-			p_.GEOM_BOX,
-			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
-		)
+		top_cshape = -1
+		if bool(collision):
+			top_cshape = p_.createCollisionShape(
+				p_.GEOM_BOX,
+				halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
+			)
 		top_vshape = p_.createVisualShape(
 			p_.GEOM_BOX,
 			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
@@ -737,10 +739,12 @@ def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025
 		# Legs
 		leg_h = 0.28
 		leg_half = (0.035, 0.035, leg_h / 2.0)
-		leg_cshape = p_.createCollisionShape(
-			p_.GEOM_BOX,
-			halfExtents=[float(leg_half[0]), float(leg_half[1]), float(leg_half[2])],
-		)
+		leg_cshape = -1
+		if bool(collision):
+			leg_cshape = p_.createCollisionShape(
+				p_.GEOM_BOX,
+				halfExtents=[float(leg_half[0]), float(leg_half[1]), float(leg_half[2])],
+			)
 		leg_vshape = p_.createVisualShape(
 			p_.GEOM_BOX,
 			halfExtents=[float(leg_half[0]), float(leg_half[1]), float(leg_half[2])],
@@ -889,9 +893,11 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
         except Exception:
             pass
 
-def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0):
+def _spawn_block(env: ArmEnv, pos_xyz, half=0.02, rgba=(0.2, 0.2, 0.9, 1.0), mass=0.0, collision: bool = True):
     p_ = env.p
-    cshape = p_.createCollisionShape(p_.GEOM_BOX, halfExtents=[half, half, half])
+    cshape = -1
+    if bool(collision):
+        cshape = p_.createCollisionShape(p_.GEOM_BOX, halfExtents=[half, half, half])
     vshape = p_.createVisualShape(p_.GEOM_BOX, halfExtents=[half, half, half], rgbaColor=list(rgba))
     bid = p_.createMultiBody(
         baseMass=float(mass),
@@ -1454,6 +1460,20 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			pass
 		print(f"[ROLL] obstacle_mode=none -> removed {len(removed)} obstacles: {removed}")
+		# Also try to remove/disable the ground plane so LiDAR/raycast observations are empty.
+		try:
+			# body 0 is commonly the ground plane in PyBullet.
+			cs = p_.getCollisionShapeData(0, -1) or []
+			is_plane = False
+			for c in cs:
+				if c[2] == p_.GEOM_PLANE:
+					is_plane = True
+					break
+			if is_plane:
+				p_.removeBody(0)
+				print("[ROLL] obstacle_mode=none -> removed ground plane (body 0)")
+		except Exception:
+			pass
 
 	elif mode in ("arm", "arm_task"):
 		# Keep ArmEnv's built-in obstacle robot (if present) so explicit/JVP observation pipeline stays consistent
@@ -1537,7 +1557,7 @@ def run_moving_obstacle_rollout(
 			# keep width (x) same, shorten length (y)
 			_table_half = (0.46, 0.24, 0.025)
 			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
-			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half)
+			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half, collision=bool(mode != "none"))
 			if len(_table_ids) > 0:
 				scene_visual_ids.extend([int(i) for i in _table_ids])
 				print(
@@ -1588,13 +1608,20 @@ def run_moving_obstacle_rollout(
 		# main arm picks blue (positive y) so paths intersect near center.
 		left_block = (float(block_x) + 0.02, -0.08, float(table_top_z) + float(block_z))
 		right_block = (float(block_x) + 0.06, +0.04, float(table_top_z) + float(block_z))
-		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0))
-		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0))
+		lb_id = _spawn_block(env, left_block, rgba=(0.2, 0.6, 0.2, 1.0), collision=bool(mode != "none"))
+		rb_id = _spawn_block(env, right_block, rgba=(0.2, 0.2, 0.9, 1.0), collision=bool(mode != "none"))
 		scene_block_ids = [int(lb_id), int(rb_id)]
 		print(f"[SCENE] blocks: left(id={lb_id})={left_block}, right(id={rb_id})={right_block}")
 		# Track blocks explicitly for visual grasp
 		left_block_id = int(lb_id)
 		right_block_id = int(rb_id)
+		# Defensive collision disable in none mode
+		if bool(mode == "none"):
+			try:
+				p_.setCollisionFilterGroupMask(int(left_block_id), -1, 0, 0)
+				p_.setCollisionFilterGroupMask(int(right_block_id), -1, 0, 0)
+			except Exception:
+				pass
 		obst_target_block_xyz = np.array(left_block, dtype=np.float32)
 		obst_grasp_state = {"grabbed": False}
 		main_grasp_state = {"grabbed": False, "ee_block_dist": float("inf")}
