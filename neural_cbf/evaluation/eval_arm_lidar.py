@@ -1440,6 +1440,8 @@ def run_moving_obstacle_rollout(
 		# Some env implementations may not support reset; ignore
 		pass
 
+	obs_template = None  # per-ray direction/angle template extracted from a real observation
+
 	def _refresh_x_from_sim() -> torch.Tensor:
 		"""Refresh datax from current simulator joint state."""
 		try:
@@ -1479,17 +1481,39 @@ def run_moving_obstacle_rollout(
 				return x_out
 
 			obs = torch.zeros((n_sensor, ray_per, point_dims), dtype=x_out.dtype, device=x_out.device)
+			# If we have a real observation template, preserve per-ray direction/angles to stay in-distribution.
+			try:
+				tmpl = obs_template
+			except Exception:
+				tmpl = None
 
 			if point_dims == 4:
 				# spherical: [range, theta, phi, hit] (or similar)
 				obs[:, :, 0] = float(r_far)
+				if tmpl is not None:
+					# keep theta/phi from template
+					obs[:, :, 1] = tmpl[:, :, 1]
+					obs[:, :, 2] = tmpl[:, :, 2]
+				# mark as miss / no-hit
+				obs[:, :, 3] = 0.0
 			else:
-				# cartesian local endpoints
-				obs[:, :, 0] = float(r_far)
-				if point_dims > 1:
-					obs[:, :, 1] = 0.0
-				if point_dims > 2:
-					obs[:, :, 2] = 0.0
+				# cartesian local endpoints: place points at far range along each ray direction.
+				if tmpl is not None:
+					dir_xyz = tmpl[:, :, :3]
+					# normalize to unit directions
+					n = torch.norm(dir_xyz, dim=2, keepdim=True).clamp_min(1e-6)
+					unit = dir_xyz / n
+					obs[:, :, :3] = unit * float(r_far)
+				else:
+					# fallback: +x direction
+					obs[:, :, 0] = float(r_far)
+					if point_dims > 1:
+						obs[:, :, 1] = 0.0
+					if point_dims > 2:
+						obs[:, :, 2] = 0.0
+				# If there is a hit flag channel, set to 0.
+				if point_dims >= 4:
+					obs[:, :, 3] = 0.0
 
 			obs_flat = obs.reshape(1, -1)
 			x_out[:, n_dims:n_dims + o_dims] = obs_flat[:, :o_dims]
@@ -1703,6 +1727,22 @@ def run_moving_obstacle_rollout(
 		# Only take q from the saved start state; recompute obs/aux for the current env
 		q0 = start_x[0, :dm.n_dims].detach().clone()
 		x = dm.complete_sample_with_observations(q0.reshape(1, -1), num_samples=1)
+
+	# Cache a per-ray observation template (angles/directions) from the current scene.
+	# This lets obstacle_mode=none create in-distribution "all-far" observations.
+	try:
+		n_dims0 = int(getattr(dm, "n_dims", 0))
+		o_dims0 = int(getattr(dm, "o_dims", 0))
+		pd0 = int(getattr(dm, "point_dims", 4))
+		rps0 = int(getattr(dm, "ray_per_sensor", 1))
+		ns0 = len(getattr(dm, "list_sensor", []))
+		if o_dims0 > 0 and ns0 > 0:
+			obs0 = x[:, n_dims0:n_dims0 + o_dims0]
+			obs0 = obs0.reshape(1, ns0, rps0, pd0)[0].detach().clone()
+			obs_template = obs0
+			print(f"[OBS][tmpl] cached template shape={tuple(obs_template.shape)} point_dims={pd0}")
+	except Exception:
+		pass
 
 	# If we are using a moving obstacle arm, spawn it BEFORE clean-start checks so
 	# collision/clearance is measured against the actual obstacle arm.
