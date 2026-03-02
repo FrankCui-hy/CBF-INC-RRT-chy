@@ -771,6 +771,60 @@ def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025
 		return []
 
 
+def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04), rgba=(0.16, 0.18, 0.20, 0.95)):
+	"""Spawn a visualization-only cart with wheels. Returns body ids list."""
+	try:
+		p_ = env.p
+		ids = []
+		vshape = p_.createVisualShape(
+			p_.GEOM_BOX,
+			halfExtents=[float(half_extents[0]), float(half_extents[1]), float(half_extents[2])],
+			rgbaColor=list(rgba),
+		)
+		cid = p_.createMultiBody(
+			baseMass=0.0,
+			baseCollisionShapeIndex=-1,
+			baseVisualShapeIndex=vshape,
+			basePosition=[float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])],
+			baseOrientation=[0, 0, 0, 1],
+		)
+		ids.append(int(cid))
+
+		# Wheels (visual-only cylinders)
+		wx, wy, wz = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
+		hx, hy, hz = float(half_extents[0]), float(half_extents[1]), float(half_extents[2])
+		wr = min(hx, hy) * 0.22
+		ww = 0.018
+		wv = p_.createVisualShape(
+			p_.GEOM_CYLINDER,
+			radius=float(wr),
+			length=float(ww),
+			rgbaColor=[0.05, 0.05, 0.05, 0.98],
+		)
+		worn = p_.getQuaternionFromEuler([0.0, 1.5707963, 0.0])
+		wz0 = wz - hz - wr * 0.4
+		inset_x = hx * 0.78
+		inset_y = hy * 0.82
+		wheel_xy = [
+			(wx - inset_x, wy - inset_y),
+			(wx - inset_x, wy + inset_y),
+			(wx + inset_x, wy - inset_y),
+			(wx + inset_x, wy + inset_y),
+		]
+		for lx, ly in wheel_xy:
+			wid = p_.createMultiBody(
+				baseMass=0.0,
+				baseCollisionShapeIndex=-1,
+				baseVisualShapeIndex=wv,
+				basePosition=[float(lx), float(ly), float(wz0)],
+				baseOrientation=worn,
+			)
+			ids.append(int(wid))
+		return ids
+	except Exception:
+		return []
+
+
 def _tint_robot_visual(p_client, body_id: int, rgba=(1.0, 0.55, 0.10, 1.0)):
 	"""Tint robot links for easier visual identification."""
 	try:
@@ -1477,9 +1531,9 @@ def run_moving_obstacle_rollout(
 		if (table_top_z is None) or (float(table_top_z) < 0.10):
 			# No valid table found in scene: build a standalone tabletop at a visible height.
 			table_top_z = 0.32
-		# Spawn a larger real tabletop; place everything on/above it.
+		# Spawn a smaller real tabletop for obstacle arm + blocks.
 		try:
-			_table_half = (0.75, 0.58, 0.025)
+			_table_half = (0.46, 0.34, 0.025)
 			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
 			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half)
 			if len(_table_ids) > 0:
@@ -1490,17 +1544,26 @@ def run_moving_obstacle_rollout(
 				)
 		except Exception:
 			pass
-		# Move main robot base onto tabletop and make it visually distinctive.
+		# Put main arm on a static visual cart on the ground (purely visual).
 		try:
+			_cart_half = (0.12, 0.09, 0.04)
+			_main_base_z = float(_cart_half[2]) * 2.0  # base sits on cart top
 			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
+			cart_ids = _spawn_visual_cart(
+				env,
+				[float(bpos[0]), float(main_base_y), float(_cart_half[2])],
+				half_extents=_cart_half,
+			)
+			if len(cart_ids) > 0:
+				scene_visual_ids.extend([int(i) for i in cart_ids])
 			p_.resetBasePositionAndOrientation(
 				robot.robotId,
-				[float(bpos[0]), float(main_base_y), float(table_top_z)],
+				[float(bpos[0]), float(main_base_y), float(_main_base_z)],
 				born,
 			)
-			print(f"[SCENE] main_base_y={float(main_base_y):.3f}")
+			print(f"[SCENE] main_on_cart y={float(main_base_y):.3f} base_z={float(_main_base_z):.3f}")
 		except Exception as e:
-			print(f"[SCENE] WARN: cannot reset main base y/z: {e}")
+			print(f"[SCENE] WARN: cannot place main arm on cart: {e}")
 		try:
 			_tint_robot_visual(p_, int(robot.robotId), rgba=(1.0, 0.55, 0.10, 1.0))
 			bpos2, _ = p_.getBasePositionAndOrientation(robot.robotId)
