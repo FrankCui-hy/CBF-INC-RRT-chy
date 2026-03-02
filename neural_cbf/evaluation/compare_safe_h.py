@@ -94,6 +94,45 @@ def build_dynamics_and_suite(args):
     return dm, suite
 
 
+def merge_args_from_ckpt(args):
+    """Overwrite runtime args with ckpt hyper-parameters when available."""
+    try:
+        with _torch_load_weights_only_false():
+            ck = torch.load(args.ckpt_a, map_location="cpu")
+        hp = ck.get("hyper_parameters", {}) if isinstance(ck, dict) else {}
+    except Exception:
+        hp = {}
+
+    keys = [
+        "robot_name",
+        "dataset_name",
+        "dis_threshold",
+        "simulation_dt",
+        "controller_period",
+        "n_observation",
+        "point_dim",
+        "n_observation_dataset",
+        "observation_type",
+        "include_point_velocity",
+        "safe_classification_weight",
+        "unsafe_classification_weight",
+        "descent_violation_weight",
+        "hdot_divergence_weight",
+        "u_coef_in_training",
+        "cbf_hidden_layers",
+        "cbf_hidden_size",
+        "cbf_alpha",
+        "cbf_relaxation_penalty",
+        "feature_dim",
+        "per_feature_dim",
+        "use_bn",
+    ]
+    for k in keys:
+        if k in hp and hp[k] is not None:
+            setattr(args, k, hp[k])
+    return args
+
+
 def load_controller(ckpt_path, dm, suite, args):
     loss_config = {
         "u_coef_in_training": getattr(args, "u_coef_in_training", 5e-1),
@@ -146,6 +185,7 @@ def main():
     ap.add_argument("--observation_type", default="uniform_lidar")
 
     args = ap.parse_args()
+    args = merge_args_from_ckpt(args)
 
     dm, suite = build_dynamics_and_suite(args)
     ctrl_a = load_controller(args.ckpt_a, dm, suite, args)
