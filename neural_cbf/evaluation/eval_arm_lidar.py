@@ -793,7 +793,7 @@ def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04),
 		# Wheels (visual-only cylinders)
 		wx, wy, wz = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
 		hx, hy, hz = float(half_extents[0]), float(half_extents[1]), float(half_extents[2])
-		wr = min(hx, hy) * 0.22
+		wr = min(hx, hy) * 0.36
 		ww = 0.018
 		wv = p_.createVisualShape(
 			p_.GEOM_CYLINDER,
@@ -802,7 +802,8 @@ def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04),
 			rgbaColor=[0.05, 0.05, 0.05, 0.98],
 		)
 		worn = p_.getQuaternionFromEuler([0.0, 1.5707963, 0.0])
-		wz0 = wz - hz - wr * 0.4
+		# Keep wheels visually near the floor, avoid sinking too much below z=0.
+		wz0 = max(0.02, wz - hz + wr * 0.9)
 		inset_x = hx * 0.78
 		inset_y = hy * 0.82
 		wheel_xy = [
@@ -1544,14 +1545,15 @@ def run_moving_obstacle_rollout(
 				)
 		except Exception:
 			pass
-		# Put main arm on a static visual cart on the ground (purely visual).
+		# Put main arm on a larger static visual cart while keeping original
+		# base relative pose (same height as obstacle arm on tabletop).
 		try:
-			_cart_half = (0.12, 0.09, 0.04)
-			_main_base_z = float(_cart_half[2]) * 2.0  # base sits on cart top
+			_cart_half = (0.18, 0.13, 0.16)
+			_main_base_z = float(table_top_z)  # keep same base height as obstacle arm
 			bpos, born = p_.getBasePositionAndOrientation(robot.robotId)
 			cart_ids = _spawn_visual_cart(
 				env,
-				[float(bpos[0]), float(main_base_y), float(_cart_half[2])],
+				[float(bpos[0]), float(main_base_y), float(_main_base_z) - float(_cart_half[2])],
 				half_extents=_cart_half,
 			)
 			if len(cart_ids) > 0:
