@@ -1595,6 +1595,7 @@ def run_moving_obstacle_rollout(
 	# --- Cross-pick scene: spawn blocks AFTER obstacle cleanup so they won't be removed ---
 	scene_block_ids = []
 	scene_visual_ids = []
+	scene_table_ids = []
 	table_top_z = None
 	left_block_id = None
 	right_block_id = None
@@ -1634,6 +1635,7 @@ def run_moving_obstacle_rollout(
 			_table_center = [float(block_x), 0.0, float(table_top_z) - float(_table_half[2])]
 			_table_ids = _spawn_visual_table(env, _table_center, half_extents=_table_half, collision=bool(mode != "none"))
 			if len(_table_ids) > 0:
+				scene_table_ids = [int(i) for i in _table_ids]
 				scene_visual_ids.extend([int(i) for i in _table_ids])
 				print(
 					f"[SCENE] table ids={_table_ids} top_z={float(table_top_z):.3f} "
@@ -2085,6 +2087,97 @@ def run_moving_obstacle_rollout(
 		"hit_high": [],
 	}
 
+	def _closest_distance_to_body_ids(body_ids, threshold=0.1):
+		"""Closest robot->bodies distance via getClosestPoints (contactDistance index=8)."""
+		if body_ids is None:
+			return float("nan")
+		ids = [int(b) for b in body_ids if int(b) >= 0]
+		if len(ids) == 0:
+			return float("nan")
+		md = float("inf")
+		for bid in ids:
+			try:
+				pts = p_.getClosestPoints(bodyA=int(robot.robotId), bodyB=int(bid), distance=float(threshold))
+			except Exception:
+				pts = []
+			for pt in pts:
+				try:
+					d = float(pt[8])
+					if d < md:
+						md = d
+				except Exception:
+					continue
+		return md if np.isfinite(md) else float("nan")
+
+	def _closest_distance_self(threshold=0.1):
+		"""Approx self-distance via link-pair closest points, skipping adjacent links."""
+		try:
+			nj = int(p_.getNumJoints(int(robot.robotId)))
+		except Exception:
+			return float("nan")
+		if nj <= 1:
+			return float("nan")
+		md = float("inf")
+		for ia in range(nj):
+			for ib in range(ia + 1, nj):
+				# Adjacent links are kinematically connected; skip noisy near-zero pairs.
+				if abs(ia - ib) <= 1:
+					continue
+				try:
+					pts = p_.getClosestPoints(
+						bodyA=int(robot.robotId),
+						bodyB=int(robot.robotId),
+						distance=float(threshold),
+						linkIndexA=int(ia),
+						linkIndexB=int(ib),
+					)
+				except Exception:
+					pts = []
+				for pt in pts:
+					try:
+						d = float(pt[8])
+						if d < md:
+							md = d
+					except Exception:
+						continue
+		return md if np.isfinite(md) else float("nan")
+
+	def _obs_hit_ratio_and_min_range(x_in: torch.Tensor):
+		try:
+			n_dims = int(getattr(dm, "n_dims", 0))
+			o_dims = int(getattr(dm, "o_dims", 0))
+			pd = int(getattr(dm, "point_dims", 4))
+			rps = int(getattr(dm, "ray_per_sensor", 1))
+			ns = len(getattr(dm, "list_sensor", []))
+			if o_dims <= 0 or ns <= 0:
+				return float("nan"), float("nan")
+			obs = x_in[0, n_dims:n_dims + o_dims].reshape(ns, rps, pd)
+			if pd == 4:
+				rng = obs[:, :, 0]
+				hit = obs[:, :, -1]
+				hit_ratio = float((hit > 0.5).float().mean().item())
+			else:
+				rng = torch.linalg.norm(obs[:, :, :3], dim=-1)
+				dis_th = float(getattr(dm, "dis_threshold", 1.0))
+				hit_ratio = float((rng < 0.95 * dis_th).float().mean().item())
+			min_range = float(rng.min().item())
+			return hit_ratio, min_range
+		except Exception:
+			return float("nan"), float("nan")
+
+	def _mask_state_flags(x_in: torch.Tensor):
+		try:
+			q_in = x_in[:, :dm.n_dims]
+			safe_now = bool(dm.safe_mask(q_in).reshape(-1)[0].item())
+		except Exception:
+			safe_now = False
+		try:
+			q_in = x_in[:, :dm.n_dims]
+			unsafe_now = bool(dm.unsafe_mask(q_in).reshape(-1)[0].item())
+		except Exception:
+			unsafe_now = False
+		return safe_now, unsafe_now
+
 	def _save_h_plot_once():
 		nonlocal h_plot_saved
 		if h_plot_saved or len(h_hist) == 0:
@@ -2399,6 +2492,37 @@ def run_moving_obstacle_rollout(
 				md = float("nan")
 			print(f"[ROLL] step={k:5d}/{steps}  t={k*dm.dt:6.3f}s  ||q-goal||={d_goal:.3f}  min_d={md:.4f}")
 			print(f"[H] t={k*dm.dt:6.3f}s  h={h_now:.6f}")
+			# Triad diagnostics: geometry min-dist, observation pattern, and mask labels.
+			try:
+				plane_ids = []
+				for bid in range(int(p_.getNumBodies())):
+					bid_u = int(p_.getBodyUniqueId(bid))
+					bi = p_.getBodyInfo(bid_u)
+					nm = bi[1]
+					if isinstance(nm, (bytes, bytearray)):
+						nm = nm.decode("utf-8", "ignore")
+					nm = str(nm).lower()
+					if ("plane" in nm) or ("floor" in nm) or ("ground" in nm):
+						plane_ids.append(bid_u)
+				table_ids = list(scene_table_ids)
+				self_md = _closest_distance_self(threshold=0.1)
+				plane_md = _closest_distance_to_body_ids(plane_ids, threshold=0.1)
+				table_md = _closest_distance_to_body_ids(table_ids, threshold=0.1)
+				arm_md = float("nan")
+				if obstacle_arm is not None:
+					arm_md = _closest_distance_to_body_ids([int(obstacle_arm["arm_id"])], threshold=0.1)
+				hit_ratio, min_range = _obs_hit_ratio_and_min_range(x)
+				safe_now, unsafe_now = _mask_state_flags(x)
+				print(
+					f"[TRIAD] min_d@0.1m plane={plane_md:.4f} table={table_md:.4f} "
+					f"self={self_md:.4f} obst_arm={arm_md:.4f}"
+				)
+				print(
+					f"[TRIAD] obs hit_ratio={hit_ratio:.4f} min_range={min_range:.4f}  "
+					f"mask safe={safe_now} unsafe={unsafe_now}"
+				)
+			except Exception as e:
+				print(f"[TRIAD] WARN: failed to compute triad diagnostics: {e}")
 			if str(scene).lower() == "cross_pick" and bool(main_return_state.get("returning", False)):
 				print(f"[TASK] return_q_dist={d_goal:.4f}")
 		# Pause when the robot is extremely close to goal (default tol=1e-4)
