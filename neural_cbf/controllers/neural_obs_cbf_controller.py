@@ -415,10 +415,11 @@ class NeuralObsCBFController(pl.LightningModule, CBFController):
 
 	def configure_optimizers(self):
 		cbf_params = list(self.parameters())
+		lr = float(getattr(self.hparams, "lr", 5e-4))
 
 		cbf_opt = torch.optim.Adam(
 			cbf_params,
-			lr=5e-4
+			lr=lr
 		)
 
 		self.opt_idx_dict = {0: "cbf"}

@@ -190,7 +190,10 @@ def main(args):
     # Train
     pl.seed_everything(args.seed)
     torch.autograd.set_detect_anomaly(False)
-    trainer.fit(cbf_controller)
+    fit_kwargs = {}
+    if args.ckpt:
+        fit_kwargs["ckpt_path"] = args.ckpt
+    trainer.fit(cbf_controller, **fit_kwargs)
 
 
 if __name__ == "__main__":
@@ -216,6 +219,9 @@ if __name__ == "__main__":
     parser.add_argument('--max_epochs', type=int, default=121)
     parser.add_argument('--learn_shape_epochs', type=int, default=-1,
                         help='different from max_epochs when training a neural policy')
+    parser.add_argument('--lr', type=float, default=5e-4, help='learning rate for CBF optimizer')
+    parser.add_argument('--ckpt', type=str, default='',
+                        help='Path to a Lightning checkpoint to resume training from.')
 
     # neural network params
     parser.add_argument('--cbf_hidden_layers', type=int, default=2)
