@@ -194,6 +194,10 @@ def main(args):
     # Train
     pl.seed_everything(args.seed)
     torch.autograd.set_detect_anomaly(False)
+    if args.ckpt:
+        # Torch>=2.6 defaults torch.load(weights_only=True), which breaks older
+        # Lightning checkpoint restore paths that expect full object unpickling.
+        os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     fit_kwargs = {}
     if args.ckpt and "ckpt_path" in inspect.signature(pl.Trainer.fit).parameters:
         fit_kwargs["ckpt_path"] = args.ckpt
