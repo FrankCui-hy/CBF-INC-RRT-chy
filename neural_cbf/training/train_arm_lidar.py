@@ -1,5 +1,6 @@
 import os
 import sys
+import inspect
 
 from argparse import ArgumentParser
 from importlib_metadata import requires
@@ -174,24 +175,27 @@ def main(args):
         save_dir=os.path.abspath(__file__).rsplit('/', 3)[0] + f"/models/neural_cbf/{dynamics_model}",
         name=f"{args.version}", #_gpu{args.devices}",
     )
+    trainer_kwargs = {
+        "logger": tb_logger,
+        "reload_dataloaders_every_epoch": True,
+        "max_epochs": args.max_epochs,
+    }
+    if args.ckpt and "resume_from_checkpoint" in inspect.signature(pl.Trainer.__init__).parameters:
+        trainer_kwargs["resume_from_checkpoint"] = args.ckpt
+
     if torch.cuda.is_available():
         trainer = pl.Trainer(
-            logger=tb_logger,
-            reload_dataloaders_every_epoch=True,
-            max_epochs=args.max_epochs,
             gpus=args.devices,  # only supporting single-GPU at present
+            **trainer_kwargs,
         )
     else:
-        trainer = pl.Trainer(
-            logger=tb_logger,
-            reload_dataloaders_every_epoch=True,
-            max_epochs=args.max_epochs,)
+        trainer = pl.Trainer(**trainer_kwargs)
 
     # Train
     pl.seed_everything(args.seed)
     torch.autograd.set_detect_anomaly(False)
     fit_kwargs = {}
-    if args.ckpt:
+    if args.ckpt and "ckpt_path" in inspect.signature(pl.Trainer.fit).parameters:
         fit_kwargs["ckpt_path"] = args.ckpt
     trainer.fit(cbf_controller, **fit_kwargs)
 
