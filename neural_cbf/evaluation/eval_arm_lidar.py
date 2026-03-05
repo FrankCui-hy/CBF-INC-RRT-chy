@@ -2,6 +2,8 @@ import os
 import time
 import argparse
 import yaml
+import atexit
+import signal
 
 import numpy as np
 import torch
@@ -2151,11 +2153,14 @@ def run_moving_obstacle_rollout(
 
 	def _save_h_plot_once():
 		nonlocal h_plot_saved
-		if h_plot_saved or len(h_hist) == 0:
+		if h_plot_saved:
 			return None
 		h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
 		plt.figure(figsize=(8, 3))
-		plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
+		if len(h_hist) > 0:
+			plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
+		else:
+			plt.text(0.5, 0.5, "No h samples captured", ha="center", va="center", transform=plt.gca().transAxes)
 		plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
 		plt.xlabel("t (s)")
 		plt.ylabel("h")
@@ -2166,6 +2171,26 @@ def run_moving_obstacle_rollout(
 		h_plot_saved = True
 		print(f"[H] saved plot: {h_plot_path}")
 		return h_plot_path
+
+	def _save_h_plot_best_effort(reason: str = ""):
+		try:
+			p = _save_h_plot_once()
+			if p is not None:
+				msg = f"[H] auto-saved plot ({reason}): {p}" if reason else f"[H] auto-saved plot: {p}"
+				print(msg)
+		except Exception as e:
+			print(f"[H] WARN: auto-save failed ({reason}): {e}")
+
+	_prev_sigint = signal.getsignal(signal.SIGINT)
+	_prev_sigterm = signal.getsignal(signal.SIGTERM)
+
+	def _term_handler(signum, frame):
+		_save_h_plot_best_effort(reason=f"signal {int(signum)}")
+		raise KeyboardInterrupt
+
+	atexit.register(_save_h_plot_best_effort, "atexit")
+	signal.signal(signal.SIGINT, _term_handler)
+	signal.signal(signal.SIGTERM, _term_handler)
 
 	for k in range(steps):
 		# Base time used for obstacle motion
@@ -2639,6 +2664,15 @@ def run_moving_obstacle_rollout(
 			p.disconnect()
 		except Exception:
 			pass
+	try:
+		signal.signal(signal.SIGINT, _prev_sigint)
+		signal.signal(signal.SIGTERM, _prev_sigterm)
+	except Exception:
+		pass
+	try:
+		atexit.unregister(_save_h_plot_best_effort)
+	except Exception:
+		pass
 	return result
 
 
