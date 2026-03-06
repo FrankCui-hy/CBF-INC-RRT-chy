@@ -777,7 +777,7 @@ def _spawn_visual_table(env: ArmEnv, center_xyz, half_extents=(0.75, 0.58, 0.025
 		return []
 
 
-def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04), rgba=(0.16, 0.18, 0.20, 0.95)):
+def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04), rgba=(1.0, 1.0, 1.0, 0.95)):
 	"""Spawn a visualization-only cart with wheels. Returns body ids list."""
 	try:
 		p_ = env.p
@@ -799,8 +799,9 @@ def _spawn_visual_cart(env: ArmEnv, center_xyz, half_extents=(0.12, 0.09, 0.04),
 		# Wheels (visual-only cylinders)
 		wx, wy, wz = float(center_xyz[0]), float(center_xyz[1]), float(center_xyz[2])
 		hx, hy, hz = float(half_extents[0]), float(half_extents[1]), float(half_extents[2])
-		wr = min(hx, hy) * 0.36
-		ww = 0.018
+		wheel_scale = 2.0
+		wr = min(hx, hy) * 0.36 * wheel_scale
+		ww = 0.018 * wheel_scale
 		wv = p_.createVisualShape(
 			p_.GEOM_CYLINDER,
 			radius=float(wr),
