@@ -1472,6 +1472,10 @@ def run_moving_obstacle_rollout(
 		obstacle_speed_scale = float(speed_scale)
 	if obstacle_arm_speed_scale is None:
 		obstacle_arm_speed_scale = 1.0
+	try:
+		print(f"[SPEED] speed_scale(main)={float(speed_scale):.3f} obstacle_speed_scale={float(obstacle_speed_scale):.3f} obstacle_arm_speed_scale={float(obstacle_arm_speed_scale):.3f}")
+	except Exception:
+		pass
 
 	# Use the same start state used by the rollout experiment if available
 	start_x = None
@@ -3235,6 +3239,18 @@ if __name__ == "__main__":
     # Rollout options (only used when --mode rollout)
     parser.add_argument("--t_sim", type=float, default=6.0)
     parser.add_argument("--speed_scale", type=float, default=1.8)
+    parser.add_argument(
+        "--obstacle_speed_scale",
+        type=float,
+        default=None,
+        help="Obstacle motion speed scale. Default: match --speed_scale.",
+    )
+    parser.add_argument(
+        "--obstacle_arm_speed_scale",
+        type=float,
+        default=None,
+        help="Extra obstacle ARM speed scale (multiplies obstacle motion timebase). Default: 1.0.",
+    )
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
     parser.add_argument("--block_x", type=float, default=0.50)
@@ -3399,6 +3415,8 @@ if __name__ == "__main__":
             realtime=False,
             realtime_scale=1.0,
             speed_scale=float(args_cli.speed_scale),
+            obstacle_speed_scale=getattr(args_cli, "obstacle_speed_scale", None),
+            obstacle_arm_speed_scale=getattr(args_cli, "obstacle_arm_speed_scale", None),
             stop_on_goal=False,
             goal_tol=0.10,
             print_every=120,
