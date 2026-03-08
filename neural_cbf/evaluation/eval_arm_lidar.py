@@ -3251,6 +3251,19 @@ if __name__ == "__main__":
         default=None,
         help="Extra obstacle ARM speed scale (multiplies obstacle motion timebase). Default: 1.0.",
     )
+    parser.add_argument(
+        "--realtime",
+        dest="realtime",
+        action="store_true",
+        default=None,
+        help="Run rollout in real-time (sleep dt each step). Default: enabled when --gui is set.",
+    )
+    parser.add_argument(
+        "--no_realtime",
+        dest="realtime",
+        action="store_false",
+        help="Disable real-time sleeping (run as fast as possible).",
+    )
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
     parser.add_argument("--block_x", type=float, default=0.50)
@@ -3407,12 +3420,13 @@ if __name__ == "__main__":
                 raise ValueError(f"--start_q length must be {q_dims}, got {vals.shape[0]}")
             start_q_override = vals
 
+        realtime_flag = (bool(args_cli.gui) if (getattr(args_cli, "realtime", None) is None) else bool(args_cli.realtime))
         rollout_result = run_moving_obstacle_rollout(
             neural_controller,
             t_sim=float(args_cli.t_sim),
             move_obstacles=True,
             seed=int(args_cli.seed),
-            realtime=False,
+            realtime=realtime_flag,
             realtime_scale=1.0,
             speed_scale=float(args_cli.speed_scale),
             obstacle_speed_scale=getattr(args_cli, "obstacle_speed_scale", None),
