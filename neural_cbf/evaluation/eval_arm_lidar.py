@@ -4,6 +4,7 @@ import argparse
 import yaml
 import atexit
 import signal
+import random
 
 import numpy as np
 import torch
@@ -37,7 +38,43 @@ import cv2
 # batch_size = 1
 
 
+def _seed_all(seed: int):
+	"""Best-effort deterministic seeding for repeatable starts (same seed => same init)."""
+	try:
+		seed = int(seed)
+	except Exception:
+		seed = 0
+
+	try:
+		os.environ["PYTHONHASHSEED"] = str(seed)
+	except Exception:
+		pass
+
+	try:
+		random.seed(seed)
+	except Exception:
+		pass
+	try:
+		np.random.seed(seed)
+	except Exception:
+		pass
+	try:
+		torch.manual_seed(seed)
+		if torch.cuda.is_available():
+			torch.cuda.manual_seed_all(seed)
+	except Exception:
+		pass
+
+	try:
+		torch.backends.cudnn.deterministic = True
+		torch.backends.cudnn.benchmark = False
+	except Exception:
+		pass
+
+
 def init_val(path, args):
+	# init_val samples a start state for the experiment suite; seed it.
+	_seed_all(getattr(args, "seed", 0))
 	# initialize models and parameters for loaded controllers
 	nominal_params = {}
 	scenarios = [
@@ -1412,6 +1449,7 @@ def run_moving_obstacle_rollout(
 
 	Prints collision status and returns a dict with trajectory statistics.
 	"""
+	_seed_all(int(seed))
 	controller.eval()
 	dm = controller.dynamics_model
 	env = dm.env
@@ -3193,6 +3231,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_floor_pause", action="store_true", help="Disable pausing when a link penetrates below the floor tolerance.")
 
     args_cli = parser.parse_args()
+    _seed_all(int(args_cli.seed))
 
     # Resolve hparams.yaml
     ckpt_path = args_cli.ckpt
