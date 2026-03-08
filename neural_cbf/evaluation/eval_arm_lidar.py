@@ -2078,7 +2078,7 @@ def run_moving_obstacle_rollout(
 	h_plot_saved = False
 	collided = False
 	collide_step = None
-	collision_hold_until_step = None
+	# collision_hold_until_step removed: we now stop/pause immediately on collision
 	qp_infeasible_count = 0
 	u_prev = None
 	u_jitter_hist = []
@@ -2558,42 +2558,38 @@ def run_moving_obstacle_rollout(
 			min_dist_hist.append(min_d)
 			if diag is not None:
 				(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
-			if hit:
-				# First collision: keep rolling for 5s, then pause/save.
-				if not collided:
-					collided = True
-					collide_step = k
-					collision_hold_until_step = int(k + max(1, round(5.0 / float(dm.dt))))
-					print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
-					print(f"[H] collision_instant t={k*dm.dt:.3f}s  h={h_now:.6f}")
+				if hit:
+					# First collision: stop (or pause) immediately.
+					if not collided:
+						collided = True
+						collide_step = k
+						print(f"[ROLL] COLLISION detected at step {k}, sim_time={k*dm.dt:.3f}s, min_d={min_d:.6f}")
+						print(f"[H] collision_instant t={k*dm.dt:.3f}s  h={h_now:.6f}")
+						try:
+							h_post = float(controller.h(x).reshape(-1)[0].detach().cpu().item())
+						except Exception:
+							h_post = float("nan")
+						print(f"[H] collision_postcheck t={k*dm.dt:.3f}s  h={h_post:.6f}")
+					# Save immediately so pause-on-collision has media on disk.
 					try:
-						h_post = float(controller.h(x).reshape(-1)[0].detach().cpu().item())
+						_save_rollout_media_best_effort(reason="collision")
 					except Exception:
-						h_post = float("nan")
-					print(f"[H] collision_postcheck t={k*dm.dt:.3f}s  h={h_post:.6f}")
-					print(f"[ROLL] continuing for 5.0s after collision (until step {collision_hold_until_step}).")
+						pass
+					if pause_on_collision:
+						try:
+							p_.setRealTimeSimulation(0)
+						except Exception:
+							pass
+						while True:
+							time.sleep(0.1)
+					break
 
 		if realtime:
 			# realtime_scale > 1 slows down the visualization (e.g., 2.0 means 2x slower than real time)
 			sleep_dt = max(dm.dt * float(realtime_scale), 1.0 / 60.0)
 			time.sleep(sleep_dt)
 
-		# After first collision, continue for 5 seconds then save h plot and stop/pause.
-		if collided and (collision_hold_until_step is not None) and (k >= int(collision_hold_until_step)):
-			try:
-				_hp = _save_h_plot_once()
-				if _hp is not None:
-					print(f"[H] collision+5s plot saved: {_hp}")
-			except Exception as e:
-				print(f"[H] WARN: failed to save collision+5s plot: {e}")
-			if pause_on_collision:
-				try:
-					p_.setRealTimeSimulation(0)
-				except Exception:
-					pass
-				while True:
-					time.sleep(0.1)
-			break
+			# collision hold removed
 
 	result = {
 		"move_obstacles": move_obstacles,
