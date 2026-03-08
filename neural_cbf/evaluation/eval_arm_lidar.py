@@ -17,6 +17,9 @@ import json
 
 import pybullet as p
 
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
 from environment import ArmEnv
 
 from neural_cbf.controllers import NeuralLidarCBFController
@@ -70,6 +73,117 @@ def _seed_all(seed: int):
 		torch.backends.cudnn.benchmark = False
 	except Exception:
 		pass
+
+
+class _TimeseriesVideoRecorder:
+	"""Lightweight offscreen timeseries video recorder using Matplotlib + OpenCV."""
+
+	def __init__(
+		self,
+		out_path: str,
+		fps: int = 30,
+		window_s: float = 3.0,
+		size_px=(1280, 360),
+		line_color="#c2410c",
+		bg="white",
+	):
+		self.out_path = str(out_path)
+		self.fps = int(max(1, fps))
+		self.window_s = float(max(0.1, window_s))
+		self.size_px = (int(size_px[0]), int(size_px[1]))
+		self._next_frame_t = 0.0
+		self._closed = False
+
+		w, h = self.size_px
+		dpi = 100.0
+		fig_w = w / dpi
+		fig_h = h / dpi
+		self.fig = Figure(figsize=(fig_w, fig_h), dpi=dpi, facecolor=bg)
+		self.canvas = FigureCanvas(self.fig)
+		self.ax = self.fig.add_subplot(1, 1, 1)
+		self.ax.set_facecolor(bg)
+		self.ax.grid(False)
+		self.ax.spines["top"].set_visible(False)
+		self.ax.spines["right"].set_visible(False)
+		self.ax.set_xlabel("Time (s)")
+		self.ax.set_ylabel("h")
+		(self.line,) = self.ax.plot([], [], color=line_color, linewidth=2.0)
+		self.zero = self.ax.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444", alpha=0.7)
+		self.fig.tight_layout(pad=0.6)
+
+		fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+		self.writer = cv2.VideoWriter(self.out_path, fourcc, float(self.fps), (w, h))
+		if not self.writer.isOpened():
+			raise RuntimeError(f"Failed to open VideoWriter for: {self.out_path}")
+
+	def maybe_write(self, t_now: float, t_hist, y_hist):
+		if self._closed:
+			return
+		t_now = float(t_now)
+
+		try:
+			t_arr = np.asarray(t_hist, dtype=np.float32)
+			y_arr = np.asarray(y_hist, dtype=np.float32)
+		except Exception:
+			return
+
+		if t_arr.size == 0:
+			return
+
+		# Catch up if simulation time advances faster than the requested FPS.
+		# This avoids "short" videos when dt > 1/fps by repeating frames as needed.
+		frame_dt = 1.0 / float(self.fps)
+		max_catchup = int(max(1, 10 * self.fps))
+		n_written = 0
+		while (t_now + 1e-9) >= float(self._next_frame_t) and n_written < max_catchup:
+			t_frame = float(self._next_frame_t)
+			self._next_frame_t = float(self._next_frame_t) + frame_dt
+			n_written += 1
+
+			t0 = max(0.0, t_frame - float(self.window_s))
+			mask = (t_arr >= float(t0)) & (t_arr <= float(t_frame) + 1e-6)
+			if not bool(mask.any()):
+				# still render an empty window so the video has consistent timing
+				tx = np.array([t0, t_frame], dtype=np.float32)
+				yx = np.array([0.0, 0.0], dtype=np.float32)
+			else:
+				tx = t_arr[mask]
+				yx = y_arr[mask]
+
+			self.line.set_data(tx, yx)
+			self.ax.set_xlim(float(t0), float(t_frame) if t_frame > t0 else float(t0 + 1e-3))
+			try:
+				ymin = float(np.nanmin(yx))
+				ymax = float(np.nanmax(yx))
+				if not np.isfinite(ymin) or not np.isfinite(ymax):
+					ymin, ymax = -1.0, 1.0
+				if abs(ymax - ymin) < 1e-6:
+					ymin -= 1.0
+					ymax += 1.0
+				m = 0.12 * (ymax - ymin)
+				self.ax.set_ylim(ymin - m, ymax + m)
+			except Exception:
+				pass
+
+			self.canvas.draw()
+			w, h = self.size_px
+			buf = np.frombuffer(self.canvas.tostring_rgb(), dtype=np.uint8)
+			img = buf.reshape(h, w, 3)
+			frame_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+			self.writer.write(frame_bgr)
+
+	def close(self):
+		if self._closed:
+			return
+		self._closed = True
+		try:
+			self.writer.release()
+		except Exception:
+			pass
+		try:
+			self.fig.clear()
+		except Exception:
+			pass
 
 
 def init_val(path, args):
@@ -1444,10 +1558,13 @@ def run_moving_obstacle_rollout(
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
     obstacle_task_T: float = 4.0,
-    auto_grasp_q_goal_thresh: float = 0.553,
-    main_descend_trigger_d_goal: float = 0.60,
-    main_descend_dz: float = -0.06,
-):
+	    auto_grasp_q_goal_thresh: float = 0.553,
+	    main_descend_trigger_d_goal: float = 0.60,
+	    main_descend_dz: float = -0.06,
+	    h_video_out: str = None,
+	    h_video_fps: int = 30,
+	    h_video_window_s: float = 3.0,
+	):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
 	Prints collision status and returns a dict with trajectory statistics.
@@ -2234,46 +2351,85 @@ def run_moving_obstacle_rollout(
 			unsafe_now = False
 		return safe_now, unsafe_now
 
-	def _save_h_plot_once():
-		nonlocal h_plot_saved
-		if h_plot_saved:
-			return None
-		h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
-		plt.figure(figsize=(8, 3))
-		if len(h_hist) > 0:
-			plt.plot(np.array(h_t_hist, dtype=np.float32), np.array(h_hist, dtype=np.float32), linewidth=1.2, color="#c2410c")
-		else:
-			plt.text(0.5, 0.5, "No h samples captured", ha="center", va="center", transform=plt.gca().transAxes)
-		plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
-		plt.xlabel("t (s)")
-		plt.ylabel("h")
-		plt.title("CBF h over rollout")
-		plt.tight_layout()
-		plt.savefig(h_plot_path, dpi=150)
-		plt.close()
-		h_plot_saved = True
-		print(f"[H] saved plot: {h_plot_path}")
-		return h_plot_path
+		def _save_h_plot_once():
+			nonlocal h_plot_saved
+			if h_plot_saved:
+				return None
+			h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
+			plt.figure(figsize=(8, 3))
+			if len(h_hist) > 0:
+				plt.plot(
+					np.array(h_t_hist, dtype=np.float32),
+					np.array(h_hist, dtype=np.float32),
+					linewidth=1.2,
+					color="#c2410c",
+				)
+			else:
+				plt.text(0.5, 0.5, "No h samples captured", ha="center", va="center", transform=plt.gca().transAxes)
+			plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
+			plt.xlabel("Time (s)")
+			plt.ylabel("h")
+			plt.tight_layout()
+			plt.savefig(h_plot_path, dpi=200)
+			plt.close()
+			h_plot_saved = True
+			print(f"[H] saved plot: {h_plot_path}")
+			return h_plot_path
 
-	def _save_h_plot_best_effort(reason: str = ""):
-		try:
-			p = _save_h_plot_once()
-			if p is not None:
-				msg = f"[H] auto-saved plot ({reason}): {p}" if reason else f"[H] auto-saved plot: {p}"
-				print(msg)
-		except Exception as e:
-			print(f"[H] WARN: auto-save failed ({reason}): {e}")
+		def _save_h_plot_best_effort(reason: str = ""):
+			try:
+				pth = _save_h_plot_once()
+				if pth is not None:
+					msg = f"[H] auto-saved plot ({reason}): {pth}" if reason else f"[H] auto-saved plot: {pth}"
+					print(msg)
+			except Exception as e:
+				print(f"[H] WARN: auto-save failed ({reason}): {e}")
 
-	_prev_sigint = signal.getsignal(signal.SIGINT)
-	_prev_sigterm = signal.getsignal(signal.SIGTERM)
+		_hvid = None
+		h_video_saved = False
 
-	def _term_handler(signum, frame):
-		_save_h_plot_best_effort(reason=f"signal {int(signum)}")
-		raise KeyboardInterrupt
+		def _hvid_close_best_effort(reason: str = ""):
+			nonlocal _hvid, h_video_saved
+			if h_video_saved:
+				return
+			try:
+				if _hvid is not None:
+					_hvid.close()
+					h_video_saved = True
+					print(f"[HVIDEO] saved ({reason}): {str(h_video_out)}" if reason else f"[HVIDEO] saved: {str(h_video_out)}")
+			except Exception as e:
+				print(f"[HVIDEO] WARN: close failed ({reason}): {e}")
 
-	atexit.register(_save_h_plot_best_effort, "atexit")
-	signal.signal(signal.SIGINT, _term_handler)
-	signal.signal(signal.SIGTERM, _term_handler)
+		def _save_rollout_media_best_effort(reason: str = ""):
+			_save_h_plot_best_effort(reason=reason)
+			_hvid_close_best_effort(reason=reason)
+
+		if h_video_out is not None and str(h_video_out).strip() != "":
+			try:
+				out_path = str(h_video_out)
+				os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+				_hvid = _TimeseriesVideoRecorder(
+					out_path,
+					fps=int(h_video_fps),
+					window_s=float(h_video_window_s),
+					size_px=(1280, 360),
+				)
+				print(f"[HVIDEO] recording -> {out_path}")
+			except Exception as e:
+				print(f"[HVIDEO] WARN: init failed: {e}")
+				_hvid = None
+
+		_prev_sigint = signal.getsignal(signal.SIGINT)
+		_prev_sigterm = signal.getsignal(signal.SIGTERM)
+
+		def _term_handler(signum, frame):
+			_save_rollout_media_best_effort(reason=f"signal {int(signum)}")
+			raise KeyboardInterrupt
+
+		atexit.register(_save_h_plot_best_effort, "atexit")
+		atexit.register(_hvid_close_best_effort, "atexit")
+		signal.signal(signal.SIGINT, _term_handler)
+		signal.signal(signal.SIGTERM, _term_handler)
 
 	for k in range(steps):
 		# Base time used for obstacle motion
@@ -2629,6 +2785,11 @@ def run_moving_obstacle_rollout(
 			h_now = float("nan")
 		h_hist.append(h_now)
 		h_t_hist.append(float(k * dm.dt))
+		if _hvid is not None:
+			try:
+				_hvid.maybe_write(float(k * dm.dt), h_t_hist, h_hist)
+			except Exception:
+				pass
 		if (k % max(int(print_every), 1)) == 0:
 			if mode != "none" and len(min_dist_hist) > 0:
 				md = min_dist_hist[-1]
@@ -2699,7 +2860,7 @@ def run_moving_obstacle_rollout(
 				print(f"[ROLL] reached {phase}: ||q-goal||={d_goal:.6f} <= {float(goal_tol):.6f} at step {k}")
 				break
 
-		# 5) Measure collision / distance (skip if obstacle_mode==none)
+			# 5) Measure collision / distance (skip if obstacle_mode==none)
 			if mode != "none" and len(obstacle_ids) > 0:
 				min_d, hit = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
 				min_dist_hist.append(min_d)
@@ -2718,10 +2879,7 @@ def run_moving_obstacle_rollout(
 							h_post = float("nan")
 						print(f"[H] collision_postcheck t={k*dm.dt:.3f}s  h={h_post:.6f}")
 					# Save immediately so pause-on-collision has media on disk.
-					try:
-						_save_rollout_media_best_effort(reason="collision")
-					except Exception:
-						pass
+					_save_rollout_media_best_effort(reason="collision")
 					if pause_on_collision:
 						try:
 							p_.setRealTimeSimulation(0)
@@ -2782,11 +2940,18 @@ def run_moving_obstacle_rollout(
 				"odot_err_p", "odot_err_n", "odot_err_m",
 				"odot_jvp_p_meanabs", "odot_jvp_n_meanabs", "odot_jvp_m_meanabs",
 				"odot_fd_p_meanabs", "odot_fd_n_meanabs", "odot_fd_m_meanabs",
-			]:
-				vals = [d[k] for d in blist if k in d]
-				if len(vals) > 0:
-					result[f"{k}_{bk}"] = float(np.mean(vals))
-	# Save h(t) line plot into repo working directory (if not already saved)
+				]:
+					vals = [d[k] for d in blist if k in d]
+					if len(vals) > 0:
+						result[f"{k}_{bk}"] = float(np.mean(vals))
+
+	# Save h(t) line plot and h video before writing summary/cleanup.
+	try:
+		_hvid_close_best_effort(reason="rollout_end")
+		if h_video_out is not None and str(h_video_out).strip() != "":
+			result["h_video_path"] = str(h_video_out)
+	except Exception as e:
+		print(f"[HVIDEO] WARN: failed to finalize h video: {e}")
 	try:
 		h_plot_path = _save_h_plot_once()
 		if h_plot_path is not None:
@@ -2815,6 +2980,10 @@ def run_moving_obstacle_rollout(
 		pass
 	try:
 		atexit.unregister(_save_h_plot_best_effort)
+	except Exception:
+		pass
+	try:
+		atexit.unregister(_hvid_close_best_effort)
 	except Exception:
 		pass
 	return result
@@ -3264,6 +3433,14 @@ if __name__ == "__main__":
         action="store_false",
         help="Disable real-time sleeping (run as fast as possible).",
     )
+    parser.add_argument(
+        "--h_video_out",
+        type=str,
+        default=None,
+        help="Write a scrolling h(t) 'ECG' MP4 to this path (e.g., ./h_seed0.mp4).",
+    )
+    parser.add_argument("--h_video_fps", type=int, default=30)
+    parser.add_argument("--h_video_window_s", type=float, default=3.0)
     parser.add_argument("--obstacle_mode", type=str, default="arm_task", choices=["none", "rigid", "arm", "arm_task"])
     parser.add_argument("--scene", type=str, default="cross_pick", choices=["plain", "cross_pick"])
     parser.add_argument("--block_x", type=float, default=0.50)
@@ -3469,6 +3646,9 @@ if __name__ == "__main__":
             auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.553)),
             main_descend_trigger_d_goal=float(getattr(args_cli, "main_descend_trigger_d_goal", 0.60)),
             main_descend_dz=float(getattr(args_cli, "main_descend_dz", -0.06)),
+            h_video_out=getattr(args_cli, "h_video_out", None),
+            h_video_fps=int(getattr(args_cli, "h_video_fps", 30)),
+            h_video_window_s=float(getattr(args_cli, "h_video_window_s", 3.0)),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
