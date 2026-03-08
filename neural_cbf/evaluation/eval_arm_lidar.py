@@ -2553,11 +2553,11 @@ def run_moving_obstacle_rollout(
 				break
 
 		# 5) Measure collision / distance (skip if obstacle_mode==none)
-		if mode != "none" and len(obstacle_ids) > 0:
-			min_d, hit = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
-			min_dist_hist.append(min_d)
-			if diag is not None:
-				(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
+			if mode != "none" and len(obstacle_ids) > 0:
+				min_d, hit = _min_distance_and_collision(env, robot.robotId, obstacle_ids, distance=2.0)
+				min_dist_hist.append(min_d)
+				if diag is not None:
+					(diag_bucket["near"] if min_d < 0.2 else diag_bucket["far"]).append(diag)
 				if hit:
 					# First collision: stop (or pause) immediately.
 					if not collided:
@@ -3108,7 +3108,9 @@ if __name__ == "__main__":
         default=4.0,
         help="Seconds per obstacle-arm task cycle in arm_task mode (cross_pick).",
     )
-    parser.add_argument("--pause_on_collision", action="store_true")
+    # Default to pausing on collision in GUI rollouts (can disable with --no_pause_on_collision).
+    parser.add_argument("--pause_on_collision", action="store_true", default=True)
+    parser.add_argument("--no_pause_on_collision", dest="pause_on_collision", action="store_false")
     parser.add_argument(
         "--start_q",
         type=str,
