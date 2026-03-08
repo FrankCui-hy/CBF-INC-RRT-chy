@@ -2434,6 +2434,7 @@ def run_moving_obstacle_rollout(
 
 	wall_t0 = time.time()
 	for k in range(steps):
+		step_wall_t0 = time.time()
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
 		# Optionally speed up ONLY the obstacle arm (separate from rigid obstacles)
@@ -2894,12 +2895,16 @@ def run_moving_obstacle_rollout(
 							time.sleep(0.1)
 					break
 
-		if realtime:
-			# realtime_scale > 1 slows down the visualization (e.g., 2.0 means 2x slower than real time)
-			sleep_dt = max(dm.dt * float(realtime_scale), 1.0 / 60.0)
-			time.sleep(sleep_dt)
+			if realtime:
+				# Match wall-clock to simulation time (no forced 60Hz floor).
+				# realtime_scale > 1.0 slows down visualization; < 1.0 speeds it up.
+				target_dt = float(dm.dt) * float(realtime_scale)
+				elapsed = float(time.time() - step_wall_t0)
+				remain = float(target_dt - elapsed)
+				if remain > 0:
+					time.sleep(remain)
 
-			# collision hold removed
+				# collision hold removed
 
 	result = {
 		"move_obstacles": move_obstacles,
