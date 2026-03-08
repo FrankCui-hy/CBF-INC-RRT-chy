@@ -1445,6 +1445,8 @@ def run_moving_obstacle_rollout(
     cross_window_ratio: float = 0.35,
     obstacle_task_T: float = 4.0,
     auto_grasp_q_goal_thresh: float = 0.553,
+    main_descend_trigger_d_goal: float = 0.60,
+    main_descend_dz: float = -0.06,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -2418,8 +2420,47 @@ def run_moving_obstacle_rollout(
 				d_goal_pre = None
 			if d_goal_pre is not None:
 				try:
-					u_ref = controller.u_reference(x)[0]
+					# If we stall near the pre-grasp IK goal (often around d_goal≈0.6), force a small
+					# "descend" by lowering the EE target and recomputing IK. This makes the gripper
+					# move down toward the block instead of hovering.
 					is_return = bool(main_return_state.get("returning", False))
+					if (not is_return) and (not bool(main_grasp_state.get("grabbed", False))):
+						try:
+							if (not bool(main_grasp_state.get("descend_started", False))) and (float(d_goal_pre) <= float(main_descend_trigger_d_goal)):
+								g0 = locals().get("goal_xyz", None)
+								if g0 is not None:
+									gd = [float(g0[0]), float(g0[1]), float(g0[2]) + float(main_descend_dz)]
+									# keep above tabletop to reduce under-table tunneling
+									try:
+										if str(scene).lower() == "cross_pick" and table_top_z is not None:
+											gd[2] = max(float(gd[2]), float(table_top_z) + 0.02)
+									except Exception:
+										pass
+									q_desc = _ik_close_to_q(
+										p_,
+										int(robot.robotId),
+										int(main_ee_link_idx),
+										gd,
+										q_ref=q_now_pre.detach().clone().float(),
+									)
+									if q_desc is None:
+										ik = p_.calculateInverseKinematics(
+											robot.robotId,
+											int(main_ee_link_idx),
+											gd,
+											maxNumIterations=200,
+											residualThreshold=1e-5,
+										)
+										q_desc = torch.tensor(ik[:dm.n_dims]).float()
+									dm.set_goal(q_desc)
+									q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
+									main_grasp_state["descend_started"] = True
+									main_grasp_state["descend_goal_xyz"] = gd
+									print(f"[TASK] descend kick: d_goal={float(d_goal_pre):.3f} <= {float(main_descend_trigger_d_goal):.3f} -> goal_xyz={gd}")
+						except Exception as e:
+							print(f"[TASK] WARN: descend kick failed: {e}")
+
+					u_ref = controller.u_reference(x)[0]
 					if is_return:
 						# HOME phase: stronger assist to avoid stopping before reaching start/home.
 						alpha = float(np.clip((0.90 - d_goal_pre) / 0.70, 0.0, 1.0))
@@ -3233,6 +3274,18 @@ if __name__ == "__main__":
         default=0.553,
         help="In cross_pick, force a visual 'grasp' when ||q-goal|| falls below this threshold (joint-space).",
     )
+    parser.add_argument(
+        "--main_descend_trigger_d_goal",
+        type=float,
+        default=0.60,
+        help="In cross_pick GOAL phase, if ||q-goal|| <= this, lower the EE target (descend kick) once.",
+    )
+    parser.add_argument(
+        "--main_descend_dz",
+        type=float,
+        default=-0.06,
+        help="Meters to add to the EE target z for descend kick (negative moves down).",
+    )
     # Default to pausing on collision in GUI rollouts (can disable with --no_pause_on_collision).
     parser.add_argument("--pause_on_collision", action="store_true", default=True)
     parser.add_argument("--no_pause_on_collision", dest="pause_on_collision", action="store_false")
@@ -3382,6 +3435,8 @@ if __name__ == "__main__":
             cross_window_ratio=float(args_cli.cross_window_ratio),
             obstacle_task_T=getattr(args_cli, "obstacle_task_T", 4.0),
             auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.553)),
+            main_descend_trigger_d_goal=float(getattr(args_cli, "main_descend_trigger_d_goal", 0.60)),
+            main_descend_dz=float(getattr(args_cli, "main_descend_dz", -0.06)),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
