@@ -1400,6 +1400,9 @@ def run_moving_obstacle_rollout(
     block_z: float = 0.03,
     main_base_y: float = -0.20,
     obst_base_y: float = +0.20,
+    randomize_bases: bool = False,
+    base_y_jitter: float = 0.0,
+    base_y_min_sep: float = 0.25,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
@@ -1441,6 +1444,40 @@ def run_moving_obstacle_rollout(
 		env.reset_env(np.array([]), tidy_env=True)
 	except Exception:
 		# Some env implementations may not support reset; ignore
+		pass
+
+	# Optional: deterministically randomize the base y positions using --seed.
+	try:
+		_do_rand = bool(randomize_bases) or (float(base_y_jitter) > 0.0)
+	except Exception:
+		_do_rand = False
+	if _do_rand:
+		try:
+			j = float(base_y_jitter)
+			if j <= 0.0 and bool(randomize_bases):
+				j = 0.08
+			j = max(0.0, j)
+			min_sep = float(base_y_min_sep)
+			rng = np.random.default_rng(int(seed))
+			main_abs = float(abs(float(main_base_y)))
+			obst_abs = float(abs(float(obst_base_y)))
+			main_base_y = -(main_abs + float(rng.uniform(low=-j, high=+j)))
+			obst_base_y = +(obst_abs + float(rng.uniform(low=-j, high=+j)))
+			# keep a minimum separation so the two bases are not (nearly) coincident
+			if float(obst_base_y) - float(main_base_y) < min_sep:
+				obst_base_y = max(float(obst_base_y), float(main_base_y) + float(min_sep), 0.05)
+			# keep a sensible sign convention (main on -y, obstacle on +y)
+			main_base_y = min(float(main_base_y), -0.05)
+			obst_base_y = max(float(obst_base_y), 0.05)
+			print(f"[BASE] randomized main_base_y={float(main_base_y):.3f} obst_base_y={float(obst_base_y):.3f} (seed={int(seed)})")
+		except Exception as e:
+			print(f"[BASE] WARN: failed to randomize bases: {e}")
+
+	# Apply (possibly randomized) base y to the main robot for all scenes.
+	try:
+		bpos, born = p_.getBasePositionAndOrientation(int(robot.robotId))
+		p_.resetBasePositionAndOrientation(int(robot.robotId), [float(bpos[0]), float(main_base_y), float(bpos[2])], born)
+	except Exception:
 		pass
 
 	obs_template = None  # per-ray direction/angle template extracted from a real observation
@@ -3099,6 +3136,23 @@ if __name__ == "__main__":
     parser.add_argument("--block_z", type=float, default=0.03)
     parser.add_argument("--main_base_y", type=float, default=-0.20)
     parser.add_argument("--obst_base_y", type=float, default=+0.20)
+    parser.add_argument(
+        "--randomize_bases",
+        action="store_true",
+        help="Randomize main/obstacle base y positions deterministically using --seed.",
+    )
+    parser.add_argument(
+        "--base_y_jitter",
+        type=float,
+        default=0.0,
+        help="Uniform jitter added to |base_y| (meters). If 0 and --randomize_bases is set, uses 0.08.",
+    )
+    parser.add_argument(
+        "--base_y_min_sep",
+        type=float,
+        default=0.25,
+        help="Minimum separation (meters) enforced between obst_base_y and main_base_y.",
+    )
     parser.add_argument("--cross_jitter_amp", type=float, default=0.018)
     parser.add_argument("--cross_jitter_hz", type=float, default=6.0)
     parser.add_argument("--cross_window_ratio", type=float, default=0.35)
@@ -3248,6 +3302,9 @@ if __name__ == "__main__":
             block_z=float(args_cli.block_z),
             main_base_y=float(args_cli.main_base_y),
             obst_base_y=float(args_cli.obst_base_y),
+            randomize_bases=bool(getattr(args_cli, "randomize_bases", False)),
+            base_y_jitter=float(getattr(args_cli, "base_y_jitter", 0.0)),
+            base_y_min_sep=float(getattr(args_cli, "base_y_min_sep", 0.25)),
             cross_jitter_amp=float(args_cli.cross_jitter_amp),
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
