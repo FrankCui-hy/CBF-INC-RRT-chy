@@ -1556,13 +1556,13 @@ def run_moving_obstacle_rollout(
     base_y_min_sep: float = 0.25,
     cross_jitter_amp: float = 0.018,
     cross_jitter_hz: float = 6.0,
-    cross_window_ratio: float = 0.35,
-    obstacle_task_T: float = 4.0,
-	    auto_grasp_q_goal_thresh: float = 0.553,
-	    main_descend_trigger_d_goal: float = 0.60,
-	    main_descend_dz: float = -0.06,
-	    h_video_out: str = None,
-	    h_video_fps: int = 30,
+	    cross_window_ratio: float = 0.35,
+	    obstacle_task_T: float = 4.0,
+		    auto_grasp_q_goal_thresh: float = 0.03,
+		    main_descend_trigger_d_goal: float = 0.60,
+		    main_descend_dz: float = -0.06,
+		    h_video_out: str = None,
+		    h_video_fps: int = 30,
 	    h_video_window_s: float = 3.0,
 	):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
@@ -2270,13 +2270,14 @@ def run_moving_obstacle_rollout(
 		# mode == "none": obstacles already removed above
 		pass
 
-	steps = int(t_sim / dm.dt)
-	min_dist_hist = []
-	h_hist = []
-	h_t_hist = []
-	h_plot_saved = False
-	collided = False
-	collide_step = None
+		steps = int(t_sim / dm.dt)
+		min_dist_hist = []
+		h_hist = []
+		h_t_hist = []
+		h_t_hist_video = []
+		h_plot_saved = False
+		collided = False
+		collide_step = None
 	# collision_hold_until_step removed: we now stop/pause immediately on collision
 	qp_infeasible_count = 0
 	u_prev = None
@@ -2431,6 +2432,7 @@ def run_moving_obstacle_rollout(
 	signal.signal(signal.SIGINT, _term_handler)
 	signal.signal(signal.SIGTERM, _term_handler)
 
+	wall_t0 = time.time()
 	for k in range(steps):
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
@@ -2784,10 +2786,13 @@ def run_moving_obstacle_rollout(
 		except Exception:
 			h_now = float("nan")
 		h_hist.append(h_now)
-		h_t_hist.append(float(k * dm.dt))
+		t_sim_now = float(k * dm.dt)
+		h_t_hist.append(t_sim_now)
+		t_video_now = float(time.time() - wall_t0) if bool(realtime) else t_sim_now
+		h_t_hist_video.append(t_video_now)
 		if _hvid is not None:
 			try:
-				_hvid.maybe_write(float(k * dm.dt), h_t_hist, h_hist)
+				_hvid.maybe_write(t_video_now, h_t_hist_video, h_hist)
 			except Exception:
 				pass
 		if (k % max(int(print_every), 1)) == 0:
@@ -3477,7 +3482,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--auto_grasp_q_goal_thresh",
         type=float,
-        default=0.553,
+        default=0.03,
         help="In cross_pick, force a visual 'grasp' when ||q-goal|| falls below this threshold (joint-space).",
     )
     parser.add_argument(
@@ -3643,7 +3648,7 @@ if __name__ == "__main__":
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
             obstacle_task_T=getattr(args_cli, "obstacle_task_T", 4.0),
-            auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.553)),
+            auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.03)),
             main_descend_trigger_d_goal=float(getattr(args_cli, "main_descend_trigger_d_goal", 0.60)),
             main_descend_dz=float(getattr(args_cli, "main_descend_dz", -0.06)),
             h_video_out=getattr(args_cli, "h_video_out", None),
