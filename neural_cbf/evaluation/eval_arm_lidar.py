@@ -2431,13 +2431,13 @@ def run_moving_obstacle_rollout(
 							u = (1.0 - beta) * u + beta * u_track
 					else:
 						# GOAL phase (grasp): previous near-goal assist.
-						# Start blending slightly earlier to avoid stalling around d_goal≈0.6.
-						alpha = float(np.clip((0.85 - d_goal_pre) / 0.65, 0.0, 1.0))
+						# Keep the same 0.60 threshold, but ramp alpha faster so we don't stall near d_goal≈0.6.
+						alpha = float(np.clip((0.60 - d_goal_pre) / 0.20, 0.0, 1.0))
 						u = (1.0 - alpha) * u + alpha * u_ref
-						if mode == "none" and d_goal_pre < 0.65:
+						if mode == "none" and d_goal_pre < 0.45:
 							k_track = 2.4
 							u_track = k_track * (q_goal_dev - q_now_pre)
-							beta = float(np.clip((0.65 - d_goal_pre) / 0.50, 0.0, 1.0))
+							beta = float(np.clip((0.45 - d_goal_pre) / 0.35, 0.0, 1.0))
 							u = (1.0 - beta) * u + beta * u_track
 					if (k % max(int(print_every), 1)) == 0:
 						phase = "HOME" if bool(main_return_state.get("returning", False)) else "GOAL"
