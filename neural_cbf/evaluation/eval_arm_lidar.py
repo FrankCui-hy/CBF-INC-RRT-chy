@@ -2351,85 +2351,85 @@ def run_moving_obstacle_rollout(
 			unsafe_now = False
 		return safe_now, unsafe_now
 
-		def _save_h_plot_once():
-			nonlocal h_plot_saved
-			if h_plot_saved:
-				return None
-			h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
-			plt.figure(figsize=(8, 3))
-			if len(h_hist) > 0:
-				plt.plot(
-					np.array(h_t_hist, dtype=np.float32),
-					np.array(h_hist, dtype=np.float32),
-					linewidth=1.2,
-					color="#c2410c",
-				)
-			else:
-				plt.text(0.5, 0.5, "No h samples captured", ha="center", va="center", transform=plt.gca().transAxes)
-			plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
-			plt.xlabel("Time (s)")
-			plt.ylabel("h")
-			plt.tight_layout()
-			plt.savefig(h_plot_path, dpi=200)
-			plt.close()
-			h_plot_saved = True
-			print(f"[H] saved plot: {h_plot_path}")
-			return h_plot_path
+	def _save_h_plot_once():
+		nonlocal h_plot_saved
+		if h_plot_saved:
+			return None
+		h_plot_path = os.path.join(os.getcwd(), f"h_rollout_seed{int(seed)}.png")
+		plt.figure(figsize=(8, 3))
+		if len(h_hist) > 0:
+			plt.plot(
+				np.array(h_t_hist, dtype=np.float32),
+				np.array(h_hist, dtype=np.float32),
+				linewidth=1.2,
+				color="#c2410c",
+			)
+		else:
+			plt.text(0.5, 0.5, "No h samples captured", ha="center", va="center", transform=plt.gca().transAxes)
+		plt.axhline(0.0, linestyle="--", linewidth=1.0, color="#444444")
+		plt.xlabel("Time (s)")
+		plt.ylabel("h")
+		plt.tight_layout()
+		plt.savefig(h_plot_path, dpi=200)
+		plt.close()
+		h_plot_saved = True
+		print(f"[H] saved plot: {h_plot_path}")
+		return h_plot_path
 
-		def _save_h_plot_best_effort(reason: str = ""):
-			try:
-				pth = _save_h_plot_once()
-				if pth is not None:
-					msg = f"[H] auto-saved plot ({reason}): {pth}" if reason else f"[H] auto-saved plot: {pth}"
-					print(msg)
-			except Exception as e:
-				print(f"[H] WARN: auto-save failed ({reason}): {e}")
+	def _save_h_plot_best_effort(reason: str = ""):
+		try:
+			pth = _save_h_plot_once()
+			if pth is not None:
+				msg = f"[H] auto-saved plot ({reason}): {pth}" if reason else f"[H] auto-saved plot: {pth}"
+				print(msg)
+		except Exception as e:
+			print(f"[H] WARN: auto-save failed ({reason}): {e}")
 
-		_hvid = None
-		h_video_saved = False
+	_hvid = None
+	h_video_saved = False
 
-		def _hvid_close_best_effort(reason: str = ""):
-			nonlocal _hvid, h_video_saved
-			if h_video_saved:
-				return
-			try:
-				if _hvid is not None:
-					_hvid.close()
-					h_video_saved = True
-					print(f"[HVIDEO] saved ({reason}): {str(h_video_out)}" if reason else f"[HVIDEO] saved: {str(h_video_out)}")
-			except Exception as e:
-				print(f"[HVIDEO] WARN: close failed ({reason}): {e}")
+	def _hvid_close_best_effort(reason: str = ""):
+		nonlocal _hvid, h_video_saved
+		if h_video_saved:
+			return
+		try:
+			if _hvid is not None:
+				_hvid.close()
+				h_video_saved = True
+				print(f"[HVIDEO] saved ({reason}): {str(h_video_out)}" if reason else f"[HVIDEO] saved: {str(h_video_out)}")
+		except Exception as e:
+			print(f"[HVIDEO] WARN: close failed ({reason}): {e}")
 
-		def _save_rollout_media_best_effort(reason: str = ""):
-			_save_h_plot_best_effort(reason=reason)
-			_hvid_close_best_effort(reason=reason)
+	def _save_rollout_media_best_effort(reason: str = ""):
+		_save_h_plot_best_effort(reason=reason)
+		_hvid_close_best_effort(reason=reason)
 
-		if h_video_out is not None and str(h_video_out).strip() != "":
-			try:
-				out_path = str(h_video_out)
-				os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-				_hvid = _TimeseriesVideoRecorder(
-					out_path,
-					fps=int(h_video_fps),
-					window_s=float(h_video_window_s),
-					size_px=(1280, 360),
-				)
-				print(f"[HVIDEO] recording -> {out_path}")
-			except Exception as e:
-				print(f"[HVIDEO] WARN: init failed: {e}")
-				_hvid = None
+	if h_video_out is not None and str(h_video_out).strip() != "":
+		try:
+			out_path = str(h_video_out)
+			os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+			_hvid = _TimeseriesVideoRecorder(
+				out_path,
+				fps=int(h_video_fps),
+				window_s=float(h_video_window_s),
+				size_px=(1280, 360),
+			)
+			print(f"[HVIDEO] recording -> {out_path}")
+		except Exception as e:
+			print(f"[HVIDEO] WARN: init failed: {e}")
+			_hvid = None
 
-		_prev_sigint = signal.getsignal(signal.SIGINT)
-		_prev_sigterm = signal.getsignal(signal.SIGTERM)
+	_prev_sigint = signal.getsignal(signal.SIGINT)
+	_prev_sigterm = signal.getsignal(signal.SIGTERM)
 
-		def _term_handler(signum, frame):
-			_save_rollout_media_best_effort(reason=f"signal {int(signum)}")
-			raise KeyboardInterrupt
+	def _term_handler(signum, frame):
+		_save_rollout_media_best_effort(reason=f"signal {int(signum)}")
+		raise KeyboardInterrupt
 
-		atexit.register(_save_h_plot_best_effort, "atexit")
-		atexit.register(_hvid_close_best_effort, "atexit")
-		signal.signal(signal.SIGINT, _term_handler)
-		signal.signal(signal.SIGTERM, _term_handler)
+	atexit.register(_save_h_plot_best_effort, "atexit")
+	atexit.register(_hvid_close_best_effort, "atexit")
+	signal.signal(signal.SIGINT, _term_handler)
+	signal.signal(signal.SIGTERM, _term_handler)
 
 	for k in range(steps):
 		# Base time used for obstacle motion
