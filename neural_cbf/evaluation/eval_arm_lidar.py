@@ -889,8 +889,7 @@ def _tint_robot_visual(p_client, body_id: int, rgba=(1.0, 0.55, 0.10, 1.0)):
 
 # ---- Visual grasp helper for cross-pick ----
 def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_id: int, grasp_state: dict,
-                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035,
-                              enable_attach: bool = True):
+                              dist_thresh: float = 0.05, ee_z_offset: float = -0.035):
     """Visual-only grasp: when EE is close, disable block collisions and make block follow EE.
 
     grasp_state: dict that will store keys {"grabbed": bool}.
@@ -919,10 +918,6 @@ def _update_visual_grasp_block(p_client, arm_id: int, ee_link_index: int, block_
     ee_grasp_pos = ee_pos + np.array([0.0, 0.0, float(ee_z_offset)], dtype=np.float32)
     ee_block_dist = float(np.linalg.norm(ee_grasp_pos - bpos))
     grasp_state["ee_block_dist"] = ee_block_dist
-
-    # Measure-only mode: do not trigger grasp and do not move the block.
-    if not bool(enable_attach):
-        return
 
     # Trigger grasp once within threshold
     if (not grabbed) and (ee_block_dist <= float(dist_thresh)):
@@ -1450,7 +1445,6 @@ def run_moving_obstacle_rollout(
     cross_window_ratio: float = 0.35,
     obstacle_task_T: float = 4.0,
     auto_grasp_q_goal_thresh: float = 0.553,
-    auto_descend_dz: float = -0.05,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -1796,10 +1790,6 @@ def run_moving_obstacle_rollout(
 		main_ee_z_offset = -0.035      # must match the offset passed to `_update_visual_grasp_block`
 		# Target the EE link position so that (EE_pos + main_ee_z_offset) is near the block center.
 		goal_xyz = [right_block[0], right_block[1], right_block[2] + 0.04 - float(main_ee_z_offset)]
-		try:
-			main_grasp_state["goal_xyz"] = [float(goal_xyz[0]), float(goal_xyz[1]), float(goal_xyz[2])]
-		except Exception:
-			pass
 		print(
 			f"[GOAL][cross_pick] blue_block_grasp_xyz={goal_xyz} "
 			f"(dist_thresh={main_grasp_dist_thresh:.3f}, ee_z_offset={main_ee_z_offset:.3f}) "
@@ -2308,7 +2298,6 @@ def run_moving_obstacle_rollout(
 						obst_grasp_state,
 						dist_thresh=0.05,
 						ee_z_offset=-0.035,
-						enable_attach=False,
 					)
 			elif mode == "arm_task" and obstacle_arm is not None:
 				if str(scene).lower() == "cross_pick":
@@ -2399,7 +2388,6 @@ def run_moving_obstacle_rollout(
 						obst_grasp_state,
 						dist_thresh=0.08,
 						ee_z_offset=-0.035,
-						enable_attach=False,
 					)
 				else:
 					_update_obstacle_arm(env, obstacle_arm, t_arm, strength=float(obstacle_arm_strength))
@@ -2516,52 +2504,34 @@ def run_moving_obstacle_rollout(
 				main_grasp_state,
 				dist_thresh=float(locals().get("main_grasp_dist_thresh", 0.08)),
 				ee_z_offset=float(locals().get("main_ee_z_offset", -0.035)),
-				enable_attach=False,
 			)
 			if (k % max(int(print_every), 1)) == 0:
 				try:
 					print(f"[TASK] main_ee_to_blue_block={float(main_grasp_state.get('ee_block_dist', float('nan'))):.4f} grabbed={bool(main_grasp_state.get('grabbed', False))}")
 				except Exception:
 					pass
-			# Auto behavior: when close enough in joint space to the pre-grasp IK goal, move the gripper down.
-			# This avoids the "block flying to EE" visual attachment and instead makes the EE descend.
-			try:
-				if (not bool(main_grasp_state.get("descend_started", False))) and float(d_goal_for_grasp) <= float(auto_grasp_q_goal_thresh):
-					g0 = main_grasp_state.get("goal_xyz", None)
-					if g0 is None:
-						g0 = goal_xyz
-					if g0 is not None:
-						gd = [float(g0[0]), float(g0[1]), float(g0[2]) + float(auto_descend_dz)]
-						# keep above the tabletop to avoid going "under the table"
-						try:
-							if str(scene).lower() == "cross_pick" and table_top_z is not None:
-								gd[2] = max(float(gd[2]), float(table_top_z) + 0.02)
-						except Exception:
-							pass
-						try:
-							ik = p_.calculateInverseKinematics(
-								robot.robotId,
-								int(main_ee_link_idx),
-								gd,
-								maxNumIterations=200,
-								residualThreshold=1e-5,
-							)
-							q_desc = torch.tensor(ik[:dm.n_dims]).float()
-							dm.set_goal(q_desc)
-							q_goal = dm.goal_state[:dm.n_dims].detach().clone().float()
-							main_grasp_state["descend_started"] = True
-							main_grasp_state["descend_goal_xyz"] = gd
-							print(f"[TASK] auto_descend: ||q-goal||={float(d_goal_for_grasp):.3f} <= {float(auto_grasp_q_goal_thresh):.3f} -> goal_xyz={gd}")
-						except Exception as e:
-							print(f"[TASK] WARN: auto_descend IK failed: {e}")
-			except Exception:
-				pass
-			# Mark "grabbed" based on EE-to-block distance (no block attachment).
+			# Hard trigger: if EE-to-block distance enters threshold, OR if we are close enough
+			# to the joint-space IK goal, mark grasp (visual-only).
 			try:
 				_thresh = float(locals().get("main_grasp_dist_thresh", 0.08))
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= _thresh:
+				_do_grab = False
+				if float(main_grasp_state.get("ee_block_dist", 1e9)) <= _thresh:
+					_do_grab = True
+				if float(d_goal_for_grasp) <= float(auto_grasp_q_goal_thresh):
+					_do_grab = True
+				if (not bool(main_grasp_state.get("grabbed", False))) and _do_grab:
 					main_grasp_state["grabbed"] = True
-					print(f"[TASK] grasped (distance trigger): ee_block_dist={float(main_grasp_state.get('ee_block_dist')):.4f} <= {_thresh:.4f}")
+					# Disable collisions for the block so it won't affect control/contacts
+					try:
+						if right_block_id is not None and int(right_block_id) >= 0:
+							p_.setCollisionFilterGroupMask(int(right_block_id), -1, 0, 0)
+					except Exception:
+						pass
+					if (k % max(int(print_every), 1)) == 0:
+						try:
+							print(f"[TASK] auto_grasp triggered: ||q-goal||={float(d_goal_for_grasp):.3f} (thresh={float(auto_grasp_q_goal_thresh):.3f})")
+						except Exception:
+							pass
 			except Exception:
 				pass
 			# Optional behavior: after grasp, switch goal to return home
@@ -3260,13 +3230,7 @@ if __name__ == "__main__":
         "--auto_grasp_q_goal_thresh",
         type=float,
         default=0.553,
-        help="In cross_pick, when ||q-goal|| falls below this threshold, switch goal to a slightly lower EE target (auto descend).",
-    )
-    parser.add_argument(
-        "--auto_descend_dz",
-        type=float,
-        default=-0.05,
-        help="In cross_pick auto descend, add this (meters) to the EE target z (negative => move down).",
+        help="In cross_pick, force a visual 'grasp' when ||q-goal|| falls below this threshold (joint-space).",
     )
     # Default to pausing on collision in GUI rollouts (can disable with --no_pause_on_collision).
     parser.add_argument("--pause_on_collision", action="store_true", default=True)
@@ -3417,7 +3381,6 @@ if __name__ == "__main__":
             cross_window_ratio=float(args_cli.cross_window_ratio),
             obstacle_task_T=getattr(args_cli, "obstacle_task_T", 4.0),
             auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.553)),
-            auto_descend_dz=float(getattr(args_cli, "auto_descend_dz", -0.05)),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
