@@ -1444,6 +1444,7 @@ def run_moving_obstacle_rollout(
     cross_jitter_hz: float = 6.0,
     cross_window_ratio: float = 0.35,
     obstacle_task_T: float = 4.0,
+    auto_grasp_q_goal_thresh: float = 0.553,
 ):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -2484,6 +2485,14 @@ def run_moving_obstacle_rollout(
 
 		# 4) Advance physics (if dm.closed_loop_dynamics didn't already step physics)
 		p_.stepSimulation()
+
+		# Joint-space goal distance (used for logging and optional auto-grasp trigger)
+		try:
+			q_now_for_grasp = x[0, :dm.n_dims]
+			d_goal_for_grasp = float(torch.norm(q_now_for_grasp - q_goal.to(q_now_for_grasp.device)).item())
+		except Exception:
+			d_goal_for_grasp = float("inf")
+
 		# Visual-only grasp for MAIN arm: attach the RIGHT block when close
 		if str(scene).lower() == "cross_pick":
 			main_ee_link = int(main_ee_link_idx)
@@ -2504,8 +2513,25 @@ def run_moving_obstacle_rollout(
 			# Hard trigger: if EE-to-block distance enters threshold, mark grasp.
 			try:
 				_thresh = float(locals().get("main_grasp_dist_thresh", 0.08))
-				if (not bool(main_grasp_state.get("grabbed", False))) and float(main_grasp_state.get("ee_block_dist", 1e9)) <= _thresh:
+				_do_grab = False
+				if float(main_grasp_state.get("ee_block_dist", 1e9)) <= _thresh:
+					_do_grab = True
+				# Auto-grasp: if we are close enough to the joint-space IK goal, force a "grasp" (visual-only).
+				if float(d_goal_for_grasp) <= float(auto_grasp_q_goal_thresh):
+					_do_grab = True
+				if (not bool(main_grasp_state.get("grabbed", False))) and _do_grab:
 					main_grasp_state["grabbed"] = True
+					# Mirror the collision-disable behavior from _update_visual_grasp_block's internal trigger.
+					try:
+						if right_block_id is not None and int(right_block_id) >= 0:
+							p_.setCollisionFilterGroupMask(int(right_block_id), -1, 0, 0)
+					except Exception:
+						pass
+					if (k % max(int(print_every), 1)) == 0:
+						try:
+							print(f"[TASK] auto_grasp triggered: ||q-goal||={float(d_goal_for_grasp):.3f} (thresh={float(auto_grasp_q_goal_thresh):.3f})")
+						except Exception:
+							pass
 			except Exception:
 				pass
 			# Optional behavior: after grasp, switch goal to return home
@@ -3200,6 +3226,12 @@ if __name__ == "__main__":
         default=4.0,
         help="Seconds per obstacle-arm task cycle in arm_task mode (cross_pick).",
     )
+    parser.add_argument(
+        "--auto_grasp_q_goal_thresh",
+        type=float,
+        default=0.553,
+        help="In cross_pick, force a visual 'grasp' when ||q-goal|| falls below this threshold (joint-space).",
+    )
     # Default to pausing on collision in GUI rollouts (can disable with --no_pause_on_collision).
     parser.add_argument("--pause_on_collision", action="store_true", default=True)
     parser.add_argument("--no_pause_on_collision", dest="pause_on_collision", action="store_false")
@@ -3348,6 +3380,7 @@ if __name__ == "__main__":
             cross_jitter_hz=float(args_cli.cross_jitter_hz),
             cross_window_ratio=float(args_cli.cross_window_ratio),
             obstacle_task_T=getattr(args_cli, "obstacle_task_T", 4.0),
+            auto_grasp_q_goal_thresh=float(getattr(args_cli, "auto_grasp_q_goal_thresh", 0.553)),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
