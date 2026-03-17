@@ -1564,6 +1564,11 @@ def run_moving_obstacle_rollout(
 		    h_video_out: str = None,
 		    h_video_fps: int = 30,
 	    h_video_window_s: float = 3.0,
+	    wait_for_space_start: bool = True,
+	    dual_view_panel: bool = False,
+	    dual_view_width: int = 480,
+	    dual_view_height: int = 320,
+	    dual_view_fps: float = 20.0,
 	):
 	"""Run a single closed-loop rollout. If move_obstacles=True, obstacles move sinusoidally or as a second arm.
 
@@ -2138,6 +2143,7 @@ def run_moving_obstacle_rollout(
 			"diagnostic_samples": 0,
 		}
 		print("[ROLL] skipped=True reason=no_clean_start")
+		_dual_view_close_best_effort()
 		try:
 			p_.disconnect()
 		except Exception:
@@ -2425,6 +2431,10 @@ def run_moving_obstacle_rollout(
 
 	def _term_handler(signum, frame):
 		_save_rollout_media_best_effort(reason=f"signal {int(signum)}")
+		try:
+			_dual_view_close_best_effort()
+		except Exception:
+			pass
 		raise KeyboardInterrupt
 
 	atexit.register(_save_h_plot_best_effort, "atexit")
@@ -2432,9 +2442,145 @@ def run_moving_obstacle_rollout(
 	signal.signal(signal.SIGINT, _term_handler)
 	signal.signal(signal.SIGTERM, _term_handler)
 
+	dual_view_name = "eval_arm_lidar_dual_view"
+	dual_view_enabled = False
+	dual_view_period_s = 0.05
+	dual_view_last_t = 0.0
+
+	def _dual_view_close_best_effort():
+		nonlocal dual_view_enabled
+		if not dual_view_enabled:
+			return
+		try:
+			cv2.destroyWindow(dual_view_name)
+		except Exception:
+			pass
+		dual_view_enabled = False
+
+	def _dual_view_capture(eye, target, up):
+		w = int(max(64, dual_view_width))
+		h = int(max(64, dual_view_height))
+		proj = p_.computeProjectionMatrixFOV(
+			fov=55.0,
+			aspect=float(w) / float(h),
+			nearVal=0.05,
+			farVal=8.0,
+		)
+		view = p_.computeViewMatrix(
+			cameraEyePosition=[float(eye[0]), float(eye[1]), float(eye[2])],
+			cameraTargetPosition=[float(target[0]), float(target[1]), float(target[2])],
+			cameraUpVector=[float(up[0]), float(up[1]), float(up[2])],
+		)
+		try:
+			_, _, rgba, _, _ = p_.getCameraImage(
+				width=w,
+				height=h,
+				viewMatrix=view,
+				projectionMatrix=proj,
+				renderer=p.ER_BULLET_HARDWARE_OPENGL,
+			)
+		except Exception:
+			_, _, rgba, _, _ = p_.getCameraImage(
+				width=w,
+				height=h,
+				viewMatrix=view,
+				projectionMatrix=proj,
+				renderer=p.ER_TINY_RENDERER,
+			)
+		img = np.asarray(rgba, dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
+		return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+	def _dual_view_tick(force: bool = False):
+		nonlocal dual_view_last_t
+		if not dual_view_enabled:
+			return -1
+		now = float(time.time())
+		if (not force) and ((now - dual_view_last_t) < dual_view_period_s):
+			return cv2.waitKey(1) & 0xFF
+		dual_view_last_t = now
+		try:
+			bpos, _ = p_.getBasePositionAndOrientation(int(robot.robotId))
+			target = np.array([float(bpos[0]), float(bpos[1]), float(bpos[2]) + 0.45], dtype=np.float32)
+		except Exception:
+			target = np.array([0.0, 0.0, 0.45], dtype=np.float32)
+
+		view_a = _dual_view_capture(
+			eye=target + np.array([1.35, -1.10, 0.85], dtype=np.float32),
+			target=target,
+			up=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+		)
+		view_b = _dual_view_capture(
+			eye=target + np.array([-0.05, 1.55, 1.05], dtype=np.float32),
+			target=target + np.array([0.0, 0.0, -0.08], dtype=np.float32),
+			up=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+		)
+		cv2.putText(view_a, "View A", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 220, 60), 2, cv2.LINE_AA)
+		cv2.putText(view_b, "View B", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 220, 60), 2, cv2.LINE_AA)
+		panel = cv2.hconcat([view_a, view_b])
+		cv2.imshow(dual_view_name, panel)
+		return cv2.waitKey(1) & 0xFF
+
+	try:
+		has_gui = False
+		try:
+			conn_info = p_.getConnectionInfo()
+			has_gui = int(conn_info.get("connectionMethod", -1)) == int(p.GUI)
+		except Exception:
+			has_gui = bool(getattr(dm, "GUI", 0))
+		if bool(dual_view_panel) and has_gui:
+			dual_view_period_s = 1.0 / float(max(1.0, float(dual_view_fps)))
+			cv2.namedWindow(dual_view_name, cv2.WINDOW_NORMAL)
+			dual_view_enabled = True
+			_dual_view_tick(force=True)
+			print(f"[VIEW] dual-view panel enabled: {dual_view_name}")
+	except Exception as e:
+		dual_view_enabled = False
+		print(f"[VIEW] WARN: failed to open dual-view panel: {e}")
+	try:
+		atexit.register(_dual_view_close_best_effort)
+	except Exception:
+		pass
+
+	def _wait_for_space_to_start():
+		if not bool(wait_for_space_start):
+			return
+		has_gui = False
+		try:
+			conn_info = p_.getConnectionInfo()
+			has_gui = int(conn_info.get("connectionMethod", -1)) == int(p.GUI)
+		except Exception:
+			has_gui = bool(getattr(dm, "GUI", 0))
+		if not has_gui:
+			return
+		print("[ROLL] Build complete. Adjust view now, then press SPACE to start rollout.")
+		print("[ROLL] Press ESC to abort before rollout starts.")
+		key_triggered = int(getattr(p, "KEY_WAS_TRIGGERED", 1))
+		while True:
+			panel_key = _dual_view_tick()
+			if panel_key == 32:
+				print("[ROLL] SPACE pressed (panel). Starting rollout.")
+				return
+			if panel_key == 27:
+				raise KeyboardInterrupt("Rollout aborted before start (panel ESC).")
+			try:
+				keys = p_.getKeyboardEvents()
+			except Exception:
+				keys = {}
+			space_evt = int(keys.get(ord(" "), 0))
+			esc_evt = int(keys.get(27, 0))
+			if (space_evt & key_triggered) != 0:
+				print("[ROLL] SPACE pressed. Starting rollout.")
+				return
+			if (esc_evt & key_triggered) != 0:
+				raise KeyboardInterrupt("Rollout aborted before start (ESC).")
+			time.sleep(0.03)
+
+	_wait_for_space_to_start()
+
 	wall_t0 = time.time()
 	for k in range(steps):
 		step_wall_t0 = time.time()
+		_dual_view_tick()
 		# Base time used for obstacle motion
 		t_base = (k * dm.dt) * float(obstacle_speed_scale)
 		# Optionally speed up ONLY the obstacle arm (separate from rigid obstacles)
@@ -2976,6 +3122,7 @@ def run_moving_obstacle_rollout(
 			" qp_infeasible=", result.get("qp_infeasible_count"),
 			" u_jitter_mean=", result.get("u_jitter_mean"))
 	# Best-effort cleanup to avoid BulletClient __del__ warnings on interpreter shutdown
+	_dual_view_close_best_effort()
 	try:
 		p_.disconnect()
 	except Exception:
@@ -2994,6 +3141,10 @@ def run_moving_obstacle_rollout(
 		pass
 	try:
 		atexit.unregister(_hvid_close_best_effort)
+	except Exception:
+		pass
+	try:
+		atexit.unregister(_dual_view_close_best_effort)
 	except Exception:
 		pass
 	return result
@@ -3531,6 +3682,26 @@ if __name__ == "__main__":
     parser.add_argument("--use_motor_control", action="store_true", help="Use pybullet motor control for the main robot (reduces floor tunneling).")
     parser.add_argument("--max_dq_per_step", type=float, default=0.03, help="Max joint increment per step (rad) to avoid tunneling.")
     parser.add_argument("--no_floor_pause", action="store_true", help="Disable pausing when a link penetrates below the floor tolerance.")
+    parser.add_argument(
+        "--wait_for_space_start",
+        action="store_true",
+        default=True,
+        help="In GUI rollout, wait after scene build and start only when SPACE is pressed.",
+    )
+    parser.add_argument(
+        "--no_wait_for_space_start",
+        dest="wait_for_space_start",
+        action="store_false",
+        help="Disable waiting for SPACE and start rollout immediately.",
+    )
+    parser.add_argument(
+        "--dual_view_panel",
+        action="store_true",
+        help="Open a side panel showing two camera views during rollout (GUI only).",
+    )
+    parser.add_argument("--dual_view_width", type=int, default=480, help="Width per view in dual-view panel.")
+    parser.add_argument("--dual_view_height", type=int, default=320, help="Height per view in dual-view panel.")
+    parser.add_argument("--dual_view_fps", type=float, default=20.0, help="Refresh FPS for dual-view panel.")
 
     args_cli = parser.parse_args()
     _seed_all(int(args_cli.seed))
@@ -3659,6 +3830,11 @@ if __name__ == "__main__":
             h_video_out=getattr(args_cli, "h_video_out", None),
             h_video_fps=int(getattr(args_cli, "h_video_fps", 30)),
             h_video_window_s=float(getattr(args_cli, "h_video_window_s", 3.0)),
+            wait_for_space_start=bool(getattr(args_cli, "wait_for_space_start", True)),
+            dual_view_panel=bool(getattr(args_cli, "dual_view_panel", False)),
+            dual_view_width=int(getattr(args_cli, "dual_view_width", 480)),
+            dual_view_height=int(getattr(args_cli, "dual_view_height", 320)),
+            dual_view_fps=float(getattr(args_cli, "dual_view_fps", 20.0)),
         )
         if args_cli.out is not None:
             os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
