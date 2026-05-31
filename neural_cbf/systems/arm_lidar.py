@@ -332,9 +332,15 @@ class ArmLidar(ArmDynamics):
             origin = origins[:, idx, :]
             rotation_matrix = rotation_matrixs[:, idx, :, :]
 
-            sampled_index = torch.randint(
-                low=0, high=global_obs.shape[1], size=(self.ray_per_sensor, 1), device=x.device
-            ).squeeze().int()
+            if global_obs.shape[1] >= self.ray_per_sensor:
+                sampled_index = torch.linspace(
+                    0,
+                    global_obs.shape[1] - 1,
+                    steps=self.ray_per_sensor,
+                    device=x.device,
+                ).round().long()
+            else:
+                sampled_index = torch.arange(self.ray_per_sensor, device=x.device).long() % global_obs.shape[1]
             raw_results = torch.index_select(global_obs, dim=1, index=sampled_index)
             pos = raw_results[:, :, :3]
             offset_pos = torch.transpose(
@@ -490,7 +496,18 @@ class ArmLidar(ArmDynamics):
                 t0 = time.time()
 
             if self.env is not None and self.env.obstacle_robot is not None:
-                self.env.step_obstacle(step)
+                has_dynamic_obstacle = (
+                    self.env.obstacle_traj is not None
+                    and x.shape[1] > self.n_dims
+                    and self.obstacle_qdot_dim > 0
+                )
+                if has_dynamic_obstacle:
+                    _, traj_idx, step_idx = self.get_obstacle_meta_from_datax(x[i : i + 1])
+                    if traj_idx is not None and step_idx is not None:
+                        self.env.obstacle_traj_idx = int(traj_idx[0].item())
+                        self.env.apply_obstacle_step(int(step_idx[0].item()) + step)
+                elif i == 0:
+                    self.env.step_obstacle(step)
 
             # observation
             if update_observation:
@@ -559,6 +576,9 @@ class ArmLidar(ArmDynamics):
             _, traj_idx, step_idx = self.get_obstacle_meta_from_datax(x)
         for i in range(x.shape[0]):
             self.robot.set_joint_position(self.robot.body_joints, x[i, : self.q_dims])
+            if not self.robot.check_self_collision_free():
+                unsafe_mask[i] = True
+                continue
             traj_i = int(traj_idx[i].item())
             step_i = int(step_idx[i].item())
             self.env.obstacle_traj_idx = traj_i
@@ -573,7 +593,7 @@ if __name__ == "__main__":
     problem_num = 1000
     obstacle_num = 8
 
-    robot_name = "yumi"
+    robot_name = "panda"
     nominal_params = {"m1": 5.76}
     controller_period = 1 / 30
     simulation_dt = 1 / 120

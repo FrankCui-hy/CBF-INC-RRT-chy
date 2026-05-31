@@ -68,6 +68,15 @@ def _raycast_obstacle_robot(
     return p_gt, n_gt, m, hit_dist
 
 
+def _robot_min_distance(env: ArmEnv, robot_a, robot_b, distance: float) -> Tuple[float, bool]:
+    """Return PyBullet closest-body signed distance and contact status."""
+    env.p.performCollisionDetection()
+    pts = env.p.getClosestPoints(robot_a.robotId, robot_b.robotId, distance=float(distance))
+    min_dist = min((float(pt[8]) for pt in pts), default=float(distance))
+    contact = len(env.p.getContactPoints(robot_a.robotId, robot_b.robotId)) > 0 or min_dist <= 0.0
+    return min_dist, bool(contact)
+
+
 def _cone_dirs_local(num_rays: int, max_angle_deg: float) -> np.ndarray:
     """Generate local-frame unit rays within a cone around +Z."""
     max_angle_rad = np.deg2rad(max(1e-3, float(max_angle_deg)))
@@ -295,13 +304,16 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
                 no_hit_fill=no_hit_fill,
             )
 
-            min_dist = float(hit_dist.min())
-            if min_dist <= unsafe_dist:
+            geom_dist, geom_contact = _robot_min_distance(env, ego_robot, obs_robot, distance=max(safe_dist, unsafe_dist))
+            self_collision = not ego_robot.check_self_collision_free()
+            if self_collision or geom_contact or geom_dist <= unsafe_dist:
                 y = -1.0
-            elif min_dist >= safe_dist:
+            elif geom_dist >= safe_dist:
                 y = 1.0
             else:
-                y = 1.0
+                q_ego = q_ego_next
+                q_obs = q_obs_next
+                continue
 
             buf["q_ego"].append(q_ego.detach().cpu().clone())
             buf["qdot_ego"].append(qdot_ego.detach().cpu().clone())
@@ -317,6 +329,12 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
 
             q_ego = q_ego_next
             q_obs = q_obs_next
+
+    if not buf["q_ego"]:
+        raise RuntimeError(
+            "No labeled samples were collected. Adjust safe_dist/unsafe_dist, near sampling, "
+            "or trajectory noise; the current config left every sample in the ambiguous band."
+        )
 
     out = {k: torch.stack(v, dim=0) for k, v in buf.items()}
     out["meta"] = {

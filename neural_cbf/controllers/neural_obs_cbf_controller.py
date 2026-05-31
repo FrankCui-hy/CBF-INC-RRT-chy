@@ -181,20 +181,30 @@ class NeuralObsCBFController(pl.LightningModule, CBFController):
 		#   2.) h < 0 in the safe region
 		h_safe = h[safe_mask]
 		safe_violation = F.relu(self.safe_level + h_safe)
-		safe_h_term = self.loss_config["safe_classification_weight"] * safe_violation.mean()
+		safe_h_term = self.loss_config["safe_classification_weight"] * (
+			safe_violation.mean() if safe_violation.nelement() > 0 else torch.zeros((), dtype=h.dtype, device=h.device)
+		)
 		loss.append(("BF safe region term", safe_h_term))
 		if accuracy:
-			safe_h_acc = (safe_violation <= self.safe_level).sum() / safe_violation.nelement()
+			safe_h_acc = (
+				(safe_violation <= 1e-6).sum() / safe_violation.nelement()
+				if safe_violation.nelement() > 0 else torch.zeros((), dtype=h.dtype, device=h.device)
+			)
 			loss.append(("BF safe region accuracy", safe_h_acc))
 
 		#   3.) h > 0 in the unsafe region
 		h_unsafe = h[unsafe_mask]
 		unsafe_violation = F.relu(self.unsafe_level - h_unsafe)
-		unsafe_h_term = self.loss_config["unsafe_classification_weight"] * unsafe_violation.mean()
+		unsafe_h_term = self.loss_config["unsafe_classification_weight"] * (
+			unsafe_violation.mean() if unsafe_violation.nelement() > 0 else torch.zeros((), dtype=h.dtype, device=h.device)
+		)
 		loss.append(("BF unsafe region term", unsafe_h_term))
 		if accuracy:
 			# print((unsafe_violation <= self.unsafe_level).sum(), unsafe_violation.nelement())
-			unsafe_h_acc = (unsafe_violation <= self.unsafe_level).sum() / unsafe_violation.nelement()
+			unsafe_h_acc = (
+				(unsafe_violation <= 1e-6).sum() / unsafe_violation.nelement()
+				if unsafe_violation.nelement() > 0 else torch.zeros((), dtype=h.dtype, device=h.device)
+			)
 			loss.append(("BF unsafe region accuracy", unsafe_h_acc))
 
 		return loss

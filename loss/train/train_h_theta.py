@@ -9,7 +9,11 @@ from loss.data.dataset import build_dataloaders
 from loss.losses.cbf_losses import compute_cbf_losses
 from loss.models.g_phi import SurrogateObservationNet
 from loss.models.h_theta import NeuralCBF
-from loss.train.derivatives import composite_jvp_h_and_hdot, decomposed_h_and_hdot
+from loss.train.derivatives import (
+    composite_h_and_min_cbf_derivative,
+    composite_jvp_h_and_hdot,
+    decomposed_h_and_hdot,
+)
 from loss.utils.config import load_config
 from loss.utils.io import save_checkpoint
 from loss.utils.seed import set_seed
@@ -47,7 +51,22 @@ def build_g_phi_from_ckpt(cfg, device: torch.device):
     return model
 
 
-def run_epoch(h_model, g_model, loader, optimizer, cbf_cfg, derivative_mode, device, train=True):
+def _control_bounds_from_cfg(cfg, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    qp_cfg = cfg.get("eval", {}).get("qp", {})
+    if "u_min" in cfg.get("loss", {}).get("cbf", {}):
+        cbf_cfg = cfg["loss"]["cbf"]
+        u_min = cbf_cfg["u_min"]
+        u_max = cbf_cfg["u_max"]
+    else:
+        u_min = qp_cfg.get("u_min", [-1.5] * int(cfg["system"]["n_ego"]))
+        u_max = qp_cfg.get("u_max", [1.5] * int(cfg["system"]["n_ego"]))
+    return (
+        torch.tensor(u_min, dtype=torch.float32, device=device),
+        torch.tensor(u_max, dtype=torch.float32, device=device),
+    )
+
+
+def run_epoch(h_model, g_model, loader, optimizer, cbf_cfg, derivative_mode, device, train=True, u_bounds=None):
     h_model.train(train)
     g_model.eval()
 
@@ -62,7 +81,12 @@ def run_epoch(h_model, g_model, loader, optimizer, cbf_cfg, derivative_mode, dev
         qdo = batch["qdot_obs"]
         y = batch["y"]
 
-        if derivative_mode == "composite_jvp":
+        use_sampled_ego_velocity = bool(cbf_cfg.get("use_sampled_ego_velocity", False))
+        if not use_sampled_ego_velocity:
+            if u_bounds is None:
+                raise ValueError("u_bounds must be provided when using the paper CBF infimum loss.")
+            h, hdot = composite_h_and_min_cbf_derivative(g_model, h_model, qe, qo, qdo, u_bounds[0], u_bounds[1])
+        elif derivative_mode == "composite_jvp":
             h, hdot = composite_jvp_h_and_hdot(g_model, h_model, qe, qo, qde, qdo)
         elif derivative_mode == "decomposed":
             h, hdot = decomposed_h_and_hdot(g_model, h_model, qe, qo, qde, qdo)
@@ -134,8 +158,9 @@ def main() -> None:
     derivative_mode = str(tcfg.get("derivative_mode", "composite_jvp"))
 
     for epoch in range(start_epoch, epochs):
-        tr = run_epoch(h_model, g_model, data_bundle.train_loader, optimizer, cfg["loss"]["cbf"], derivative_mode, device, train=True)
-        va = run_epoch(h_model, g_model, data_bundle.val_loader, optimizer, cfg["loss"]["cbf"], derivative_mode, device, train=False)
+        u_bounds = _control_bounds_from_cfg(cfg, device)
+        tr = run_epoch(h_model, g_model, data_bundle.train_loader, optimizer, cfg["loss"]["cbf"], derivative_mode, device, train=True, u_bounds=u_bounds)
+        va = run_epoch(h_model, g_model, data_bundle.val_loader, optimizer, cfg["loss"]["cbf"], derivative_mode, device, train=False, u_bounds=u_bounds)
 
         print(
             f"[h_theta][{epoch:03d}] "

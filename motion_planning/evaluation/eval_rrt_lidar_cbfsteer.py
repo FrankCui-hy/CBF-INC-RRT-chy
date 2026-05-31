@@ -46,11 +46,25 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 	device = 'cpu' if not torch.cuda.is_available() else f"cuda:{int(float(kwargs['devices']))}"
 
 	model_file_list = os.listdir(method_model_dir)
+	model_file = None
 	for file in model_file_list:
 		if file.endswith('.ckpt'):
 			model_file = os.path.join(method_model_dir, file)
 			break
+	if model_file is None:
+		raise FileNotFoundError(f"No .ckpt file found in {method_model_dir}")
 	print(model_file)
+	load_kwargs = dict(kwargs)
+	for key, default in (
+		("ab_mode", "B_with_normal"),
+		("baseline", True),
+		("obs_backend", "raw"),
+		("gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+		("train_use_fd", True),
+	):
+		if key not in load_kwargs or load_kwargs[key] is None:
+			arg_value = getattr(args, key, None)
+			load_kwargs[key] = default if arg_value is None else arg_value
 	cbf_controller = NeuralLidarCBFController.load_from_checkpoint(
 		model_file,
 		dynamics_model=dynamics_model, scenarios=[nominal_params],
@@ -59,7 +73,7 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 		cbf_relaxation_penalty=args.cbf_relaxation_penalty,
 		datamodule=None, experiment_suite=None,
 		map_location=device,
-		**kwargs,
+		**load_kwargs,
 	)
 
 	cbf_controller.to(device)
@@ -84,4 +98,3 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 		# print(solutions[-1])
 
 	return solutions
-

@@ -155,35 +155,54 @@ def global_explore(search_tree,
     t1 = time.time()
     t_dict['explore_1'] = (t1 - t0) / len(sample_states)
 
-    # PARAM by default 10
-    assert RRT_PARAM % 20 == 0
     current_states = non_terminal_states[nearest_idxs]
-    parent_idxs = nearest_idxs.copy()
-    for i in range(RRT_PARAM // 20):
+    parent_idxs = np.array([search_tree.non_terminal_idxes[idx] for idx in nearest_idxs], dtype=int)
+    active = np.ones(len(current_states), dtype=bool)
+    last_states = current_states.copy()
+    last_edges = [[state] for state in current_states]
+    last_no_collisions = np.ones(len(current_states), dtype=bool)
+    steer_time_dict = {'complete_sample': 0., 'cl_dynamics': 0.}
+    for i in range(max(1, int(np.ceil(RRT_PARAM / 20)))):
+        active_idxs = np.flatnonzero(active)
+        if len(active_idxs) == 0:
+            break
         if steer_type == 'line':
-            new_states, no_collisions, steer_time_dict, edge_states_list = steer(dynamics_model.u_nominal, dynamics_model, sample_states, current_states, RRT_step=20, device='cpu')
+            new_states, no_collisions, steer_time_dict, edge_states_list = steer(
+                dynamics_model.u_nominal, dynamics_model, sample_states[active_idxs], current_states[active_idxs], RRT_step=20, device='cpu'
+            )
         elif steer_type == 'cbf':
             assert hasattr(controller, 'u')
-            new_states, no_collisions, steer_time_dict, edge_states_list = steer(controller.u, dynamics_model, sample_states, current_states, RRT_step=20, device=controller.device)
+            new_states, no_collisions, steer_time_dict, edge_states_list = steer(
+                controller.u, dynamics_model, sample_states[active_idxs], current_states[active_idxs], RRT_step=20, device=controller.device
+            )
         else:
             raise ValueError("Unknown steer_type, must be one of {'line', 'cbf'}.")
 
-        for ii, sample_state, new_state, parent_idx, no_collision, edge_states in zip(range(len(parent_idxs)), sample_states, new_states,
-                                                                                   parent_idxs, no_collisions,
-                                                                                   edge_states_list):
-            leaf_id = insert_new_state(search_tree, new_state, sample_state, edge_states, \
-                                   parent_idx, no_collision, bool(dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).numpy()))
-            parent_idxs[ii] = leaf_id
-        current_states = new_states
+        for local_idx, ii in enumerate(active_idxs):
+            sample_state = sample_states[ii]
+            new_state = new_states[local_idx]
+            no_collision = bool(no_collisions[local_idx])
+            edge_states = edge_states_list[local_idx]
+            last_states[ii] = new_state
+            last_edges[ii] = edge_states
+            last_no_collisions[ii] = no_collision
+            done = bool(no_collision and dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).item())
+            if no_collision:
+                leaf_id = insert_new_state(search_tree, new_state, sample_state, edge_states, \
+                                           parent_idxs[ii], no_collision, done)
+                parent_idxs[ii] = leaf_id
+                current_states[ii] = new_state
+            if (not no_collision) or done:
+                active[ii] = False
 
     t2 = time.time()
 
-    for sample_state, new_state, nearest_idx, no_collision in zip(sample_states, new_states, nearest_idxs, no_collisions):
+    for sample_state, new_state, nearest_idx, no_collision in zip(sample_states, last_states, nearest_idxs, last_no_collisions):
         # if not no_collision:
         #     print('warning')
         t_dict['steertime_division'] = {k: v for k, v in steer_time_dict.items()}
         t_dict['total_steer'] = (t2 - t1) / len(sample_states)
-        done = bool(dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).numpy())
+        done = bool(no_collision and dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).item())
         t_dict['total_explore']=(time.time()-t0) / len(sample_states)
         # print(t_dict)
         yield new_state, sample_state, search_tree.non_terminal_idxes[nearest_idx], no_collision, done, t_dict
@@ -195,7 +214,7 @@ def steer(u, dynamics_model, sample_states, nearests, RRT_step=10, device='cpu')
     t0 = time.time()
     no_collisions = [True for _ in range(len(sample_states))]
     xs_list = [[] for _ in range(len(sample_states))]
-    controller_update_freq = dynamics_model.controller_dt // dynamics_model.dt
+    controller_update_freq = max(1, int(round(float(dynamics_model.controller_dt) / float(dynamics_model.dt))))
 
     dynamics_model.set_intermediate_goals(sample_states)
     x_current = dynamics_model.complete_sample_with_observations(torch.tensor(nearests, device=device), len(nearests))
@@ -222,7 +241,11 @@ def steer(u, dynamics_model, sample_states, nearests, RRT_step=10, device='cpu')
         time_dict['cl_dynamics'] += (t2 - t1) / len(sample_states)
         for i in range(len(xs_list)):
             stuck = len(xs_list[i]) > 10 and np.linalg.norm(xs_list[i][-1] - xs_list[i][-10]) < 3e-2
-            no_collisions[i] = no_collisions[i] and not stuck and not dynamics_model.unsafe_mask(x_current[i].reshape(1, -1))
+            no_collisions[i] = (
+                no_collisions[i]
+                and not stuck
+                and bool(dynamics_model.safe_mask(x_current[i].reshape(1, -1)).all().item())
+            )
             if no_collisions[i]:
                 xs_list[i].append(x_current[i].cpu().squeeze().numpy())
         if not True in no_collisions:

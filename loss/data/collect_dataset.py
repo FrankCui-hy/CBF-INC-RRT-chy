@@ -97,8 +97,9 @@ def build_episode_samples(cfg: dict[str, Any], device: torch.device) -> dict[str
             elif min_dist >= safe_dist:
                 y = torch.tensor(1.0, device=device)
             else:
-                # Keep binary labels; ambiguous points are treated as safe by default.
-                y = torch.tensor(1.0, device=device)
+                q_ego = q_ego_next
+                q_obs = q_obs_next
+                continue
 
             buf["q_ego"].append(q_ego.clone())
             buf["qdot_ego"].append(qdot_ego.clone())
@@ -114,6 +115,12 @@ def build_episode_samples(cfg: dict[str, Any], device: torch.device) -> dict[str
 
             q_ego = q_ego_next
             q_obs = q_obs_next
+
+    if not buf["q_ego"]:
+        raise RuntimeError(
+            "No labeled samples were collected. Adjust safe_dist/unsafe_dist or sampling noise; "
+            "the current config left every sample in the ambiguous band."
+        )
 
     out = {k: torch.stack(v, dim=0).cpu() for k, v in buf.items()}
     out["meta"] = {

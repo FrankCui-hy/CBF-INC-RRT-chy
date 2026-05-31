@@ -29,7 +29,26 @@ from neural_cbf.training.utils import current_git_hash
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
+def normalize_method_flags(args):
+    if getattr(args, "baseline", None) is None:
+        args.baseline = False
+
+    if args.baseline:
+        if getattr(args, "obs_backend", None) is None:
+            args.obs_backend = "raw"
+        if getattr(args, "train_use_fd", None) is None:
+            args.train_use_fd = True
+    else:
+        if getattr(args, "obs_backend", None) is None:
+            args.obs_backend = "gphi"
+        if getattr(args, "train_use_fd", None) is None:
+            args.train_use_fd = False
+    return args
+
+
 def main(args):
+    args = normalize_method_flags(args)
+
     # Define the scenarios
     nominal_params = {}
     scenarios = [
@@ -148,8 +167,13 @@ def main(args):
         "unsafe_classification_weight": args.unsafe_classification_weight,
         "descent_violation_weight": args.descent_violation_weight,
         "hdot_divergence_weight": args.hdot_divergence_weight,
+        "epsilon": getattr(args, "epsilon", 0.0),
     }
-    version_name = args.version
+    requested_version = args.version
+    method_tag = "baseline_fd_raw" if args.baseline else "safe_dual_gphi_chain"
+    version_name = requested_version if method_tag in requested_version else f"{requested_version}_{method_tag}"
+    args.method_tag = method_tag
+    args.version = version_name
     cbf_controller = NeuralLidarCBFController(dynamics_model, scenarios, data_module, experiment_suite,
                                               safe_level=args.safe_level,
                                               unsafe_level=args.unsafe_level,
@@ -168,7 +192,7 @@ def main(args):
                                               obs_backend=args.obs_backend,
                                               gphi_ckpt=args.gphi_ckpt,
                                               train_use_fd=args.train_use_fd,
-                                              use_neural_actor="RL" in version_name,)
+                                              use_neural_actor="RL" in requested_version,)
 
     # Initialize the logger and trainer
     tb_logger = pl_loggers.TensorBoardLogger(
@@ -208,7 +232,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
 
     # environment params
-    parser.add_argument('--robot_name', type=str, default='magician')
+    parser.add_argument('--robot_name', type=str, default='panda')
     parser.add_argument('--version', type=str, default="multiple_seeds")
 
     # simulation params
@@ -245,6 +269,7 @@ if __name__ == "__main__":
     parser.add_argument('--unsafe_classification_weight', type=float, default=20, help='weight of unsafe region classification loss')
     parser.add_argument('--descent_violation_weight', type=float, default=2, help='weight of descent violation loss')
     parser.add_argument('--hdot_divergence_weight', type=float, default=2e-2, help='weight of hdot divergence loss')
+    parser.add_argument('--epsilon', type=float, default=0.0, help='CBF residual margin in relu(epsilon + hdot + alpha*h)')
 
     # observation params
     parser.add_argument('--point_dim', type=int, default=3, help='cartesian or spherical coordinates')
@@ -284,13 +309,18 @@ if __name__ == "__main__":
         choices=['A_no_normal', 'B_with_normal'],
         help='A/B switch: A masks normal channels before encoder, B uses full observation.',
     )
-    parser.add_argument('--baseline', action='store_true', help='Use legacy FD/simulated hdot chain.')
-    parser.add_argument('--obs_backend', type=str, default='gphi', choices=['gphi', 'raw'],
-                        help='Observation backend for training. Default uses gphi.')
+    parser.add_argument('--baseline', dest='baseline', action='store_true', default=None,
+                        help='Use legacy FD/simulated hdot chain.')
+    parser.add_argument('--no_baseline', dest='baseline', action='store_false',
+                        help='Use Safe_Dual analytic g_phi chain.')
+    parser.add_argument('--obs_backend', type=str, default=None, choices=['gphi', 'raw'],
+                        help='Observation backend for training. Defaults to raw for baseline and gphi otherwise.')
     parser.add_argument('--gphi_ckpt', type=str, default='loss/outputs_real_v2/checkpoints/g_phi_best.pt',
                         help='Checkpoint path for loss.models.g_phi when obs_backend=gphi.')
-    parser.add_argument('--train_use_fd', action='store_true',
+    parser.add_argument('--train_use_fd', dest='train_use_fd', action='store_true', default=None,
                         help='Compute FD hdot in training (debug only, slower). Default: disabled.')
+    parser.add_argument('--no_train_use_fd', dest='train_use_fd', action='store_false',
+                        help='Use analytic/min-control hdot in training.')
     # ## for debugging
     # parser.add_argument('--max_episode', type=int, default=2)
     # parser.add_argument('--trajectories_per_episode', type=int, default=5)

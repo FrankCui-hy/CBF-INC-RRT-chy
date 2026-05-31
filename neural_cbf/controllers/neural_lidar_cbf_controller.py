@@ -120,7 +120,8 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		self.baseline = bool(kwargs.get("baseline", False))
 		self.obs_backend = kwargs.get("obs_backend", "gphi")
 		self.gphi_ckpt = kwargs.get("gphi_ckpt", "")
-		self.train_use_fd = bool(kwargs.get("train_use_fd", False))
+		self.train_use_fd = bool(kwargs.get("train_use_fd", self.baseline))
+		self._validate_method_config()
 		self.use_gphi_chain = (not self.baseline) and self.obs_backend == "gphi"
 		self.g_phi = None
 		if self.use_gphi_chain:
@@ -139,6 +140,34 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			self.actor_layers["output_linear"] = nn.Linear(self.h_hidden_size, self.dynamics_model.n_dims)
 			self.actor_layers["output_clamp"] = nn.Sigmoid()
 			self.actor_nn = nn.Sequential(self.actor_layers)
+
+	def _validate_method_config(self):
+		if self.obs_backend not in ("gphi", "raw"):
+			raise ValueError(f"Unknown obs_backend={self.obs_backend}. Use gphi or raw.")
+		if self.baseline:
+			if self.obs_backend != "raw":
+				raise ValueError("baseline=True requires obs_backend='raw'. Use baseline=False for Safe_Dual gphi-chain.")
+			if not self.train_use_fd:
+				raise ValueError("baseline=True requires train_use_fd=True so the baseline uses the legacy FD/simulated Lie derivative.")
+			return
+		if self.obs_backend != "gphi":
+			raise ValueError("Safe_Dual method requires baseline=False and obs_backend='gphi'. Use baseline=True for raw/FD baseline.")
+		if self.train_use_fd:
+			raise ValueError("Safe_Dual method requires train_use_fd=False so the analytic g_phi chain derivative is used.")
+		if self.gphi_ckpt is None or str(self.gphi_ckpt).strip() == "":
+			raise ValueError("Safe_Dual method requires a non-empty gphi_ckpt.")
+
+	def method_metadata(self) -> dict:
+		method = "baseline_fd_raw" if self.baseline else "safe_dual_gphi_chain"
+		return {
+			"method": method,
+			"baseline": bool(self.baseline),
+			"obs_backend": str(self.obs_backend),
+			"ab_mode": str(self.ab_mode),
+			"train_use_fd": bool(self.train_use_fd),
+			"use_gphi_chain": bool(self.use_gphi_chain),
+			"gphi_ckpt": str(self.gphi_ckpt or ""),
+		}
 
 	def _init_g_phi(self):
 		if SurrogateObservationNet is None:
@@ -219,12 +248,80 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 					q_start = self.dynamics_model.sensor_aux_dims
 					meta[q_start : q_start + self.dynamics_model.obstacle_q_dim] = qo_s
 				row[-self.dynamics_model.state_aux_dims_in_dataset :] = meta
-				row = self._replace_datax_obs_with_gphi(row.unsqueeze(0))
-				return self.h(row).squeeze()
+				return self.h(row.unsqueeze(0)).squeeze()
 
 			_, hdot_i = jvp(H, (qe0, qo0), (qde, qdo), strict=False)
 			hdot_vals.append(hdot_i)
 		return torch.stack(hdot_vals).reshape(-1, 1)
+
+	def V_with_lie_derivatives(
+			self,
+			x: torch.Tensor,
+			data_jacobian: tuple=(),
+			scenarios: Optional[ScenarioList] = None,
+	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+		"""Compute CBF Lie derivatives through H(qe, qo)=h(qe, g_phi(qe, qo)).
+
+		Safe_Dual's dynamic-obstacle CBF uses the chain rule through both ego and
+		obstacle joint states. The parent implementation finite-differences only
+		the ego state and treats the observation as static; keep it as fallback
+		when g_phi metadata is unavailable.
+		"""
+		if not self.use_gphi_chain:
+			return super().V_with_lie_derivatives(x, data_jacobian=data_jacobian, scenarios=scenarios)
+		q_obs = self.dynamics_model.get_obstacle_q_from_datax(x)
+		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(x)
+		if q_obs is None or qdot_obs is None:
+			return super().V_with_lie_derivatives(x, data_jacobian=data_jacobian, scenarios=scenarios)
+
+		t0 = time.time()
+		if scenarios is None:
+			scenarios = self.scenarios
+		n_scenarios = len(scenarios)
+		bs = x.shape[0]
+		V_vals = []
+		Lf_vals = []
+		Lg_vals = []
+
+		if next(self.g_phi.parameters()).device != x.device:
+			self.g_phi = self.g_phi.to(x.device)
+
+		with torch.enable_grad():
+			for i in range(bs):
+				base = x[i].detach()
+				qe0 = x[i, : self.dynamics_model.n_dims].detach().clone().requires_grad_(True)
+				qo0 = q_obs[i].detach().clone().requires_grad_(True)
+				qdo = qdot_obs[i].detach()
+
+				def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+					row = base.clone()
+					row[: self.dynamics_model.n_dims] = qe_s
+					meta = row[-self.dynamics_model.state_aux_dims_in_dataset :].clone()
+					if self.dynamics_model.obstacle_q_dim > 0:
+						q_start = self.dynamics_model.sensor_aux_dims
+						meta[q_start : q_start + self.dynamics_model.obstacle_q_dim] = qo_s
+					row[-self.dynamics_model.state_aux_dims_in_dataset :] = meta
+					return self.h(row.unsqueeze(0)).squeeze()
+
+				h_i = H(qe0, qo0)
+				grad_qe, grad_qo = torch.autograd.grad(
+					h_i,
+					(qe0, qo0),
+					create_graph=bool(self.training),
+					retain_graph=bool(self.training),
+				)
+				dynamic_lf = torch.dot(grad_qo, qdo)
+				V_vals.append(h_i)
+				Lf_vals.append(dynamic_lf.reshape(1))
+				Lg_vals.append(grad_qe)
+
+		V = torch.stack(V_vals, dim=0).reshape(bs)
+		Lf_base = torch.stack(Lf_vals, dim=0).reshape(bs, 1, 1)
+		Lg_base = torch.stack(Lg_vals, dim=0).reshape(bs, 1, self.dynamics_model.n_controls)
+		Lf_V = Lf_base.expand(-1, n_scenarios, -1)
+		Lg_V = Lg_base.expand(-1, n_scenarios, -1)
+
+		return V, Lf_V, Lg_V, {"V_w_Jacobian": time.time() - t0, "lie_derivative": 0.0}
 
 	def derivative_diagnostics(self, data_x: torch.Tensor, u: torch.Tensor, fd_eps: float = 1e-3):
 		"""
@@ -465,6 +562,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		lower_limit = ll.unsqueeze(0).expand(bs, -1).type_as(data_x)
 
 		qp_coef = self.loss_config["descent_violation_weight"]
+		epsilon = float(self.loss_config.get("epsilon", self.loss_config.get("eps", 0.0)))
 		# qp_coef = min(max(0, (self.current_epoch-self.learn_shape_epochs)/50), 1) * self.loss_config["descent_violation_weight"]
 
 		if self.use_neural_actor:
@@ -482,8 +580,8 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 																 data_jacobian=data_jacobian)
 				hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.dt
 			hdot = hdot_auto if hdot_auto is not None else hdot_simulated
-			alpha = torch.where(h < 0, 10, self.clf_lambda).type_as(u)
-			qp_relaxation = F.relu(hdot + torch.multiply(alpha, h))
+			alpha = self.clf_lambda
+			qp_relaxation = F.relu(epsilon + hdot + alpha * h)
 
 			# Minimize the qp relaxation to encourage satisfying the decrease condition
 			qp_relaxation_loss = qp_relaxation.mean() * qp_coef
@@ -495,34 +593,38 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			Lg_V_no_grad = Lg_V.detach().clone().squeeze(1)  # bs * n_control
 
 			h = self.h(data_x)
-			u_coef = self.loss_config["u_coef_in_training"]
-			u = torch.where(Lg_V_no_grad < 0, upper_limit * u_coef, lower_limit * u_coef)
+			u = torch.where(Lg_V_no_grad >= 0, lower_limit, upper_limit)
 
 			hdot_expected = (Lf_V.squeeze(1).squeeze(1) + torch.bmm(Lg_V, u.unsqueeze(2)).squeeze(1).squeeze(
 				1)).unsqueeze(1)
-			hdot_auto = self._compute_hdot_auto(data_x, u)
-			if (hdot_auto is not None) and (not self.train_use_fd):
-				hdot_simulated = hdot_auto.detach()
-			else:
+			if self.train_use_fd:
 				datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.controller_dt,
 																 data_jacobian=data_jacobian)
 				hdot_simulated = (self.h(datax_next) - h) / self.dynamics_model.controller_dt
-			hdot = hdot_auto if hdot_auto is not None else hdot_simulated
+				hdot = hdot_simulated
+			else:
+				hdot = hdot_expected
 			alpha = self.clf_lambda  # torch.where(h < 0, 2 * self.clf_lambda, self.clf_lambda).type_as(x)
-			# qp_relaxation = F.relu(hdot + torch.multiply(alpha, h + self.safe_level))
-			qp_relaxation = F.relu(hdot + torch.multiply(alpha, torch.minimum(h, 2 * self.unsafe_level * torch.ones(*h.shape).type_as(h))).detach())
+			qp_relaxation = F.relu(epsilon + hdot + alpha * h)
 
 			# Minimize the qp relaxation to encourage satisfying the decrease condition
 			qp_relaxation_loss = qp_relaxation.mean() * qp_coef / alpha
 			loss.append(("QP relaxation", qp_relaxation_loss))
 
-			loss.append(("hdot divergence",
-						 self.loss_config["hdot_divergence_weight"] * torch.abs(hdot_simulated - hdot_expected).mean()))
+			divergence_weight = float(self.loss_config.get("hdot_divergence_weight", 0.0))
+			if divergence_weight > 0.0 and self.train_use_fd:
+				loss.append(("hdot divergence", divergence_weight * torch.abs(hdot_simulated - hdot_expected).mean()))
 
 		if accuracy:
-			qp_acc_safe = (qp_relaxation[safe_mask] <= alpha * self.safe_level).sum() / qp_relaxation[safe_mask].nelement()
-			qp_acc_unsafe = (qp_relaxation[unsafe_mask] <= alpha * self.safe_level).sum() / qp_relaxation[unsafe_mask].nelement()
-			qp_acc_boundary = (qp_relaxation[boundary_mask] <= alpha * self.safe_level).sum() / qp_relaxation[boundary_mask].nelement()
+			def _zero_relaxation_rate(mask):
+				vals = qp_relaxation[mask]
+				if vals.nelement() == 0:
+					return torch.zeros((), dtype=qp_relaxation.dtype, device=qp_relaxation.device)
+				return (vals <= 1e-6).sum() / vals.nelement()
+
+			qp_acc_safe = _zero_relaxation_rate(safe_mask)
+			qp_acc_unsafe = _zero_relaxation_rate(unsafe_mask)
+			qp_acc_boundary = _zero_relaxation_rate(boundary_mask)
 			loss.append(("boundary condition accuracy/safe", qp_acc_safe))
 			loss.append(("boundary condition accuracy/unsafe", qp_acc_unsafe))
 			loss.append(("boundary condition accuracy/boundary", qp_acc_boundary))

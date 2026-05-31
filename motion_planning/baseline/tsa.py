@@ -173,9 +173,14 @@ def global_explore(search_tree, dynamics_model, sample_state=None, steer_type='l
     # PARAM by default 10
     # assert RRT_PARAM %20 == 0
     current_state = non_terminal_states[nearest_idx]
-    parent_idx = nearest_idx
+    parent_idx = search_tree.non_terminal_idxes[nearest_idx]
+    start_parent_idx = parent_idx
+    new_state = current_state
+    edge_states = [current_state]
+    no_collision = True
+    done = False
     t_dict['steertime_division'] = {'total_steer': 0, 'insert': 0, 'update_dict': 0}
-    for _ in range(RRT_PARAM//30):
+    for _ in range(max(1, int(np.ceil(RRT_PARAM / 30)))):
         ttt0 = time.time()
         if steer_type == 'line':
             new_state, no_collision, steer_time_dict, edge_states = steer(dynamics_model.u_nominal, dynamics_model, sample_state,
@@ -188,10 +193,12 @@ def global_explore(search_tree, dynamics_model, sample_state=None, steer_type='l
             raise ValueError("Unknown steer_type, must be one of {'line', 'cbf'}.")
         # print(new_state)
         ttt1 = time.time()
-        leaf_id = insert_new_state(search_tree, new_state, sample_state, edge_states, \
-                                   parent_idx, no_collision, bool(dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).numpy()))
-        current_state = new_state
-        parent_idx = leaf_id
+        done = bool(no_collision and dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).item())
+        if no_collision:
+            leaf_id = insert_new_state(search_tree, new_state, sample_state, edge_states, \
+                                       parent_idx, no_collision, done)
+            current_state = new_state
+            parent_idx = leaf_id
         ttt2 = time.time()
         for key in steer_time_dict.keys():
             if not key in t_dict['steertime_division']:
@@ -202,16 +209,16 @@ def global_explore(search_tree, dynamics_model, sample_state=None, steer_type='l
         t_dict['steertime_division']['total_steer'] += ttt1-ttt0
         t_dict['steertime_division']['insert'] += ttt2-ttt1
         t_dict['steertime_division']['update_dict'] += ttt3-ttt2
-        if not no_collision:
+        if (not no_collision) or done:
             break
 
     # if not no_collision:
     #     print('warning')
     t2 = time.time()
     t_dict['total_steer'] = t2 - t1
-    done = bool(dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).numpy())
+    done = bool(no_collision and dynamics_model.goal_mask(torch.Tensor(new_state).unsqueeze(0)).item())
     t_dict['total_explore']=time.time()-t0
-    return new_state, sample_state, search_tree.non_terminal_idxes[nearest_idx], no_collision, done, t_dict, edge_states
+    return new_state, sample_state, start_parent_idx, no_collision, done, t_dict, edge_states
 
 
 @torch.no_grad()
@@ -220,7 +227,7 @@ def steer(u, dynamics_model, new_state, nearest, RRT_step=10, device='cpu'):
     t0 = time.time()
     no_collision = True
     x_list = [nearest]
-    controller_update_freq = dynamics_model.controller_dt // dynamics_model.dt
+    controller_update_freq = max(1, int(round(float(dynamics_model.controller_dt) / float(dynamics_model.dt))))
 
     dynamics_model.set_intermediate_goals(new_state)
     x_current = dynamics_model.complete_sample_with_observations(torch.tensor(nearest, device=device).unsqueeze(0), 1)
@@ -248,7 +255,7 @@ def steer(u, dynamics_model, new_state, nearest, RRT_step=10, device='cpu'):
         time_dict['cl_dynamics'] += tt_list[0]
         time_dict['complete_sample'] += tt_list[1]
         tt1 = time.time()
-        if dynamics_model.unsafe_mask(x_current):
+        if not bool(dynamics_model.safe_mask(x_current).all().item()):
             no_collision = False
             break
 

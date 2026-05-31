@@ -278,10 +278,6 @@ class EpisodicDataModule(pl.LightningDataModule):
 										  f'{ray_per_sensor_ds}_{observation_type}_vel{int(self.model.include_point_velocity)}_' \
 										  f'{aux_layout_ver}_{int(self.noise_level * 1e2)}_{self.max_episode}_{self.trajectories_per_episode}_{self.trajectory_length}_' \
 										  f'{self.fixed_samples}.pt'
-		elif "mindis" in str(self.model):
-			dataset_path = dataset_path + f'{int(100 * self.model.dis_threshold)}_{self.model.env.obstacle_num}_' \
-										  f'{int(self.noise_level * 1e2)}_{self.max_episode}_{self.trajectories_per_episode}_{self.trajectory_length}_' \
-										  f'{self.fixed_samples}.pt'
 		else:
 			raise NotImplementedError(f"Unknown model {self.model}")
 

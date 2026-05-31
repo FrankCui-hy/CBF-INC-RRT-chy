@@ -80,7 +80,7 @@ def insert_new_state(search_tree, state, nominal_state, x_list, parent_idx, no_c
     search_tree.path_lengths.append(search_tree.path_lengths[-1])
     search_tree.costs.append(-1)
 
-    if not done:
+    if no_collision and not done:
         search_tree.non_terminal_states = np.append(search_tree.non_terminal_states, [state], axis=0)
         search_tree.non_terminal_idxes.append(search_tree.states.shape[0] - 1)
 

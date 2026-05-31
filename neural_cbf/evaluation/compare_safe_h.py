@@ -97,43 +97,85 @@ def build_dynamics_and_suite(args):
     return dm, suite
 
 
-def merge_args_from_ckpt(args):
-    """Overwrite runtime args with ckpt hyper-parameters when available."""
+HP_KEYS = [
+    "robot_name",
+    "dataset_name",
+    "dis_threshold",
+    "simulation_dt",
+    "controller_period",
+    "n_observation",
+    "point_dim",
+    "n_observation_dataset",
+    "observation_type",
+    "include_point_velocity",
+    "safe_classification_weight",
+    "unsafe_classification_weight",
+    "descent_violation_weight",
+    "hdot_divergence_weight",
+    "u_coef_in_training",
+    "cbf_hidden_layers",
+    "cbf_hidden_size",
+    "cbf_alpha",
+    "cbf_relaxation_penalty",
+    "feature_dim",
+    "per_feature_dim",
+    "use_bn",
+    "ab_mode",
+    "baseline",
+    "obs_backend",
+    "gphi_ckpt",
+    "train_use_fd",
+]
+
+DYNAMICS_COMPAT_KEYS = [
+    "robot_name",
+    "dataset_name",
+    "dis_threshold",
+    "simulation_dt",
+    "controller_period",
+    "n_observation",
+    "point_dim",
+    "n_observation_dataset",
+    "observation_type",
+    "include_point_velocity",
+]
+
+METHOD_KEYS = ["ab_mode", "baseline", "obs_backend", "gphi_ckpt", "train_use_fd"]
+
+
+def load_hparams_from_ckpt(ckpt_path: str) -> dict:
     try:
         with _torch_load_weights_only_false():
-            ck = torch.load(args.ckpt_a, map_location="cpu")
-        hp = ck.get("hyper_parameters", {}) if isinstance(ck, dict) else {}
+            ck = torch.load(ckpt_path, map_location="cpu")
+        return ck.get("hyper_parameters", {}) if isinstance(ck, dict) else {}
     except Exception:
-        hp = {}
+        return {}
 
-    keys = [
-        "robot_name",
-        "dataset_name",
-        "dis_threshold",
-        "simulation_dt",
-        "controller_period",
-        "n_observation",
-        "point_dim",
-        "n_observation_dataset",
-        "observation_type",
-        "include_point_velocity",
-        "safe_classification_weight",
-        "unsafe_classification_weight",
-        "descent_violation_weight",
-        "hdot_divergence_weight",
-        "u_coef_in_training",
-        "cbf_hidden_layers",
-        "cbf_hidden_size",
-        "cbf_alpha",
-        "cbf_relaxation_penalty",
-        "feature_dim",
-        "per_feature_dim",
-        "use_bn",
-    ]
-    for k in keys:
+
+def args_for_ckpt(base_args: argparse.Namespace, ckpt_path: str, suffix: str) -> argparse.Namespace:
+    out = argparse.Namespace(**vars(base_args))
+    hp = load_hparams_from_ckpt(ckpt_path)
+    for k in HP_KEYS:
         if k in hp and hp[k] is not None:
-            setattr(args, k, hp[k])
-    return args
+            setattr(out, k, hp[k])
+    for k in METHOD_KEYS:
+        override = getattr(base_args, f"{k}_{suffix}", None)
+        if override is not None:
+            setattr(out, k, override)
+    setattr(out, "ckpt_path", ckpt_path)
+    return out
+
+
+def validate_pair_compatible(args_a: argparse.Namespace, args_b: argparse.Namespace):
+    mismatches = []
+    for k in DYNAMICS_COMPAT_KEYS:
+        va = getattr(args_a, k, None)
+        vb = getattr(args_b, k, None)
+        if va != vb:
+            mismatches.append(f"{k}: A={va!r}, B={vb!r}")
+    if mismatches:
+        joined = "\n  ".join(mismatches)
+        raise ValueError(f"Cannot compare checkpoints with different dynamics/observation configs:\n  {joined}")
 
 
 def load_controller(ckpt_path, dm, suite, args):
@@ -143,8 +185,10 @@ def load_controller(ckpt_path, dm, suite, args):
         "unsafe_classification_weight": getattr(args, "unsafe_classification_weight", 20.0),
         "descent_violation_weight": getattr(args, "descent_violation_weight", 2.0),
         "hdot_divergence_weight": getattr(args, "hdot_divergence_weight", 2e-2),
+        "epsilon": getattr(args, "epsilon", 0.0),
     }
     with _torch_load_weights_only_false():
+        baseline_flag = bool(getattr(args, "baseline", False))
         ctrl = NeuralLidarCBFController.load_from_checkpoint(
             ckpt_path,
             dynamics_model=dm,
@@ -162,6 +206,11 @@ def load_controller(ckpt_path, dm, suite, args):
             controller_period=getattr(args, "controller_period", 1 / 30),
             all_hparams=args,
             use_neural_actor=0,
+            ab_mode=getattr(args, "ab_mode", "B_with_normal"),
+            baseline=baseline_flag,
+            obs_backend=getattr(args, "obs_backend", "raw" if baseline_flag else "gphi"),
+            gphi_ckpt=getattr(args, "gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+            train_use_fd=getattr(args, "train_use_fd", baseline_flag),
             map_location="cpu",
         )
     ctrl.eval()
@@ -188,8 +237,8 @@ def build_eval_batch(ctrl, dm, n: int):
     lo = torch.minimum(ul, ll)
     q = lo + torch.rand(int(n), dm.n_dims) * (hi - lo)
     data_x = dm.complete_sample_with_observations(q, num_samples=int(n))
-    safe_mask = dm.safe_mask(q).bool()
-    unsafe_mask = dm.unsafe_mask(q).bool()
+    safe_mask = dm.safe_mask(data_x).bool()
+    unsafe_mask = dm.unsafe_mask(data_x).bool()
     goal_mask = torch.zeros_like(safe_mask)
     boundary_mask = torch.logical_not(torch.logical_or(safe_mask, unsafe_mask))
     idx = torch.arange(int(n), dtype=torch.long)
@@ -275,8 +324,8 @@ def render_violations(ctrl, data_x_in: torch.Tensor, vio_idx: torch.Tensor, save
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt_a", required=True, help="baseline ckpt path")
-    ap.add_argument("--ckpt_b", required=True, help="jvp ckpt path (or vice versa)")
+    ap.add_argument("--ckpt_a", required=True, help="checkpoint A path")
+    ap.add_argument("--ckpt_b", required=True, help="checkpoint B path")
     ap.add_argument("--n", type=int, default=4096)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--vis_topk", type=int, default=20)
@@ -292,13 +341,34 @@ def main():
     ap.add_argument("--point_dim", type=int, default=4)
     ap.add_argument("--n_observation_dataset", type=int, default=5)
     ap.add_argument("--observation_type", default="uniform_lidar")
+    ap.add_argument("--ab_mode_a", default=None, choices=["A_no_normal", "B_with_normal"])
+    ap.add_argument("--ab_mode_b", default=None, choices=["A_no_normal", "B_with_normal"])
+    ap.add_argument("--baseline_a", dest="baseline_a", action="store_true", default=None)
+    ap.add_argument("--no_baseline_a", dest="baseline_a", action="store_false")
+    ap.add_argument("--baseline_b", dest="baseline_b", action="store_true", default=None)
+    ap.add_argument("--no_baseline_b", dest="baseline_b", action="store_false")
+    ap.add_argument("--obs_backend_a", default=None, choices=["gphi", "raw"])
+    ap.add_argument("--obs_backend_b", default=None, choices=["gphi", "raw"])
+    ap.add_argument("--gphi_ckpt_a", default=None)
+    ap.add_argument("--gphi_ckpt_b", default=None)
+    ap.add_argument("--train_use_fd_a", dest="train_use_fd_a", action="store_true", default=None)
+    ap.add_argument("--no_train_use_fd_a", dest="train_use_fd_a", action="store_false")
+    ap.add_argument("--train_use_fd_b", dest="train_use_fd_b", action="store_true", default=None)
+    ap.add_argument("--no_train_use_fd_b", dest="train_use_fd_b", action="store_false")
 
     args = ap.parse_args()
-    args = merge_args_from_ckpt(args)
+    args_a = args_for_ckpt(args, args.ckpt_a, "a")
+    args_b = args_for_ckpt(args, args.ckpt_b, "b")
+    validate_pair_compatible(args_a, args_b)
 
-    dm, suite = build_dynamics_and_suite(args)
-    ctrl_a = load_controller(args.ckpt_a, dm, suite, args)
-    ctrl_b = load_controller(args.ckpt_b, dm, suite, args)
+    dm, suite = build_dynamics_and_suite(args_a)
+    ctrl_a = load_controller(args.ckpt_a, dm, suite, args_a)
+    ctrl_b = load_controller(args.ckpt_b, dm, suite, args_b)
+
+    meta_a = ctrl_a.method_metadata() if hasattr(ctrl_a, "method_metadata") else {}
+    meta_b = ctrl_b.method_metadata() if hasattr(ctrl_b, "method_metadata") else {}
+    print(f"[A] {json.dumps(meta_a, ensure_ascii=False)}")
+    print(f"[B] {json.dumps(meta_b, ensure_ascii=False)}")
 
     eps = float(ctrl_a.safe_level)  # 你说 safe 要 <= -0.1，这里就会是 0.1
     thr = -eps
@@ -359,6 +429,8 @@ def main():
         "n_safe": int(n_safe),
         "baseline_count": int(vio_local_a.numel()),
         "jvp_count": int(vio_local_b.numel()),
+        "method_a": meta_a,
+        "method_b": meta_b,
         "baseline_local_idx": [int(i) for i in vio_local_a.tolist()],
         "jvp_local_idx": [int(i) for i in vio_local_b.tolist()],
         "baseline_global_idx": [int(i) for i in vio_global_a.tolist()],

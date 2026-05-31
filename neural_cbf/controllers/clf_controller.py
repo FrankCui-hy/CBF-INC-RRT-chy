@@ -91,7 +91,7 @@ class CLFController(Controller):
 		# Next, we define the parameters that will be supplied at solve-time: the value
 		# of the Lyapunov function, its Lie derivatives, the relaxation penalty, and
 		# the reference control input
-		V_param = cp.Parameter(1, nonneg=True)
+		V_param = cp.Parameter(1)
 		Lf_V_params = []
 		Lg_V_params = []
 		for scenario in self.scenarios:
@@ -351,6 +351,91 @@ class CLFController(Controller):
 
 		return u_result, r_result
 
+	@torch.no_grad()
+	def _project_to_box_halfspace_leq(
+			self,
+			u_nom: torch.Tensor,
+			a: torch.Tensor,
+			b: torch.Tensor,
+			lower_lim: torch.Tensor,
+			upper_lim: torch.Tensor,
+			tol: float = 1e-7,
+	) -> Tuple[torch.Tensor, bool]:
+		"""Project u_nom onto a @ u <= b with box control limits."""
+		u_box = torch.max(torch.min(u_nom, upper_lim), lower_lim)
+		if torch.dot(a, u_box) <= b + tol:
+			return u_box, True
+
+		u_best = torch.where(a >= 0, lower_lim, upper_lim)
+		if torch.dot(a, u_best) > b + tol:
+			return u_best, False
+
+		lo = torch.zeros((), dtype=u_nom.dtype, device=u_nom.device)
+		hi = torch.ones((), dtype=u_nom.dtype, device=u_nom.device)
+		for _ in range(80):
+			u_hi = torch.max(torch.min(u_nom - hi * a, upper_lim), lower_lim)
+			if torch.dot(a, u_hi) <= b:
+				break
+			hi = 2.0 * hi
+
+		for _ in range(80):
+			mid = 0.5 * (lo + hi)
+			u_mid = torch.max(torch.min(u_nom - mid * a, upper_lim), lower_lim)
+			if torch.dot(a, u_mid) <= b:
+				hi = mid
+			else:
+				lo = mid
+
+		u_proj = torch.max(torch.min(u_nom - hi * a, upper_lim), lower_lim)
+		return u_proj, True
+
+	@torch.no_grad()
+	def _solve_CLF_QP_projection(
+			self,
+			x: torch.Tensor,
+			u_ref: torch.Tensor,
+			V: torch.Tensor,
+			Lf_V: torch.Tensor,
+			Lg_V: torch.Tensor,
+			relaxation_penalty: float,
+	) -> Tuple[torch.Tensor, torch.Tensor]:
+		"""Hard single-scenario CBF-QP for online rollout.
+
+		This implements min ||u-u_ref||^2 subject to
+		Lf_V + Lg_V u + lambda V <= 0 and box control limits. The returned
+		relaxation is only a diagnostic violation, not a slack variable.
+		"""
+		assert self.n_scenarios == 1
+		bs = x.shape[0]
+		upper_lim, lower_lim = self.dynamics_model.control_limits
+		upper_lim = upper_lim.type_as(x)
+		lower_lim = lower_lim.type_as(x)
+		u_result = torch.zeros(bs, self.dynamics_model.n_controls, dtype=x.dtype, device=x.device)
+		r_result = torch.zeros(bs, 1, dtype=x.dtype, device=x.device)
+
+		for batch_idx in range(bs):
+			u_nom = u_ref[batch_idx].type_as(x)
+			a = Lg_V[batch_idx, 0, :].type_as(x)
+			b = (-Lf_V[batch_idx, 0, 0] - self.clf_lambda * V[batch_idx]).type_as(x).reshape(())
+
+			if (
+					torch.isnan(u_nom).any()
+					or torch.isinf(u_nom).any()
+					or torch.isnan(a).any()
+					or torch.isinf(a).any()
+					or torch.isnan(b).any()
+					or torch.isinf(b).any()
+			):
+				u_result[batch_idx] = torch.max(torch.min(torch.zeros_like(u_nom), upper_lim), lower_lim)
+				r_result[batch_idx, 0] = torch.tensor(float("nan"), dtype=x.dtype, device=x.device)
+				continue
+
+			u_proj, _ = self._project_to_box_halfspace_leq(u_nom, a, b, lower_lim, upper_lim)
+			u_result[batch_idx] = u_proj
+			r_result[batch_idx, 0] = F.relu(torch.dot(a, u_proj) - b)
+
+		return u_result, r_result
+
 	def _solve_CLF_QP_cvxpylayers(
 			self,
 			x: torch.Tensor,
@@ -511,11 +596,15 @@ class CLFController(Controller):
 
 		# Figure out if we need to use a differentiable solver (determined by whether
 		# the input x requires a gradient or not)
-		if True:  # requires_grad
+		if requires_grad:
 			sol = self._solve_CLF_QP_cvxpylayers(
 				x, u_ref, V, Lf_V, Lg_V, relaxation_penalty
 			)
 			# raise warnings.warn("cvxpylayers solver is deprecated")
+		elif self.n_scenarios == 1:
+			sol = self._solve_CLF_QP_projection(
+				x, u_ref, V, Lf_V, Lg_V, relaxation_penalty
+			)
 		# elif ('gurobipy' in sys.modules) and V.shape[0]==1:
 		# 	sol = self._solve_CLF_QP_gurobi(
 		# 		x, u_ref, V, Lf_V, Lg_V, relaxation_penalty

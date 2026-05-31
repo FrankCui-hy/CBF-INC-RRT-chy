@@ -335,6 +335,7 @@ def init_val(path, args):
 		"unsafe_classification_weight": getattr(args, "unsafe_classification_weight", 20.0),
 		"descent_violation_weight": getattr(args, "descent_violation_weight", 2.0),
 		"hdot_divergence_weight": getattr(args, "hdot_divergence_weight", 2e-2),
+		"epsilon": getattr(args, "epsilon", 0.0),
 	}
 	# PyTorch >= 2.6 changed torch.load default to weights_only=True, which can break
 	# older Lightning .ckpt files that contain pickled training state. This checkpoint
@@ -354,6 +355,7 @@ def init_val(path, args):
 			torch.load = _orig_torch_load
 
 	with _torch_load_weights_only_false():
+		baseline_flag = bool(getattr(args, "baseline", False))
 		return NeuralLidarCBFController.load_from_checkpoint(path, dynamics_model=dynamics_model, scenarios=scenarios,
 														 datamodule=data_module, experiment_suite=experiment_suite,
 														 use_bn=getattr(args, "use_bn", False),
@@ -367,6 +369,11 @@ def init_val(path, args):
 														 controller_period=getattr(args, "controller_period", 1 / 30),
 														 all_hparams=args,
 														 use_neural_actor=0,
+														 ab_mode=getattr(args, "ab_mode", "B_with_normal"),
+														 baseline=baseline_flag,
+														 obs_backend=getattr(args, "obs_backend", "raw" if baseline_flag else "gphi"),
+														 gphi_ckpt=getattr(args, "gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+														 train_use_fd=getattr(args, "train_use_fd", baseline_flag),
 														 map_location='cpu')
 
 
@@ -2847,6 +2854,15 @@ def run_moving_obstacle_rollout(
 					u = torch.max(torch.min(u, u_hi), u_lo)
 				except Exception:
 					u = torch.clamp(u, -2.5, 2.5)
+
+				# Any task blend, speed scaling, or clamp changes the nominal command.
+				# Re-project the final command so the executed rollout still satisfies
+				# the CBF-QP constraint used by the paper.
+				try:
+					sol, _ = controller.solve_CLF_QP(x, u_ref=u.reshape(x.shape[0], -1))
+					u = sol[0]
+				except Exception:
+					pass
 		
 				if u_prev is not None:
 					u_jitter_hist.append(float(torch.norm(u - u_prev).item()))
@@ -3195,6 +3211,25 @@ def run_moving_obstacle_rollout(
 
 
 # ---- Offline metrics evaluation helper ----
+def controller_method_metadata(controller: NeuralLidarCBFController, ckpt_path: str = None) -> dict:
+    if hasattr(controller, "method_metadata"):
+        meta = dict(controller.method_metadata())
+    else:
+        meta = {
+            "method": "unknown",
+            "baseline": bool(getattr(controller, "baseline", False)),
+            "obs_backend": str(getattr(controller, "obs_backend", "")),
+            "ab_mode": str(getattr(controller, "ab_mode", "")),
+            "train_use_fd": bool(getattr(controller, "train_use_fd", False)),
+            "use_gphi_chain": bool(getattr(controller, "use_gphi_chain", False)),
+            "gphi_ckpt": str(getattr(controller, "gphi_ckpt", "")),
+        }
+    if ckpt_path is not None:
+        meta["ckpt"] = str(ckpt_path)
+    meta["qp_solver_online"] = "hard_box_halfspace_projection"
+    return meta
+
+
 @torch.no_grad()
 def eval_metrics_offline(
     controller: NeuralLidarCBFController,
@@ -3398,7 +3433,12 @@ def eval_metrics_offline(
         bad = torch.isnan(u).any(dim=1) | torch.isinf(u).any(dim=1)
         infeasible += int(bad.sum().item())
         u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
-        u = torch.clamp(u, -float(u_clamp), float(u_clamp))
+        u_des = torch.clamp(u, -float(u_clamp), float(u_clamp))
+        try:
+            sol, _ = controller.solve_CLF_QP(x, u_ref=u_des)
+            u = sol[0]
+        except Exception:
+            u = u_des
 
         # h and one-step FD hdot
         h = _h_eval(x)
@@ -3423,13 +3463,15 @@ def eval_metrics_offline(
             if hdot_auto is not None:
                 hdot_auto_err_scan[eps].append((hdot_auto - hdot_fd_eps).abs().detach().cpu())
 
-        relu_hdot = F.relu(hdot)
+        hdot_for_relax = hdot_auto if hdot_auto is not None else hdot
+        relu_hdot = F.relu(hdot_for_relax)
         relu_ah = F.relu(float(alpha) * h)
-        relax = F.relu(hdot + float(alpha) * h)
+        relax = F.relu(hdot_for_relax + float(alpha) * h)
         if hdot_auto is not None:
-            relax_auto = F.relu(hdot_auto + float(alpha) * h)
+            relax_auto = relax
+            relax_fd = F.relu(hdot + float(alpha) * h)
             relax_auto_all.append(relax_auto.detach().cpu())
-            relax_fd_all.append(relax.detach().cpu())
+            relax_fd_all.append(relax_fd.detach().cpu())
 
         if hasattr(controller, "derivative_diagnostics"):
             try:
@@ -3474,6 +3516,7 @@ def eval_metrics_offline(
         }
 
     out = {
+        "method_metadata": controller_method_metadata(controller),
         "num_samples": int(total),
         "batch_size": int(bs),
         "seed": int(seed),
@@ -3568,6 +3611,13 @@ if __name__ == "__main__":
     parser.add_argument("--hparams", type=str, default=None, help="Path to hparams.yaml (optional)")
     parser.add_argument("--robot_name", type=str, default="panda")
     parser.add_argument("--gui", action="store_true", help="Enable pybullet GUI for visualization.")
+    parser.add_argument("--ab_mode", type=str, default=None, choices=["A_no_normal", "B_with_normal"])
+    parser.add_argument("--baseline", dest="baseline", action="store_true", default=None)
+    parser.add_argument("--no_baseline", dest="baseline", action="store_false")
+    parser.add_argument("--obs_backend", type=str, default=None, choices=["gphi", "raw"])
+    parser.add_argument("--gphi_ckpt", type=str, default=None)
+    parser.add_argument("--train_use_fd", dest="train_use_fd", action="store_true", default=None)
+    parser.add_argument("--no_train_use_fd", dest="train_use_fd", action="store_false")
 
     # Modes
     parser.add_argument(
@@ -3770,6 +3820,10 @@ if __name__ == "__main__":
     base_args.accelerator = "cpu"  # controller loads to cpu; your training uses GPU elsewhere
     base_args.gui = 1 if args_cli.gui else 0
     base_args.robot_name = args_cli.robot_name
+    for _k in ("ab_mode", "baseline", "obs_backend", "gphi_ckpt", "train_use_fd"):
+        _v = getattr(args_cli, _k, None)
+        if _v is not None:
+            setattr(base_args, _k, _v)
     if args_cli.obstacle_horizon_s is not None:
         base_args.obstacle_horizon_s = float(args_cli.obstacle_horizon_s)
 
@@ -3799,9 +3853,12 @@ if __name__ == "__main__":
             fd_eps_list=args_cli.fd_eps_list,
             fd_obs_source=args_cli.fd_obs_source,
         )
+        metrics["method_metadata"] = controller_method_metadata(neural_controller, ckpt_path)
         print(json.dumps(metrics, indent=2))
         if args_cli.out is not None:
-            os.makedirs(os.path.dirname(args_cli.out), exist_ok=True)
+            out_dir = os.path.dirname(args_cli.out)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
             with open(args_cli.out, "w") as f:
                 json.dump(metrics, f, indent=2)
 

@@ -70,3 +70,38 @@ def decomposed_h_and_hdot(
 
     hdot = vmap(hdot_single)(q_ego, o_hat, qdot_ego, odot)
     return h, hdot
+
+
+@torch.enable_grad()
+def composite_h_and_min_cbf_derivative(
+    g_phi,
+    h_theta,
+    q_ego: torch.Tensor,
+    q_obs: torch.Tensor,
+    qdot_obs: torch.Tensor,
+    u_min: torch.Tensor,
+    u_max: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute h and min_u hdot for H(qe, qo)=h_theta(qe, g_phi(qe, qo)).
+
+    The manipulator model used in this repo is qdot = u, so the paper's
+    infimum over the box-constrained control set is the closed-form minimum
+    of a linear function grad_qe(H) @ u over [u_min, u_max].
+    """
+
+    u_min = u_min.to(device=q_ego.device, dtype=q_ego.dtype)
+    u_max = u_max.to(device=q_ego.device, dtype=q_ego.dtype)
+
+    def single(qe: torch.Tensor, qo: torch.Tensor, qdo: torch.Tensor):
+        def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+            o_hat = g_phi(qe_s.unsqueeze(0), qo_s.unsqueeze(0))["o_hat"].squeeze(0)
+            return h_theta(qe_s.unsqueeze(0), o_hat.unsqueeze(0)).squeeze(0)
+
+        h_val, vjp_fn = vjp(H, qe, qo)
+        grad_qe, grad_qo = vjp_fn(torch.ones((), device=qe.device, dtype=qe.dtype))
+        u_star = torch.where(grad_qe >= 0, u_min, u_max)
+        hdot_min = (grad_qe * u_star).sum() + (grad_qo * qdo).sum()
+        return h_val, hdot_min
+
+    h, hdot_min = vmap(single)(q_ego, q_obs, qdot_obs)
+    return h, hdot_min

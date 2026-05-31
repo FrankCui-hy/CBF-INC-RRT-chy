@@ -4,7 +4,7 @@ device: cuda
 paths:
   output_root: loss/outputs_real_v2
   dataset_path: loss/outputs_real_v2/datasets/raycast_dataset_real_v2_aligned_base.pt
-  g_phi_ckpt: loss/outputs_real_v2/checkpoints/g_phi_last.pt
+  g_phi_ckpt: loss/outputs_real_v2/checkpoints/g_phi_best.pt
   h_theta_ckpt: loss/outputs_real_v2/checkpoints/h_theta_last.pt
 
 system:
@@ -98,7 +98,8 @@ loss:
   cbf:
     alpha: 1.0
     gamma_s: 0.2
-    gamma_u: -0.2
+    gamma_u: 0.2
+    epsilon: 0.0
     sign_mode: standard
     w_cbf: 1.0
     w_cls: 1.0

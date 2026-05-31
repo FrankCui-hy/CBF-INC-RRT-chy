@@ -156,3 +156,5 @@ logs/
 
 !loss/data/
 !loss/data/**
+loss/data/**/__pycache__/
+loss/data/**/*.py[cod]

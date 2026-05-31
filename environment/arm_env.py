@@ -6,7 +6,6 @@ import warnings
 import pybullet_data
 
 from environment.franka_panda import FrankaPanda
-from environment.magician import Magician
 
 
 def sample_surface(center, half_extent, idx, num, add_normal=False):
@@ -96,8 +95,6 @@ class ArmEnv:
 			for robot_name in self.robot_name_list:
 				if robot_name == "panda":
 					self.robot_list.append(FrankaPanda(self.p))
-				elif robot_name == "magician":
-					self.robot_list.append(Magician(self.p))
 				else:
 					raise NotImplementedError(f"Robot {robot_name} not supported yet.")
 
@@ -111,8 +108,6 @@ class ArmEnv:
 			if obstacle_robot_name is not None:
 				if obstacle_robot_name == "panda":
 					self.obstacle_robot = FrankaPanda(self.p)
-				elif obstacle_robot_name == "magician":
-					self.obstacle_robot = Magician(self.p)
 				else:
 					raise NotImplementedError(f"Obstacle robot {obstacle_robot_name} not supported.")
 
