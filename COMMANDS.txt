@@ -1,0 +1,247 @@
+# CBF-INC-RRT 常用命令清单
+# 说明：
+# 1. 所有命令默认在仓库根目录运行：/Users/frankcui/Desktop/CBF-INC-RRT
+# 2. 训练依赖里要求 Python 3.9；不要用当前 base 里的 Python 3.13 跑训练。
+# 3. 如果机器没有 GPU，把配置里的 device 改成 cpu，或直接让脚本自动走 CPU；速度会慢很多。
+# 4. 下面的 PATH/CKPT/HParams 路径需要按你实际训练输出替换。
+
+
+# =========================
+# 0. 环境安装
+# =========================
+
+# 创建并激活 conda 环境
+conda create --name cbf_inc_rrt python=3.9 -y
+conda activate cbf_inc_rrt
+
+# 安装本仓库和依赖
+pip install -e .
+pip install -r requirements.txt
+
+# 检查关键依赖是否可导入
+python -c "import torch, pybullet, pytorch_lightning; print('环境 OK')"
+
+
+# =========================
+# 1. 生成 Panda 动态障碍轨迹库
+# =========================
+
+# 这个文件会被真实 PyBullet 数据采集、ArmLidar 数据集和动态障碍评估使用
+python -m neural_cbf.tools.generate_panda_obstacle_trajs \
+  --num_traj 200 \
+  --num_steps 300 \
+  --dt 0.0166666667 \
+  --out data/obstacle_trajs/panda_trajs.npz
+
+
+# =========================
+# 2. loss/ 两阶段训练流程：先训 g_phi，再训 h_theta
+# =========================
+
+# 2.1 采集真实 PyBullet raycast 数据集，推荐用 real_v2 配置
+# 输出路径来自 loss/configs/config_real_v2.yaml:
+# loss/outputs_real_v2/datasets/raycast_dataset_real_v2_aligned_base.pt
+python loss/collect_dataset_real.py \
+  --config loss/configs/config_real_v2.yaml
+
+# 2.2 如果只想跑轻量 dummy/sphere 数据集，用这个旧配置
+# 输出路径来自 loss/configs/config.yaml:
+# loss/outputs/datasets/raycast_dataset.pt
+python loss/collect_dataset.py \
+  --config loss/configs/config.yaml
+
+# 2.3 训练观测替代模型 g_phi
+# 默认保存：
+# loss/outputs_real_v2/checkpoints/g_phi_last.pt
+# loss/outputs_real_v2/checkpoints/g_phi_best.pt
+python loss/train_g_phi.py \
+  --config loss/configs/config_real_v2.yaml
+
+# 2.4 断点续训 g_phi
+python loss/train_g_phi.py \
+  --config loss/configs/config_real_v2.yaml \
+  --resume
+
+# 2.5 训练 CBF 标量网络 h_theta
+# 注意：h_theta 会读取 config 里的 paths.g_phi_ckpt，通常是 g_phi_best.pt
+# 默认保存：
+# loss/outputs_real_v2/checkpoints/h_theta_last.pt
+# loss/outputs_real_v2/checkpoints/h_theta_best.pt
+python loss/train_h_theta.py \
+  --config loss/configs/config_real_v2.yaml
+
+# 2.6 断点续训 h_theta
+python loss/train_h_theta.py \
+  --config loss/configs/config_real_v2.yaml \
+  --resume
+
+# 2.7 检查 g_phi 拟合质量，输出 per-ray/per-sample/summary 等统计
+python loss/eval/compare_obs_fit.py \
+  --config loss/configs/config_real_v2.yaml \
+  --ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --data loss/outputs_real_v2/datasets/raycast_dataset_real_v2_aligned_base.pt \
+  --out_dir loss/outputs_real_v2/obs_fit_check \
+  --device cuda \
+  --batch_size 256 \
+  --max_batches 0
+
+# 2.8 跑一次 g_phi + h_theta 的在线 CBF-QP demo
+python loss/eval/controller.py \
+  --config loss/configs/config_real_v2.yaml
+
+
+# =========================
+# 3. neural_cbf/ Lightning 控制器训练流程
+# =========================
+
+# 3.1 单独生成 ArmLidar 数据集，不训练
+# 数据会写到 datamodule 默认缓存路径；dataset_name 会参与文件名。
+python scripts/generate_dataset_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --dataset_name pino_motor_norm \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_episode 120 \
+  --trajectories_per_episode 40 \
+  --trajectory_length 35 \
+  --fixed_samples 200
+
+# 3.2 训练 baseline：raw observation + finite-difference hdot
+# 输出一般在 models/neural_cbf/<dynamics_name>/<version>/ 下。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version baseline_fd_raw \
+  --baseline \
+  --dataset_name pino_motor_norm \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+# 3.3 训练 Safe_Dual / ours：g_phi chain + analytic hdot
+# 需要先完成第 2 部分的 g_phi 训练。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version safe_dual_gphi_chain \
+  --no_baseline \
+  --obs_backend gphi \
+  --no_train_use_fd \
+  --gphi_ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --dataset_name pino_motor_norm \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+# 3.4 从 Lightning checkpoint 续训
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --version safe_dual_gphi_chain \
+  --no_baseline \
+  --obs_backend gphi \
+  --no_train_use_fd \
+  --gphi_ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --ckpt PATH/TO/checkpoints/epoch=XXX-step=YYY.ckpt
+
+
+# =========================
+# 4. 单模型离线评估和 rollout
+# =========================
+
+# 4.1 找训练出来的 Lightning checkpoint
+find models -name "*.ckpt" | sort
+
+# 4.2 单模型离线指标评估：baseline checkpoint
+python neural_cbf/evaluation/eval_arm_lidar.py \
+  --ckpt PATH/TO/baseline.ckpt \
+  --mode metrics \
+  --baseline \
+  --obs_backend raw \
+  --train_use_fd \
+  --num_samples 2048 \
+  --batch_size 256 \
+  --seed 0 \
+  --out results/baseline_metrics.json
+
+# 4.3 单模型离线指标评估：Safe_Dual / ours checkpoint
+python neural_cbf/evaluation/eval_arm_lidar.py \
+  --ckpt PATH/TO/ours.ckpt \
+  --mode metrics \
+  --no_baseline \
+  --obs_backend gphi \
+  --no_train_use_fd \
+  --gphi_ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --num_samples 2048 \
+  --batch_size 256 \
+  --seed 0 \
+  --out results/ours_metrics.json
+
+# 4.4 图形界面 rollout，可视化动态障碍场景
+python neural_cbf/evaluation/eval_arm_lidar.py \
+  --ckpt PATH/TO/ours.ckpt \
+  --mode rollout \
+  --gui \
+  --no_baseline \
+  --obs_backend gphi \
+  --no_train_use_fd \
+  --gphi_ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --t_sim 6.0 \
+  --speed_scale 1.8 \
+  --obstacle_mode arm_task \
+  --scene cross_pick
+
+
+# =========================
+# 5. baseline 和 Safe_Dual 配对比较
+# =========================
+
+# 5.1 在同一批采样点上比较两个 checkpoint 的离线指标
+python neural_cbf/evaluation/eval_pair_arm_lidar.py \
+  --baseline_ckpt PATH/TO/baseline.ckpt \
+  --ours_ckpt PATH/TO/ours.ckpt \
+  --ours_gphi_ckpt loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --num_samples 2048 \
+  --batch_size 256 \
+  --seed 0 \
+  --out results/paired_metrics.json
+
+# 5.2 比较两个 checkpoint 在 safe 样本上的 h 值违例
+python neural_cbf/evaluation/compare_safe_h.py \
+  --ckpt_a PATH/TO/baseline.ckpt \
+  --ckpt_b PATH/TO/ours.ckpt \
+  --baseline_a \
+  --obs_backend_a raw \
+  --train_use_fd_a \
+  --no_baseline_b \
+  --obs_backend_b gphi \
+  --no_train_use_fd_b \
+  --gphi_ckpt_b loss/outputs_real_v2/checkpoints/g_phi_best.pt \
+  --n 4096 \
+  --batch 256 \
+  --save_dir compare_safe_h_outputs
+
+
+# =========================
+# 6. 推送到 GitHub
+# =========================
+
+# 当前仓库已经配置 origin 为 SSH remote。如果 GitHub 已经添加了本机 SSH 公钥，直接推送：
+git push origin main
+
+# 如果没有配置 SSH key，可以先改成 HTTPS remote，再用 GitHub Personal Access Token 推送：
+git remote set-url origin https://github.com/FrankCui-hy/CBF-INC-RRT-chy.git
+git push origin main
