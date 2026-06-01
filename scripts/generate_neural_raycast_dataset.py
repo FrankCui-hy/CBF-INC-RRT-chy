@@ -929,6 +929,9 @@ def main() -> None:
     guided_pair_attempt_counts = Counter()
     guided_pair_success_counts = Counter()
     guided_closest_pair_counts = Counter()
+    far_stage_attempts = 0
+    far_stage_found = 0
+    far_stage_add_rejected = 0
     total_candidates = 0
     discarded_invalid = 0
     rejected_overrepresented_pairs = 0
@@ -952,7 +955,9 @@ def main() -> None:
         if counts[sample_type] >= wanted.get(sample_type, 0):
             return False
         closest_key = f"{int(record.closest_ego_link)}:{int(record.closest_obs_link)}"
-        if closest_pair_counts[closest_key] >= max_closest_pair_count:
+        # Pair balancing is for boundary coverage. Far samples are background
+        # safe states, so accepting them should not depend on closest-pair caps.
+        if sample_type != SAMPLE_TYPES["far_random"] and closest_pair_counts[closest_key] >= max_closest_pair_count:
             if rng.random() > float(args.overrepresented_pair_accept_prob):
                 rejected_overrepresented_pairs += 1
                 return False
@@ -1125,13 +1130,16 @@ def main() -> None:
             SAMPLE_TYPES["far_random"],
             args.max_attempts_per_accept,
         )
+        far_stage_attempts += candidates
         total_candidates += candidates
         check_budget("far_random")
         if rec is None:
             discarded_invalid += 1
             continue
         rec.source = "random_far"
-        add_record(rec, "random_far")
+        far_stage_found += 1
+        if not add_record(rec, "random_far"):
+            far_stage_add_rejected += 1
 
     print(f"[sample] final counts={readable_counts()}")
 
@@ -1215,6 +1223,9 @@ def main() -> None:
             for k, v in guided_pair_attempt_counts.items()
         },
         "guided_closest_pair_counts": {str(k): int(v) for k, v in guided_closest_pair_counts.items()},
+        "far_stage_attempts": int(far_stage_attempts),
+        "far_stage_found": int(far_stage_found),
+        "far_stage_add_rejected": int(far_stage_add_rejected),
     }
     report = validate_dataset(data, report, q_low, q_high, args.r_max, len(anchor_link_ids), int(args.rays_per_anchor))
     with open(out_dir / "sampling_report.json", "w") as f:
