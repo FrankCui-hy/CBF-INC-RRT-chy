@@ -43,6 +43,33 @@ class StateRecord:
     closest_obs_link: int
     sample_type: int
     collision: bool
+    source: str = ""
+    guided_ego_link: int = -1
+    guided_obs_link: int = -1
+    guided_pair_name: str = ""
+
+
+GUIDED_PAIR_WEIGHTS = [
+    ("panda_hand", "panda_hand", 4.0),
+    ("panda_hand", "panda_link5", 3.0),
+    ("panda_link5", "panda_hand", 3.0),
+    ("panda_hand", "panda_link6", 3.0),
+    ("panda_link6", "panda_hand", 3.0),
+    ("panda_hand", "panda_link7", 2.5),
+    ("panda_link7", "panda_hand", 2.5),
+    ("panda_link5", "panda_link5", 2.0),
+    ("panda_link5", "panda_link6", 2.0),
+    ("panda_link6", "panda_link5", 2.0),
+    ("panda_link6", "panda_link6", 2.0),
+    ("panda_link7", "panda_link5", 1.5),
+    ("panda_link5", "panda_link7", 1.5),
+    ("panda_link3", "panda_link5", 1.0),
+    ("panda_link4", "panda_link5", 1.0),
+    ("panda_link5", "panda_link3", 1.0),
+    ("panda_link5", "panda_link4", 1.0),
+    ("panda_link4", "panda_link6", 1.0),
+    ("panda_link6", "panda_link4", 1.0),
+]
 
 
 def parse_vec(text: str, n: int) -> Tuple[float, ...]:
@@ -136,6 +163,116 @@ def collision_link_ids(robot, include_base: bool = False) -> List[int]:
     if not links:
         links = [int(x) for x in robot.body_joints]
     return links
+
+
+def resolve_guided_pairs(ego_robot, obs_robot) -> List[Dict]:
+    pairs = []
+    ego_names = getattr(ego_robot, "arm_link_name", {})
+    obs_names = getattr(obs_robot, "arm_link_name", {})
+    for ego_name, obs_name, weight in GUIDED_PAIR_WEIGHTS:
+        ego_link = ego_names.get(ego_name)
+        obs_link = obs_names.get(obs_name)
+        if ego_link is None or obs_link is None:
+            continue
+        if ego_link < 0 or obs_link < 0:
+            continue
+        pair_name = f"{ego_name}:{obs_name}"
+        pairs.append(
+            {
+                "ego_name": ego_name,
+                "obs_name": obs_name,
+                "ego_link": int(ego_link),
+                "obs_link": int(obs_link),
+                "weight": float(weight),
+                "pair_name": pair_name,
+            }
+        )
+    if not pairs:
+        raise RuntimeError("No guided IK link pairs could be resolved from robot link names.")
+    return pairs
+
+
+def guided_local_anchor_candidates(link_name_text: str) -> np.ndarray:
+    if "hand" in link_name_text:
+        anchors = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.04), (0.0, 0.0, 0.08)]
+    elif "link7" in link_name_text or "link6" in link_name_text:
+        anchors = [(0.0, 0.0, 0.0), (0.04, 0.0, 0.0), (-0.04, 0.0, 0.0)]
+    elif "link5" in link_name_text:
+        anchors = [(0.0, 0.0, 0.0), (0.0, 0.06, 0.0), (0.0, -0.06, 0.0)]
+    else:
+        anchors = [(0.0, 0.0, 0.0), (0.0, 0.05, 0.0), (0.0, -0.05, 0.0)]
+    return np.asarray(anchors, dtype=np.float32)
+
+
+def sample_guided_pair(rng: np.random.Generator, guided_pairs: List[Dict], success_counts: Counter) -> Dict:
+    weights = []
+    for pair in guided_pairs:
+        # Keep the hand-heavy prior, but softly prefer pairs that have succeeded less often.
+        weights.append(pair["weight"] / math.sqrt(1.0 + float(success_counts[pair["pair_name"]])))
+    probs = np.asarray(weights, dtype=np.float64)
+    probs = probs / probs.sum()
+    return guided_pairs[int(rng.choice(len(guided_pairs), p=probs))]
+
+
+def sample_shared_workspace(rng: np.random.Generator, x_range, y_range, z_range) -> np.ndarray:
+    return np.asarray(
+        [
+            rng.uniform(float(x_range[0]), float(x_range[1])),
+            rng.uniform(float(y_range[0]), float(y_range[1])),
+            rng.uniform(float(z_range[0]), float(z_range[1])),
+        ],
+        dtype=np.float32,
+    )
+
+
+def random_offset(rng: np.random.Generator, min_norm: float, max_norm: float) -> np.ndarray:
+    direction = rng.normal(0.0, 1.0, size=3)
+    direction = direction / (np.linalg.norm(direction) + 1e-8)
+    scale = rng.uniform(float(min_norm), float(max_norm))
+    return (direction * scale).astype(np.float32)
+
+
+def current_link_rotation(env: ArmEnv, robot, link_id: int) -> np.ndarray:
+    link_state = env.p.getLinkState(robot.robotId, int(link_id))
+    return quat_to_matrix(env.p, link_state[5])
+
+
+def solve_link_ik(
+    env: ArmEnv,
+    robot,
+    link_id: int,
+    target_pos: np.ndarray,
+    q_low: np.ndarray,
+    q_high: np.ndarray,
+    rest_q: np.ndarray,
+) -> Optional[np.ndarray]:
+    joint_ranges = np.maximum(q_high - q_low, 1e-4).astype(np.float32)
+    kwargs = dict(
+        lowerLimits=q_low.astype(float).tolist(),
+        upperLimits=q_high.astype(float).tolist(),
+        jointRanges=joint_ranges.astype(float).tolist(),
+        restPoses=rest_q.astype(float).tolist(),
+        maxNumIterations=160,
+        residualThreshold=1e-5,
+    )
+    try:
+        sol = env.p.calculateInverseKinematics(
+            robot.robotId,
+            int(link_id),
+            targetPosition=np.asarray(target_pos, dtype=float).tolist(),
+            **kwargs,
+        )
+    except TypeError:
+        sol = env.p.calculateInverseKinematics(
+            robot.robotId,
+            int(link_id),
+            targetPosition=np.asarray(target_pos, dtype=float).tolist(),
+            maxNumIterations=160,
+            residualThreshold=1e-5,
+        )
+    if len(sol) < robot.body_dim:
+        return None
+    return clip_q(np.asarray(sol[: robot.body_dim], dtype=np.float32), q_low, q_high)
 
 
 def set_robot_state(robot, q: np.ndarray) -> None:
@@ -275,7 +412,7 @@ def find_random_record(
     return None, max_attempts
 
 
-def refine_near_boundary(
+def generate_guided_unsafe_record(
     rng: np.random.Generator,
     env: ArmEnv,
     ego_robot,
@@ -286,63 +423,164 @@ def refine_near_boundary(
     epsilon: float,
     delta: float,
     distance_query_range: float,
+    guided_pairs: List[Dict],
+    guided_pair_attempt_counts: Counter,
+    guided_pair_success_counts: Counter,
+    x_range,
+    y_range,
+    z_range,
+    offset_min: float,
+    offset_max: float,
+    ik_noise_std: float,
+    max_attempts: int,
+) -> Tuple[Optional[StateRecord], int, int]:
+    discarded = 0
+    for attempt in range(1, max_attempts + 1):
+        pair = sample_guided_pair(rng, guided_pairs, guided_pair_success_counts)
+        guided_pair_attempt_counts[pair["pair_name"]] += 1
+
+        q_ego_seed = sample_uniform(rng, q_low, q_high)
+        q_obs_seed = sample_uniform(rng, q_low, q_high)
+        set_robot_state(ego_robot, q_ego_seed)
+        set_robot_state(obs_robot, q_obs_seed)
+
+        p_mid = sample_shared_workspace(rng, x_range, y_range, z_range)
+        ego_anchor_pool = guided_local_anchor_candidates(pair["ego_name"])
+        obs_anchor_pool = guided_local_anchor_candidates(pair["obs_name"])
+        ego_anchor = ego_anchor_pool[int(rng.integers(0, ego_anchor_pool.shape[0]))]
+        obs_anchor = obs_anchor_pool[int(rng.integers(0, obs_anchor_pool.shape[0]))]
+        ego_target = p_mid - current_link_rotation(env, ego_robot, pair["ego_link"]) @ ego_anchor
+        obs_target = p_mid + random_offset(rng, offset_min, offset_max)
+        obs_target = obs_target - current_link_rotation(env, obs_robot, pair["obs_link"]) @ obs_anchor
+
+        q_ego = solve_link_ik(env, ego_robot, pair["ego_link"], ego_target, q_low, q_high, q_ego_seed)
+        q_obs = solve_link_ik(env, obs_robot, pair["obs_link"], obs_target, q_low, q_high, q_obs_seed)
+        if q_ego is None or q_obs is None:
+            discarded += 1
+            continue
+
+        q_ego = clip_q(q_ego + rng.normal(0.0, ik_noise_std, size=q_ego.shape), q_low, q_high)
+        q_obs = clip_q(q_obs + rng.normal(0.0, ik_noise_std, size=q_obs.shape), q_low, q_high)
+        record = make_state_record(
+            env,
+            ego_robot,
+            obs_robot,
+            q_ego,
+            q_obs,
+            d_safe=d_safe,
+            epsilon=epsilon,
+            delta=delta,
+            distance_query_range=distance_query_range,
+        )
+        record.source = "guided_ik"
+        record.guided_ego_link = int(pair["ego_link"])
+        record.guided_obs_link = int(pair["obs_link"])
+        record.guided_pair_name = pair["pair_name"]
+        if record.sample_type == SAMPLE_TYPES["collision_unsafe"]:
+            guided_pair_success_counts[pair["pair_name"]] += 1
+            return record, attempt, discarded
+    return None, max_attempts, discarded
+
+
+def find_safe_endpoint(
+    rng: np.random.Generator,
+    env: ArmEnv,
+    ego_robot,
+    obs_robot,
+    q_low: np.ndarray,
+    q_high: np.ndarray,
+    d_safe: float,
+    epsilon: float,
+    delta: float,
+    distance_query_range: float,
+    max_attempts: int,
+) -> Tuple[Optional[StateRecord], int]:
+    best = None
+    best_score = float("inf")
+    for attempt in range(1, max_attempts + 1):
+        record = make_state_record(
+            env,
+            ego_robot,
+            obs_robot,
+            sample_uniform(rng, q_low, q_high),
+            sample_uniform(rng, q_low, q_high),
+            d_safe=d_safe,
+            epsilon=epsilon,
+            delta=delta,
+            distance_query_range=distance_query_range,
+        )
+        if record.collision or record.h <= epsilon:
+            continue
+        if record.sample_type == SAMPLE_TYPES["medium_close"]:
+            record.source = "safe_endpoint_medium"
+            return record, attempt
+        score = abs(record.h - delta)
+        if score < best_score:
+            best = record
+            best_score = score
+    if best is not None:
+        best.source = "safe_endpoint_far"
+        return best, max_attempts
+    return None, max_attempts
+
+
+def refine_near_boundary_from_endpoints(
+    rng: np.random.Generator,
+    env: ArmEnv,
+    ego_robot,
+    obs_robot,
+    q_low: np.ndarray,
+    q_high: np.ndarray,
+    safe_rec: StateRecord,
+    unsafe_rec: StateRecord,
+    d_safe: float,
+    epsilon: float,
+    delta: float,
+    distance_query_range: float,
     interp_steps: int,
     bisect_steps: int,
     noise_std: float,
-    max_endpoint_attempts: int,
+    perturbations: int,
 ) -> Tuple[List[StateRecord], int, int]:
     accepted: List[StateRecord] = []
     candidates = 0
     discarded = 0
-
-    safe_rec, used = find_random_record(
-        rng,
-        env,
-        ego_robot,
-        obs_robot,
-        q_low,
-        q_high,
-        d_safe,
-        epsilon,
-        delta,
-        distance_query_range,
-        SAMPLE_TYPES["far_random"],
-        max_endpoint_attempts,
-    )
-    candidates += used
-    unsafe_rec, used = find_random_record(
-        rng,
-        env,
-        ego_robot,
-        obs_robot,
-        q_low,
-        q_high,
-        d_safe,
-        epsilon,
-        delta,
-        distance_query_range,
-        SAMPLE_TYPES["collision_unsafe"],
-        max_endpoint_attempts,
-    )
-    candidates += used
-    if safe_rec is None or unsafe_rec is None or safe_rec.h <= epsilon:
+    if safe_rec.collision or safe_rec.h <= epsilon or (not unsafe_rec.collision and unsafe_rec.h >= 0.0):
         return accepted, candidates, discarded + 1
 
     interval = None
+    best_positive = None
     prev_t = 0.0
     prev_h = safe_rec.h
     for k in range(1, interp_steps + 1):
         t = float(k) / float(interp_steps)
-        q_e = interpolate_q(safe_rec.q_ego, unsafe_rec.q_ego, t)
-        q_o = interpolate_q(safe_rec.q_obs, unsafe_rec.q_obs, t)
-        rec = make_state_record(env, ego_robot, obs_robot, q_e, q_o, d_safe, epsilon, delta, distance_query_range)
+        rec = make_state_record(
+            env,
+            ego_robot,
+            obs_robot,
+            interpolate_q(safe_rec.q_ego, unsafe_rec.q_ego, t),
+            interpolate_q(safe_rec.q_obs, unsafe_rec.q_obs, t),
+            d_safe,
+            epsilon,
+            delta,
+            distance_query_range,
+        )
         candidates += 1
+        if rec.h >= 0.0 and (best_positive is None or rec.h < best_positive.h):
+            best_positive = rec
         if prev_h > 0.0 and rec.h <= 0.0:
             interval = (prev_t, t)
             break
         prev_t = t
         prev_h = rec.h
     if interval is None:
+        if best_positive is not None and best_positive.h <= epsilon:
+            best_positive.source = "near_scan"
+            best_positive.guided_ego_link = unsafe_rec.guided_ego_link
+            best_positive.guided_obs_link = unsafe_rec.guided_obs_link
+            best_positive.guided_pair_name = unsafe_rec.guided_pair_name
+            accepted.append(best_positive)
+            return accepted, candidates, discarded
         return accepted, candidates, discarded + 1
 
     lo_t, hi_t = interval
@@ -361,6 +599,8 @@ def refine_near_boundary(
             distance_query_range,
         )
         candidates += 1
+        if rec.h >= 0.0 and (best_positive is None or rec.h < best_positive.h):
+            best_positive = rec
         if 0.0 <= rec.h <= epsilon:
             near_rec = rec
             hi_t = mid_t
@@ -369,18 +609,32 @@ def refine_near_boundary(
         else:
             lo_t = mid_t
 
-    if near_rec is not None:
-        accepted.append(near_rec)
+    if near_rec is None and best_positive is not None and best_positive.h <= epsilon:
+        near_rec = best_positive
+    if near_rec is None:
+        return accepted, candidates, discarded + 1
 
-    # Add local perturbations; recompute all labels after clipping.
-    for _ in range(4):
-        if near_rec is None:
-            break
+    near_rec.source = "near_bisection"
+    near_rec.guided_ego_link = unsafe_rec.guided_ego_link
+    near_rec.guided_obs_link = unsafe_rec.guided_obs_link
+    near_rec.guided_pair_name = unsafe_rec.guided_pair_name
+    accepted.append(near_rec)
+
+    # Gaussian perturbation after bisection. Every perturbed state is relabeled.
+    for _ in range(int(perturbations)):
         q_e = clip_q(near_rec.q_ego + rng.normal(0.0, noise_std, size=near_rec.q_ego.shape), q_low, q_high)
         q_o = clip_q(near_rec.q_obs + rng.normal(0.0, noise_std, size=near_rec.q_obs.shape), q_low, q_high)
         rec = make_state_record(env, ego_robot, obs_robot, q_e, q_o, d_safe, epsilon, delta, distance_query_range)
         candidates += 1
-        if rec.sample_type in (SAMPLE_TYPES["near_boundary"], SAMPLE_TYPES["collision_unsafe"]):
+        rec.source = "near_gaussian"
+        rec.guided_ego_link = unsafe_rec.guided_ego_link
+        rec.guided_obs_link = unsafe_rec.guided_obs_link
+        rec.guided_pair_name = unsafe_rec.guided_pair_name
+        if rec.sample_type in (
+            SAMPLE_TYPES["near_boundary"],
+            SAMPLE_TYPES["medium_close"],
+            SAMPLE_TYPES["collision_unsafe"],
+        ):
             accepted.append(rec)
     return accepted, candidates, discarded
 
@@ -507,7 +761,7 @@ def validate_dataset(data: Dict[str, np.ndarray], report: Dict, q_low: np.ndarra
     return report
 
 
-def build_metadata(args, env: ArmEnv, ego_robot, obs_robot, anchor_link_ids, anchor_T_L_S, local_ray_dirs, mesh_type_used: str) -> Dict:
+def build_metadata(args, env: ArmEnv, ego_robot, obs_robot, anchor_link_ids, anchor_T_L_S, local_ray_dirs, guided_pairs, mesh_type_used: str) -> Dict:
     T_W_Bego = make_transform(args.ego_base_pos, args.ego_base_orn, env.p)
     T_W_Bobs = make_transform(args.obs_base_pos, args.obs_base_orn, env.p)
     num_anchors = len(anchor_link_ids)
@@ -547,6 +801,30 @@ def build_metadata(args, env: ArmEnv, ego_robot, obs_robot, anchor_link_ids, anc
         "random_seed": int(args.seed),
         "mesh_type_used": mesh_type_used,
         "include_base_collision_links": bool(args.include_base_collision_links),
+        "guided_sampling": {
+            "enabled": True,
+            "stage_order": "collision_unsafe -> near_boundary -> medium_close -> far_random",
+            "pair_pool": [
+                {
+                    "ego_link_name": pair["ego_name"],
+                    "obs_link_name": pair["obs_name"],
+                    "ego_link_id": int(pair["ego_link"]),
+                    "obs_link_id": int(pair["obs_link"]),
+                    "weight": float(pair["weight"]),
+                }
+                for pair in guided_pairs
+            ],
+            "shared_workspace_x": [float(x) for x in args.shared_workspace_x],
+            "shared_workspace_y": [float(x) for x in args.shared_workspace_y],
+            "shared_workspace_z": [float(x) for x in args.shared_workspace_z],
+            "guided_offset_range": [float(args.guided_offset_min), float(args.guided_offset_max)],
+            "guided_ik_noise_std": float(args.guided_ik_noise_std),
+            "near_gaussian_noise_std": float(args.near_noise_std),
+            "near_perturbations": int(args.near_perturbations),
+            "max_closest_pair_fraction": float(args.max_closest_pair_fraction),
+            "overrepresented_pair_accept_prob": float(args.overrepresented_pair_accept_prob),
+            "local_anchor_note": "IK targets link-local anchor approximations; final labels always come from the true distance checker.",
+        },
         "sample_type_definition": {
             "collision_unsafe": "collision = True or h < 0",
             "near_boundary": "0 <= h <= epsilon",
@@ -577,6 +855,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epsilon", type=float, default=0.04)
     p.add_argument("--delta", type=float, default=0.20)
     p.add_argument("--near_noise_std", type=float, default=0.01)
+    p.add_argument("--near_perturbations", type=int, default=4)
+    p.add_argument("--guided_ik_noise_std", type=float, default=0.04)
+    p.add_argument("--guided_offset_min", type=float, default=0.02)
+    p.add_argument("--guided_offset_max", type=float, default=0.08)
+    p.add_argument("--shared_workspace_x", default="0.05,0.25")
+    p.add_argument("--shared_workspace_y", default="-0.10,0.10")
+    p.add_argument("--shared_workspace_z", default="0.25,0.80")
+    p.add_argument("--max_closest_pair_fraction", type=float, default=0.35)
+    p.add_argument("--overrepresented_pair_accept_prob", type=float, default=0.35)
     p.add_argument("--interp_steps", type=int, default=24)
     p.add_argument("--bisect_steps", type=int, default=16)
     p.add_argument("--max_attempts_per_accept", type=int, default=2000)
@@ -595,6 +882,9 @@ def main() -> None:
     args.ego_base_orn = parse_vec(args.ego_base_orn, 4)
     args.obs_base_pos = parse_vec(args.obs_base_pos, 3)
     args.obs_base_orn = parse_vec(args.obs_base_orn, 4)
+    args.shared_workspace_x = parse_vec(args.shared_workspace_x, 2)
+    args.shared_workspace_y = parse_vec(args.shared_workspace_y, 2)
+    args.shared_workspace_z = parse_vec(args.shared_workspace_z, 2)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -626,6 +916,7 @@ def main() -> None:
     anchor_link_ids = choose_anchor_links(ego_robot, int(args.num_anchors))
     anchor_T_L_S = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], len(anchor_link_ids), axis=0)
     local_ray_dirs = fibonacci_sphere(int(args.rays_per_anchor), seed=int(args.seed))
+    guided_pairs = resolve_guided_pairs(ego_robot, obs_robot)
 
     wanted = target_counts(
         num_samples,
@@ -633,48 +924,167 @@ def main() -> None:
     )
     records: List[StateRecord] = []
     counts = Counter()
+    closest_pair_counts = Counter()
+    sampling_stage_counts = Counter()
+    guided_pair_attempt_counts = Counter()
+    guided_pair_success_counts = Counter()
+    guided_closest_pair_counts = Counter()
     total_candidates = 0
     discarded_invalid = 0
+    rejected_overrepresented_pairs = 0
     max_total_candidates = int(num_samples * args.max_candidate_multiplier)
+    max_closest_pair_count = max(10, int(math.ceil(num_samples * float(args.max_closest_pair_fraction))))
+
+    def readable_counts() -> Dict[str, int]:
+        return {SAMPLE_TYPE_NAMES[int(k)]: int(v) for k, v in counts.items()}
+
+    def check_budget(stage_name: str) -> None:
+        if total_candidates <= max_total_candidates:
+            return
+        raise RuntimeError(
+            f"Sampling exceeded max candidates ({max_total_candidates}) while filling {stage_name}. "
+            f"Current counts={readable_counts()}. Increase --max_candidate_multiplier or relax epsilon/delta."
+        )
+
+    def add_record(record: StateRecord, stage_name: str) -> bool:
+        nonlocal rejected_overrepresented_pairs
+        sample_type = int(record.sample_type)
+        if counts[sample_type] >= wanted.get(sample_type, 0):
+            return False
+        closest_key = f"{int(record.closest_ego_link)}:{int(record.closest_obs_link)}"
+        if closest_pair_counts[closest_key] >= max_closest_pair_count:
+            if rng.random() > float(args.overrepresented_pair_accept_prob):
+                rejected_overrepresented_pairs += 1
+                return False
+        records.append(record)
+        counts[sample_type] += 1
+        closest_pair_counts[closest_key] += 1
+        sampling_stage_counts[stage_name] += 1
+        if record.guided_pair_name:
+            guided_closest_pair_counts[closest_key] += 1
+        return True
 
     print(f"[sample] target={num_samples}, rays={len(anchor_link_ids) * int(args.rays_per_anchor)}")
-    while len(records) < num_samples:
-        # Fill near-boundary actively.
-        if counts[SAMPLE_TYPES["near_boundary"]] < wanted[SAMPLE_TYPES["near_boundary"]]:
-            new_records, candidates, discarded = refine_near_boundary(
-                rng,
-                env,
-                ego_robot,
-                obs_robot,
-                q_low,
-                q_high,
-                args.d_safe,
-                args.epsilon,
-                args.delta,
-                args.distance_query_range,
-                args.interp_steps,
-                args.bisect_steps,
-                args.near_noise_std,
-                args.max_attempts_per_accept,
-            )
-            total_candidates += candidates
-            discarded_invalid += discarded
-            if total_candidates > max_total_candidates:
-                readable = {SAMPLE_TYPE_NAMES[k]: int(v) for k, v in counts.items()}
-                raise RuntimeError(
-                    f"Sampling exceeded max candidates ({max_total_candidates}) while filling near_boundary. "
-                    f"Current counts={readable}. Increase --max_candidate_multiplier or relax epsilon/delta."
-                )
-            for rec in new_records:
-                if counts[rec.sample_type] < wanted.get(rec.sample_type, 0):
-                    records.append(rec)
-                    counts[rec.sample_type] += 1
+
+    # Stage 1: actively build the saved unsafe quota with guided IK.
+    while counts[SAMPLE_TYPES["collision_unsafe"]] < wanted[SAMPLE_TYPES["collision_unsafe"]]:
+        rec, candidates, discarded = generate_guided_unsafe_record(
+            rng,
+            env,
+            ego_robot,
+            obs_robot,
+            q_low,
+            q_high,
+            args.d_safe,
+            args.epsilon,
+            args.delta,
+            args.distance_query_range,
+            guided_pairs,
+            guided_pair_attempt_counts,
+            guided_pair_success_counts,
+            args.shared_workspace_x,
+            args.shared_workspace_y,
+            args.shared_workspace_z,
+            args.guided_offset_min,
+            args.guided_offset_max,
+            args.guided_ik_noise_std,
+            args.max_attempts_per_accept,
+        )
+        total_candidates += candidates
+        discarded_invalid += discarded
+        check_budget("collision_unsafe")
+        if rec is None:
+            discarded_invalid += 1
+            continue
+        add_record(rec, "guided_unsafe")
+
+    print(f"[sample] after unsafe counts={readable_counts()}")
+
+    # Stage 2: near-boundary comes from guided unsafe endpoint + safe endpoint + path scan/bisection.
+    while counts[SAMPLE_TYPES["near_boundary"]] < wanted[SAMPLE_TYPES["near_boundary"]]:
+        unsafe_rec, candidates, discarded = generate_guided_unsafe_record(
+            rng,
+            env,
+            ego_robot,
+            obs_robot,
+            q_low,
+            q_high,
+            args.d_safe,
+            args.epsilon,
+            args.delta,
+            args.distance_query_range,
+            guided_pairs,
+            guided_pair_attempt_counts,
+            guided_pair_success_counts,
+            args.shared_workspace_x,
+            args.shared_workspace_y,
+            args.shared_workspace_z,
+            args.guided_offset_min,
+            args.guided_offset_max,
+            args.guided_ik_noise_std,
+            args.max_attempts_per_accept,
+        )
+        total_candidates += candidates
+        discarded_invalid += discarded
+        check_budget("near_boundary unsafe endpoint")
+        if unsafe_rec is None:
+            discarded_invalid += 1
+            continue
+        if counts[SAMPLE_TYPES["collision_unsafe"]] < wanted[SAMPLE_TYPES["collision_unsafe"]]:
+            add_record(unsafe_rec, "guided_unsafe_extra")
+
+        safe_rec, candidates = find_safe_endpoint(
+            rng,
+            env,
+            ego_robot,
+            obs_robot,
+            q_low,
+            q_high,
+            args.d_safe,
+            args.epsilon,
+            args.delta,
+            args.distance_query_range,
+            args.max_attempts_per_accept,
+        )
+        total_candidates += candidates
+        check_budget("near_boundary safe endpoint")
+        if safe_rec is None:
+            discarded_invalid += 1
             continue
 
-        missing = [k for k, v in wanted.items() if counts[k] < v]
-        if not missing:
-            break
-        wanted_type = missing[0]
+        new_records, candidates, discarded = refine_near_boundary_from_endpoints(
+            rng,
+            env,
+            ego_robot,
+            obs_robot,
+            q_low,
+            q_high,
+            safe_rec,
+            unsafe_rec,
+            args.d_safe,
+            args.epsilon,
+            args.delta,
+            args.distance_query_range,
+            args.interp_steps,
+            args.bisect_steps,
+            args.near_noise_std,
+            args.near_perturbations,
+        )
+        total_candidates += candidates
+        discarded_invalid += discarded
+        check_budget("near_boundary bisection")
+        accepted_any = False
+        for rec in new_records:
+            accepted_any = add_record(rec, "near_from_guided") or accepted_any
+        if not accepted_any:
+            discarded_invalid += 1
+        if len(records) % max(100, num_samples // 20) == 0:
+            print(f"[sample] accepted={len(records)}/{num_samples} counts={readable_counts()}")
+
+    print(f"[sample] after near counts={readable_counts()}")
+
+    # Stage 3: medium-close is easier; fill it with rejection sampling after near is covered.
+    while counts[SAMPLE_TYPES["medium_close"]] < wanted[SAMPLE_TYPES["medium_close"]]:
         rec, candidates = find_random_record(
             rng,
             env,
@@ -686,26 +1096,44 @@ def main() -> None:
             args.epsilon,
             args.delta,
             args.distance_query_range,
-            wanted_type,
+            SAMPLE_TYPES["medium_close"],
             args.max_attempts_per_accept,
         )
         total_candidates += candidates
-        if total_candidates > max_total_candidates:
-            readable = {SAMPLE_TYPE_NAMES[k]: int(v) for k, v in counts.items()}
-            raise RuntimeError(
-                f"Sampling exceeded max candidates ({max_total_candidates}) while filling {SAMPLE_TYPE_NAMES[wanted_type]}. "
-                f"Current counts={readable}. Increase --max_candidate_multiplier or relax epsilon/delta."
-            )
+        check_budget("medium_close")
         if rec is None:
             discarded_invalid += 1
-            print(f"[WARN] Could not find sample_type={SAMPLE_TYPE_NAMES[wanted_type]} in {args.max_attempts_per_accept} attempts.")
             continue
-        records.append(rec)
-        counts[rec.sample_type] += 1
+        rec.source = "random_medium"
+        add_record(rec, "random_medium")
 
-        if len(records) % max(100, num_samples // 20) == 0:
-            readable = {SAMPLE_TYPE_NAMES[k]: int(v) for k, v in counts.items()}
-            print(f"[sample] accepted={len(records)}/{num_samples} counts={readable}")
+    print(f"[sample] after medium counts={readable_counts()}")
+
+    # Stage 4: far-random is usually abundant, so fill it last.
+    while counts[SAMPLE_TYPES["far_random"]] < wanted[SAMPLE_TYPES["far_random"]]:
+        rec, candidates = find_random_record(
+            rng,
+            env,
+            ego_robot,
+            obs_robot,
+            q_low,
+            q_high,
+            args.d_safe,
+            args.epsilon,
+            args.delta,
+            args.distance_query_range,
+            SAMPLE_TYPES["far_random"],
+            args.max_attempts_per_accept,
+        )
+        total_candidates += candidates
+        check_budget("far_random")
+        if rec is None:
+            discarded_invalid += 1
+            continue
+        rec.source = "random_far"
+        add_record(rec, "random_far")
+
+    print(f"[sample] final counts={readable_counts()}")
 
     n = len(records)
     n_rays = len(anchor_link_ids) * int(args.rays_per_anchor)
@@ -762,7 +1190,7 @@ def main() -> None:
         if (idx + 1) % max(100, n // 20) == 0:
             print(f"[raycast] {idx + 1}/{n}")
 
-    metadata = build_metadata(args, env, ego_robot, obs_robot, anchor_link_ids, anchor_T_L_S, local_ray_dirs, mesh_type_used="pybullet_collision_shapes")
+    metadata = build_metadata(args, env, ego_robot, obs_robot, anchor_link_ids, anchor_T_L_S, local_ray_dirs, guided_pairs, mesh_type_used="pybullet_collision_shapes")
     with open(out_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -777,6 +1205,16 @@ def main() -> None:
         "discarded_invalid_samples": int(discarded_invalid),
         "raycast_failure_count": int(raycast_failures),
         "split_counts": {k: int(v.shape[0]) for k, v in splits.items()},
+        "sampling_stage_counts": {str(k): int(v) for k, v in sampling_stage_counts.items()},
+        "closest_pair_rejected_overrepresented_count": int(rejected_overrepresented_pairs),
+        "closest_pair_soft_cap": int(max_closest_pair_count),
+        "guided_pair_attempt_counts": {str(k): int(v) for k, v in guided_pair_attempt_counts.items()},
+        "guided_pair_success_counts": {str(k): int(v) for k, v in guided_pair_success_counts.items()},
+        "guided_pair_success_rate": {
+            str(k): float(guided_pair_success_counts[k] / max(v, 1))
+            for k, v in guided_pair_attempt_counts.items()
+        },
+        "guided_closest_pair_counts": {str(k): int(v) for k, v in guided_closest_pair_counts.items()},
     }
     report = validate_dataset(data, report, q_low, q_high, args.r_max, len(anchor_link_ids), int(args.rays_per_anchor))
     with open(out_dir / "sampling_report.json", "w") as f:
