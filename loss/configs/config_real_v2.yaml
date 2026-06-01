@@ -40,10 +40,10 @@ data:
     robot_name: panda
     obstacle_robot_name: panda
     obstacle_traj_path: data/obstacle_trajs/panda_trajs.npz
-    ego_robot_base_pos: [0.0, -0.20, 0.0]
+    ego_robot_base_pos: [0.0, -0.25, 0.0]
     ego_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
-    obstacle_robot_base_pos: [0.30, 0.20, 0.0]
-    obstacle_robot_base_orn: [0.0, 0.0, 0.0, 1.0]
+    obstacle_robot_base_pos: [0.0, 0.25, 0.0]
+    obstacle_robot_base_orn: [0.0, 0.0, 1.0, 0.0]
     gui: false
     sensor_link_mode: mid
     ray_mode: cone

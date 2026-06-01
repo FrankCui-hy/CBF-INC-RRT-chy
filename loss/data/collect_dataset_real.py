@@ -171,11 +171,11 @@ def build_episode_samples_real(cfg: Dict[str, Any], device: torch.device) -> Dic
     ray_mix_enabled = bool(ray_mix_cfg.get("enabled", False))
     ray_mix_sphere_ratio = float(ray_mix_cfg.get("sphere_ratio", 0.7))
     ray_mix_cone_ratio = 1.0 - ray_mix_sphere_ratio
-    # Keep base-relative layout aligned with eval defaults (main y=-0.20, obstacle y=+0.20).
-    ego_base_pos = tuple(real_cfg.get("ego_robot_base_pos", (0.0, -0.2, 0.0)))
+    # Keep base-relative layout aligned with eval defaults: face-to-face, 0.5m base distance.
+    ego_base_pos = tuple(real_cfg.get("ego_robot_base_pos", (0.0, -0.25, 0.0)))
     ego_base_orn = tuple(real_cfg.get("ego_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
-    obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.3, 0.2, 0.0)))
-    obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 0.0, 1.0)))
+    obstacle_base_pos = tuple(real_cfg.get("obstacle_robot_base_pos", (0.0, 0.25, 0.0)))
+    obstacle_base_orn = tuple(real_cfg.get("obstacle_robot_base_orn", (0.0, 0.0, 1.0, 0.0)))
     near_episode_ratio = float(real_cfg.get("near_episode_ratio", 0.0))
     near_base_mode = str(real_cfg.get("near_base_mode", "fixed")).lower()
     near_obstacle_base_pos = tuple(real_cfg.get("near_obstacle_base_pos", obstacle_base_pos))

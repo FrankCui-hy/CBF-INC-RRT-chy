@@ -1534,8 +1534,8 @@ def run_moving_obstacle_rollout(
 	amp_range=(0.03, 0.12),
 	omega_range=(0.3, 1.2),
 	obstacle_mode: str = "arm",
-	obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
-	obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
+	obstacle_arm_base_xyz=(0.0, 0.25, 0.0),
+	obstacle_arm_base_rpy=(0.0, 0.0, np.pi),
 	obstacle_arm_strength: float = 200.0,
 	obstacle_arm_seed: int = 0,
 	obstacle_arm_urdf: str = None,
@@ -1556,8 +1556,8 @@ def run_moving_obstacle_rollout(
     block_x: float = 0.50,
     block_y_off: float = 0.10,
     block_z: float = 0.03,
-    main_base_y: float = -0.20,
-    obst_base_y: float = +0.20,
+    main_base_y: float = -0.25,
+    obst_base_y: float = +0.25,
     randomize_bases: bool = False,
     base_y_jitter: float = 0.0,
     base_y_min_sep: float = 0.25,
@@ -3700,8 +3700,8 @@ if __name__ == "__main__":
     parser.add_argument("--block_x", type=float, default=0.50)
     parser.add_argument("--block_y_off", type=float, default=0.10)
     parser.add_argument("--block_z", type=float, default=0.03)
-    parser.add_argument("--main_base_y", type=float, default=-0.20)
-    parser.add_argument("--obst_base_y", type=float, default=+0.20)
+    parser.add_argument("--main_base_y", type=float, default=-0.25)
+    parser.add_argument("--obst_base_y", type=float, default=+0.25)
     parser.add_argument(
         "--randomize_bases",
         action="store_true",
@@ -3896,8 +3896,8 @@ if __name__ == "__main__":
             omega_range=(1.2, 3.0),
             obstacle_mode=str(args_cli.obstacle_mode),
             obstacle_arm_seed=int(args_cli.seed),
-            obstacle_arm_base_xyz=(0.35, 0.25, 0.0),
-            obstacle_arm_base_rpy=(0.0, 0.0, 0.0),
+            obstacle_arm_base_xyz=(0.0, 0.25, 0.0),
+            obstacle_arm_base_rpy=(0.0, 0.0, np.pi),
             obstacle_arm_strength=260.0,
             pause_on_goal=False,
             goal_pause_tol=1e-4,

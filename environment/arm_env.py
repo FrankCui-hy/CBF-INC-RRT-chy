@@ -32,8 +32,8 @@ class ArmEnv:
 			include_floor=True,
 			obstacle_robot_name: str = None,
 			obstacle_traj_path: str = None,
-			obstacle_robot_base_pos: tuple = (0.3, 0.0, 0.0),
-			obstacle_robot_base_orn: tuple = (0.0, 0.0, 0.0, 1.0),
+			obstacle_robot_base_pos: tuple = (0.0, 0.5, 0.0),
+			obstacle_robot_base_orn: tuple = (0.0, 0.0, 1.0, 0.0),
 	):
 		print("Initializing environment...")
 

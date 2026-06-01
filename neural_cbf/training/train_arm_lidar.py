@@ -63,7 +63,7 @@ def main(args):
         obstacle_robot_name=args.obstacle_robot_name,
         obstacle_traj_path=args.obstacle_traj_path,
         obstacle_robot_base_pos=(float(args.obst_base_x), float(args.obst_base_y), float(args.obst_base_z)),
-        obstacle_robot_base_orn=(0.0, 0.0, 0.0, 1.0),
+        obstacle_robot_base_orn=(0.0, 0.0, 1.0, 0.0),
     )
     robot = environment.robot_list[0]
     # Align training sampling geometry with eval defaults.
@@ -280,10 +280,10 @@ if __name__ == "__main__":
     parser.add_argument('--obstacle_robot_name', type=str, default='panda')
     parser.add_argument('--obstacle_traj_path', type=str, default='data/obstacle_trajs/panda_trajs.npz')
     parser.add_argument('--main_base_x', type=float, default=0.0)
-    parser.add_argument('--main_base_y', type=float, default=-0.20)
+    parser.add_argument('--main_base_y', type=float, default=-0.25)
     parser.add_argument('--main_base_z', type=float, default=0.0)
-    parser.add_argument('--obst_base_x', type=float, default=0.30)
-    parser.add_argument('--obst_base_y', type=float, default=0.20)
+    parser.add_argument('--obst_base_x', type=float, default=0.0)
+    parser.add_argument('--obst_base_y', type=float, default=0.25)
     parser.add_argument('--obst_base_z', type=float, default=0.0)
     parser.add_argument('--obstacle_horizon_s', type=float, default=0.2)
     parser.add_argument('--obstacle_block_dist', type=float, default=0.1)

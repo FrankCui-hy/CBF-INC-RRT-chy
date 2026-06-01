@@ -239,6 +239,9 @@ python neural_cbf/evaluation/compare_safe_h.py \
 # 6. 生成新版 all-rays-at-once neural raycast surrogate 数据集
 # =========================
 
+# 默认双机械臂布局：面对面，ego=(0,-0.25,0)，obstacle=(0,0.25,0)，基座距离 0.5m
+# 默认 d_safe=0.05
+
 # 6.1 debug 采样：默认 10k states，6 anchors x 128 rays = 768 rays
 python scripts/generate_neural_raycast_dataset.py \
   --preset debug \
