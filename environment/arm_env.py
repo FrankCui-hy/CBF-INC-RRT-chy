@@ -305,6 +305,7 @@ class ArmEnv:
 				except AssertionError:
 					continue
 			assert file_name.endswith('.npz')
+			os.makedirs(os.path.dirname(file_name), exist_ok=True)
 			np.savez(file_name, obstacle_positions=positions)
 
 	def _generate_obstacle(self, obs_configs):

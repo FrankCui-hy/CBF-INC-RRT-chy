@@ -236,7 +236,30 @@ python neural_cbf/evaluation/compare_safe_h.py \
 
 
 # =========================
-# 6. 推送到 GitHub
+# 6. 生成新版 all-rays-at-once neural raycast surrogate 数据集
+# =========================
+
+# 6.1 debug 采样：默认 10k states，6 anchors x 128 rays = 768 rays
+python scripts/generate_neural_raycast_dataset.py \
+  --preset debug \
+  --out_dir dataset/neural_raycast_debug \
+  --seed 0
+
+# 6.2 full 采样：默认 100k states
+python scripts/generate_neural_raycast_dataset.py \
+  --preset full \
+  --out_dir dataset/neural_raycast_full \
+  --seed 0
+
+# 6.3 自定义小样本快速冒烟测试
+python scripts/generate_neural_raycast_dataset.py \
+  --num_samples 200 \
+  --out_dir dataset/neural_raycast_smoke \
+  --seed 0
+
+
+# =========================
+# 7. 推送到 GitHub
 # =========================
 
 # 当前仓库已经配置 origin 为 SSH remote。如果 GitHub 已经添加了本机 SSH 公钥，直接推送：
