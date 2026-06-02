@@ -851,9 +851,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rays_per_anchor", type=int, default=128)
     p.add_argument("--r_max", type=float, default=5.0)
     p.add_argument("--distance_query_range", type=float, default=2.0)
-    p.add_argument("--d_safe", type=float, default=0.05)
+    p.add_argument("--d_safe", type=float, default=0.01)
     p.add_argument("--epsilon", type=float, default=0.04)
-    p.add_argument("--delta", type=float, default=0.20)
+    p.add_argument("--delta", type=float, default=0.19)
     p.add_argument("--near_noise_std", type=float, default=0.01)
     p.add_argument("--near_perturbations", type=int, default=4)
     p.add_argument("--guided_ik_noise_std", type=float, default=0.04)
@@ -920,7 +920,7 @@ def main() -> None:
 
     wanted = target_counts(
         num_samples,
-        {"far_random": 0.20, "medium_close": 0.30, "near_boundary": 0.40, "collision_unsafe": 0.10},
+        {"far_random": 0.15, "medium_close": 0.25, "near_boundary": 0.40, "collision_unsafe": 0.10},
     )
     records: List[StateRecord] = []
     counts = Counter()
