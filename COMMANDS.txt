@@ -263,7 +263,38 @@ python scripts/generate_neural_raycast_dataset.py \
 
 
 # =========================
-# 7. 推送到 GitHub
+# 7. 训练新版 FK-aware ray-link g_phi
+# =========================
+
+# 7.1 先检查 Torch FK 和采样阶段 PyBullet FK 是否一致
+# 这个脚本只做一致性检查，不训练模型
+python -m loss.tests.check_fk_consistency \
+  --dataset_dir dataset/neural_raycast_full \
+  --config loss/configs/config_raylink_g_phi.yaml \
+  --num_samples 32 \
+  --device cpu
+
+# 7.2 训练 FK-aware neural raycast surrogate
+# 输入是 q_ego, q_obs；模型内部先用 Torch FK 生成 ray-link geometry query
+# 默认输出目录：loss/outputs_raylink_g_phi
+python -m loss.training.train_raylink_g_phi \
+  --config loss/configs/config_raylink_g_phi.yaml \
+  --dataset_dir dataset/neural_raycast_full \
+  --device cuda
+
+# 7.3 用 best_safety checkpoint 在 test split 上评估
+# 评估会输出 overall、near_boundary、collision_unsafe 等分组指标
+python -m loss.eval.eval_raylink_g_phi \
+  --config loss/configs/config_raylink_g_phi.yaml \
+  --ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --dataset_dir dataset/neural_raycast_full \
+  --split test \
+  --out_dir loss/outputs_raylink_g_phi/eval \
+  --device cuda
+
+
+# =========================
+# 8. 推送到 GitHub
 # =========================
 
 # 当前仓库已经配置 origin 为 SSH remote。如果 GitHub 已经添加了本机 SSH 公钥，直接推送：
