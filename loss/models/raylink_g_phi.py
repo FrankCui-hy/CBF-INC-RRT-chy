@@ -36,8 +36,22 @@ def _tensor4(value: Any, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return t
 
 
+def _translation4(x: float, y: float, z: float, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    t = torch.eye(4, dtype=dtype)
+    t[0, 3] = float(x)
+    t[1, 3] = float(y)
+    t[2, 3] = float(z)
+    return t
+
+
 class RayLinkMLPGPhi(nn.Module):
     """FK-aware MLP raycast surrogate for fixed Panda dual-arm geometry."""
+
+    # PyBullet stores/resets the floating base at the base-link inertial frame.
+    # In this Panda URDF, panda_link0 has inertial origin xyz="0 0 0.05".
+    # PyBullet getLinkState(...)[4:6] reports link frames, so metadata base poses
+    # must be shifted by -5 cm along local z before multiplying URDF FK.
+    PANDA_LINK0_FROM_PYBULLET_BASE_Z = -0.05
 
     def __init__(
         self,
@@ -70,6 +84,11 @@ class RayLinkMLPGPhi(nn.Module):
 
         self.register_buffer("T_W_Bego", _tensor4(metadata["T_W_Bego"]), persistent=False)
         self.register_buffer("T_W_Bobs", _tensor4(metadata["T_W_Bobs"]), persistent=False)
+        self.register_buffer(
+            "T_pybullet_base_link0",
+            _translation4(0.0, 0.0, self.PANDA_LINK0_FROM_PYBULLET_BASE_Z),
+            persistent=False,
+        )
         self.register_buffer("anchor_T_L_S_buf", self.anchor_T_L_S, persistent=False)
         self.register_buffer("local_ray_dirs_buf", self.local_ray_dirs, persistent=False)
         anchor_index = torch.arange(self.num_anchors, dtype=torch.long).repeat_interleave(self.rays_per_anchor)
@@ -85,7 +104,9 @@ class RayLinkMLPGPhi(nn.Module):
         self.ray_head = _mlp([2 * int(pair_hidden_dim)] + list(head_hidden_dims) + [2], activation)
 
     def _world_from_base(self, T_W_B: torch.Tensor, T_B_L: torch.Tensor) -> torch.Tensor:
-        return T_W_B.to(device=T_B_L.device, dtype=T_B_L.dtype).view(1, 1, 4, 4) @ T_B_L
+        T_W_pybullet_base = T_W_B.to(device=T_B_L.device, dtype=T_B_L.dtype).view(1, 1, 4, 4)
+        T_pybullet_base_link0 = self.T_pybullet_base_link0.to(device=T_B_L.device, dtype=T_B_L.dtype).view(1, 1, 4, 4)
+        return T_W_pybullet_base @ T_pybullet_base_link0 @ T_B_L
 
     def compute_geometry(self, q_ego: torch.Tensor, q_obs: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = int(q_ego.shape[0])
