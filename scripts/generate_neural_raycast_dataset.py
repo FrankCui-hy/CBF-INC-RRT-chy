@@ -920,7 +920,7 @@ def main() -> None:
 
     wanted = target_counts(
         num_samples,
-        {"far_random": 0.15, "medium_close": 0.25, "near_boundary": 0.40, "collision_unsafe": 0.10},
+        {"far_random": 0.15, "medium_close": 0.35, "near_boundary": 0.40, "collision_unsafe": 0.10},
     )
     records: List[StateRecord] = []
     counts = Counter()

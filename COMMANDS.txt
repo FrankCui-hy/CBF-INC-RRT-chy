@@ -241,7 +241,7 @@ python neural_cbf/evaluation/compare_safe_h.py \
 
 # 默认双机械臂布局：面对面，ego=(0,-0.25,0)，obstacle=(0,0.25,0)，基座距离 0.5m
 # 默认分层：碰撞/unsafe <0.01m，near 0.01-0.05m，mid 0.05-0.20m，far >0.20m
-# 默认占比：collision:near:mid:far = 10:40:25:15
+# 默认占比：collision:near:mid:far = 10:40:35:15
 
 # 6.1 debug 采样：默认 10k states，6 anchors x 128 rays = 768 rays
 python scripts/generate_neural_raycast_dataset.py \
