@@ -176,3 +176,148 @@ git push origin main
 # 如果没有配置 SSH key，可以先改成 HTTPS remote，再用 GitHub Personal Access Token 推送：
 git remote set-url origin https://github.com/FrankCui-hy/CBF-INC-RRT-chy.git
 git push origin main
+
+
+python scripts/smoke_test_raylink_cbf_modes.py \
+    --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+    --batch_size 2 \
+    --ego_base_pos 0.0,-0.25,0.0 \
+    --ego_base_orn 0.0,0.0,0.0,1.0 \
+    --obs_base_pos 0.0,0.25,0.0 \
+    --obs_base_orn 0.0,0.0,1.0,0.0
+
+
+# =========================
+# 7. RayLink g_phi 接入 CBF 后续流程
+# =========================
+
+# 当前顺序：
+# 1) 先跑 smoke，确认 legacy_oracle / gphi static / gphi dynamic / raylink_oracle 路径都通。
+# 2) 再准备 cbf_state_label_v1 cache。
+# 3) 用同一个 state-label cache 分别训练 raylink_oracle clean baseline 和 gphi ours。
+#
+# 注意：
+# - CBF state-label cache 只保存 q_ego/q_obs/qdot_obs/traj_idx/step_idx/masks/J_P/J_R。
+# - observation 不写入新 cache；legacy_oracle 用旧 oracle point cloud，gphi/raylink_oracle 在线生成 observation。
+# - gphi/raylink_oracle 是 point-only，dataset_name 不要包含 norm。
+# - dynamic gphi 需要真实 qdot_obs；如果 cache 里 qdot_obs 是静态零，只能用于 static gphi / raylink_oracle FD。
+
+
+# 7.1 必跑 smoke：已经通过一次后，换 ckpt 或换机器时再跑
+python scripts/smoke_test_raylink_cbf_modes.py \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --batch_size 2 \
+  --ego_base_pos 0.0,-0.25,0.0 \
+  --ego_base_orn 0.0,0.0,0.0,1.0 \
+  --obs_base_pos 0.0,0.25,0.0 \
+  --obs_base_orn 0.0,0.0,1.0,0.0
+
+
+# 7.2 先确认 RayLink g_phi dataset 里是否有 d_min/h/collision
+# 如果这个命令打印出 d_min/h/collision，说明可以从 RayLink HDF5 转 CBF state-label cache。
+python -c "import h5py; f=h5py.File('dataset/neural_raycast_full/train.hdf5','r'); print(sorted(f.keys())); f.close()"
+
+
+# 7.3 方案 A：如果你已有旧 CBF auxv2 cache，可以先提取 state-label cache
+# 适用：旧 cache 已经含 q_obs/qdot_obs/traj_idx/step_idx，且你确认是 dual Panda 0.25m base setting。
+# 如果旧 cache 是 norm 数据，即 old oracle point cloud 每点带 normal，用 --add_normal；如果不是 norm，去掉 --add_normal。
+python scripts/extract_cbf_state_label_cache.py \
+  --source_cache PATH/TO/old_cbf_auxv2_cache.pt \
+  --out dataset/cbf_state_label/old_auxv2_dual_panda_0p25_state_label.pt \
+  --assume_source_env dual_panda_0p25_v1 \
+  --n_observation_dataset 256 \
+  --point_dim 3 \
+  --add_normal
+
+
+# 7.4 方案 B：推荐用于 static gphi / raylink_oracle，把 RayLink HDF5 转 CBF state-label cache
+# 转换规则建议：
+#   safe_mask     = d_min > d_safe
+#   unsafe_mask   = collision == True
+#   boundary_mask = not safe_mask and not unsafe_mask
+#   qdot_obs      = zeros，仅标注为 static obstacle cache；不要用于 --gphi_include_qobs_dynamics
+#   J_P/J_R       = 用 ArmLidar.get_batch_jacobian(q_ego) 重新计算
+python scripts/convert_raylink_raycast_to_cbf_state_label_cache.py \
+  --dataset_dir dataset/neural_raycast_full \
+  --out dataset/cbf_state_label/raylink_static_state_label.pt \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --d_safe 0.02 \
+  --qdot_mode zeros \
+  --assume_static_obstacle \
+  --ego_base_pos 0.0,-0.25,0.0 \
+  --obs_base_pos 0.0,0.25,0.0 \
+  --obs_base_quat 0.0,0.0,1.0,0.0
+
+
+# 7.5 训练 clean oracle-ray baseline：raylink_oracle + finite-difference
+# 第一版 raylink_oracle 只支持 train_use_fd=True。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version cbf_raylink_oracle_fd \
+  --no_baseline \
+  --cbf_obs_mode raylink_oracle \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --state_label_cache dataset/cbf_state_label/raylink_static_state_label.pt \
+  --train_use_fd \
+  --dataset_name pino_motor \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+
+# 7.6 训练 ours static：frozen gphi + analytic dH/dq_ego，Lf_h=0
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version cbf_gphi_static_chain \
+  --no_baseline \
+  --cbf_obs_mode gphi \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --state_label_cache dataset/cbf_state_label/raylink_static_state_label.pt \
+  --no_train_use_fd \
+  --gphi_hit_threshold 0.5 \
+  --gphi_hit_temp 0.1 \
+  --dataset_name pino_motor \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+
+# 7.7 训练 ours dynamic：frozen gphi + analytic dH/dq_ego + dH/dq_obs @ qdot_obs
+# 只有在 state-label cache 里有真实 qdot_obs 时才运行；不要用 qdot_obs=zeros 的 static cache。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version cbf_gphi_dynamic_chain \
+  --no_baseline \
+  --cbf_obs_mode gphi \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --state_label_cache dataset/cbf_state_label/raylink_dynamic_state_label.pt \
+  --no_train_use_fd \
+  --gphi_include_qobs_dynamics \
+  --gphi_hit_threshold 0.5 \
+  --gphi_hit_temp 0.1 \
+  --dataset_name pino_motor \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 256 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+
+# 7.8 找训练输出 ckpt
+find models -name "*.ckpt" | sort
