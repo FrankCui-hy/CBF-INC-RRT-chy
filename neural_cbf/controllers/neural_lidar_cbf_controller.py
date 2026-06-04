@@ -1,12 +1,10 @@
 import itertools
 import time
-import sys
 from functools import partial
 from typing import Tuple, List, Optional
 from collections import OrderedDict
 import random
 import tqdm
-from pathlib import Path
 
 import pybullet as p
 
@@ -20,24 +18,19 @@ from torch.func import jvp
 import matplotlib.pyplot as plt
 
 from neural_cbf.systems import ArmLidar
-from neural_cbf.systems.utils import ScenarioList
+from neural_cbf.systems.utils import ScenarioList, cartesian_to_spherical
 from neural_cbf.controllers import NeuralObsCBFController
+from neural_cbf.controllers.cbf_observation_builder import (
+	CBFObservationBuilder,
+	compute_metadata_fingerprint,
+	raylink_cbf_metadata,
+	_translation_from_T,
+	_quat_xyzw_from_T,
+)
 from neural_cbf.controllers.utils import PointNetfeat, PointNetVanillaEncoder
 from neural_cbf.datamodules.episodic_datamodule import EpisodicDataModule
 from neural_cbf.experiments import ExperimentSuite
-
-try:
-	from loss.models.g_phi import SurrogateObservationNet
-except Exception:
-	# Fallback when running scripts directly (e.g. python neural_cbf/training/train_arm_lidar.py),
-	# where repo root may not be on sys.path.
-	repo_root = str(Path(__file__).resolve().parents[2])
-	if repo_root not in sys.path:
-		sys.path.insert(0, repo_root)
-	try:
-		from loss.models.g_phi import SurrogateObservationNet
-	except Exception:
-		SurrogateObservationNet = None
+from loss.models.raylink_g_phi import RayLinkMLPGPhi
 
 
 class NeuralLidarCBFController(NeuralObsCBFController):
@@ -119,13 +112,42 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			raise ValueError(f"Unknown ab_mode={self.ab_mode}. Use A_no_normal or B_with_normal.")
 		self.baseline = bool(kwargs.get("baseline", False))
 		self.obs_backend = kwargs.get("obs_backend", "gphi")
+		self.cbf_obs_mode = kwargs.get("cbf_obs_mode", None)
+		if self.cbf_obs_mode is None:
+			self.cbf_obs_mode = "gphi" if ((not self.baseline) and self.obs_backend == "gphi") else "legacy_oracle"
 		self.gphi_ckpt = kwargs.get("gphi_ckpt", "")
+		self.gphi_hit_threshold = float(kwargs.get("gphi_hit_threshold", 0.5))
+		self.gphi_hit_temp = float(kwargs.get("gphi_hit_temp", 0.1))
+		self.gphi_freeze = bool(kwargs.get("gphi_freeze", True))
+		self.gphi_include_qobs_dynamics = bool(kwargs.get("gphi_include_qobs_dynamics", False))
+		self.gphi_metadata = None
+		self.gphi_config = None
+		self.gphi_metadata_fingerprint = ""
 		self.train_use_fd = bool(kwargs.get("train_use_fd", self.baseline))
 		self._validate_method_config()
-		self.use_gphi_chain = (not self.baseline) and self.obs_backend == "gphi"
+		self.use_gphi_chain = self.cbf_obs_mode == "gphi"
+		self.use_raylink_layout = self.cbf_obs_mode in ("gphi", "raylink_oracle")
 		self.g_phi = None
-		if self.use_gphi_chain:
+		if self.use_raylink_layout:
 			self._init_g_phi()
+			self._validate_raylink_metadata()
+		self.obs_builder = CBFObservationBuilder(
+			mode=self.cbf_obs_mode,
+			q_dim=self.dynamics_model.n_dims,
+			obs_dim=self.dynamics_model.o_dims_in_dataset,
+			aux_dim=self.dynamics_model.state_aux_dims_in_dataset,
+			g_phi=self.g_phi,
+			gphi_metadata=self.gphi_metadata,
+			r_max=float((self.gphi_metadata or {}).get("r_max", 5.0)),
+			hit_threshold=self.gphi_hit_threshold,
+			hit_temp=self.gphi_hit_temp,
+			add_normal=bool(self.dynamics_model.add_normal),
+			point_dim=int(self.dynamics_model.point_dims),
+			raycast_env=getattr(self.dynamics_model, "env", None),
+			raycast_ego_robot=getattr(self.dynamics_model, "robot", None),
+			raycast_obstacle_robot=getattr(getattr(self.dynamics_model, "env", None), "obstacle_robot", None),
+		)
+		self._validate_state_label_cache_metadata()
 		if self.use_neural_actor:
 			# actor head
 			self.actor_layers: OrderedDict[str, nn.Module] = OrderedDict()
@@ -144,113 +166,353 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 	def _validate_method_config(self):
 		if self.obs_backend not in ("gphi", "raw"):
 			raise ValueError(f"Unknown obs_backend={self.obs_backend}. Use gphi or raw.")
+		if self.cbf_obs_mode not in ("legacy_oracle", "gphi", "raylink_oracle"):
+			raise ValueError(f"Unknown cbf_obs_mode={self.cbf_obs_mode}.")
+		if self.gphi_include_qobs_dynamics:
+			if self.cbf_obs_mode != "gphi":
+				raise ValueError("gphi_include_qobs_dynamics is only supported for cbf_obs_mode='gphi'.")
+			if self.train_use_fd:
+				raise ValueError("gphi_include_qobs_dynamics requires analytic chain rule, i.e. train_use_fd=False.")
 		if self.baseline:
-			if self.obs_backend != "raw":
-				raise ValueError("baseline=True requires obs_backend='raw'. Use baseline=False for Safe_Dual gphi-chain.")
+			if self.cbf_obs_mode != "legacy_oracle":
+				raise ValueError("baseline=True requires cbf_obs_mode='legacy_oracle'.")
 			if not self.train_use_fd:
 				raise ValueError("baseline=True requires train_use_fd=True so the baseline uses the legacy FD/simulated Lie derivative.")
 			return
-		if self.obs_backend != "gphi":
-			raise ValueError("Safe_Dual method requires baseline=False and obs_backend='gphi'. Use baseline=True for raw/FD baseline.")
-		if self.train_use_fd:
-			raise ValueError("Safe_Dual method requires train_use_fd=False so the analytic g_phi chain derivative is used.")
-		if self.gphi_ckpt is None or str(self.gphi_ckpt).strip() == "":
-			raise ValueError("Safe_Dual method requires a non-empty gphi_ckpt.")
+		if self.cbf_obs_mode == "legacy_oracle":
+			return
+		if self.cbf_obs_mode == "gphi":
+			if self.train_use_fd:
+				raise ValueError("cbf_obs_mode='gphi' requires train_use_fd=False so analytic chain-rule hdot is used.")
+			if self.gphi_ckpt is None or str(self.gphi_ckpt).strip() == "":
+				raise ValueError("cbf_obs_mode='gphi' requires a non-empty gphi_ckpt.")
+			if bool(self.dynamics_model.add_normal):
+				raise ValueError("cbf_obs_mode='gphi' is point-only; use a non-normal CBF dataset/model.")
+			if int(self.dynamics_model.point_dims) != 3:
+				raise ValueError("cbf_obs_mode='gphi' currently requires point_dim=3 and no extra point channels.")
+		if self.cbf_obs_mode == "raylink_oracle":
+			if not self.train_use_fd:
+				raise ValueError(
+					"cbf_obs_mode='raylink_oracle' currently supports train_use_fd=True only. "
+					"Oracle raycast is not differentiable, so analytic chain rule is not supported."
+				)
+			if self.gphi_ckpt is None or str(self.gphi_ckpt).strip() == "":
+				raise ValueError("cbf_obs_mode='raylink_oracle' requires a non-empty gphi_ckpt for RayLink metadata.")
+			if bool(self.dynamics_model.add_normal):
+				raise ValueError("cbf_obs_mode='raylink_oracle' is point-only; use a non-normal CBF dataset/model.")
+			if int(self.dynamics_model.point_dims) != 3:
+				raise ValueError("cbf_obs_mode='raylink_oracle' currently requires point_dim=3 and no extra point channels.")
 
 	def method_metadata(self) -> dict:
-		method = "baseline_fd_raw" if self.baseline else "safe_dual_gphi_chain"
+		method = "baseline_fd_raw" if self.baseline else f"cbf_obs_{self.cbf_obs_mode}"
 		return {
 			"method": method,
 			"baseline": bool(self.baseline),
 			"obs_backend": str(self.obs_backend),
+			"cbf_obs_mode": str(self.cbf_obs_mode),
 			"ab_mode": str(self.ab_mode),
 			"train_use_fd": bool(self.train_use_fd),
 			"use_gphi_chain": bool(self.use_gphi_chain),
+			"use_raylink_layout": bool(getattr(self, "use_raylink_layout", False)),
 			"gphi_ckpt": str(self.gphi_ckpt or ""),
+			"gphi_hit_threshold": float(self.gphi_hit_threshold),
+			"gphi_hit_temp": float(self.gphi_hit_temp),
+			"gphi_include_qobs_dynamics": bool(self.gphi_include_qobs_dynamics),
+			"gphi_metadata_fingerprint": str(self.gphi_metadata_fingerprint),
 		}
 
 	def _init_g_phi(self):
-		if SurrogateObservationNet is None:
-			raise RuntimeError("loss.models.g_phi is not available. Cannot use obs_backend=gphi.")
-		if self.gphi_ckpt is None or self.gphi_ckpt == "":
-			raise ValueError("obs_backend=gphi requires --gphi_ckpt.")
 		ckpt = torch.load(self.gphi_ckpt, map_location="cpu")
-		model_cfg = ckpt.get("model_cfg", {})
-		sys_cfg = ckpt.get("system_cfg", {})
-		self.g_phi = SurrogateObservationNet(
-			n_ego=int(sys_cfg.get("n_ego", self.dynamics_model.n_dims)),
-			n_obs=int(sys_cfg.get("n_obs", self.dynamics_model.n_dims)),
-			rays=int(sys_cfg.get("rays", self.dynamics_model.point_in_dataset_pc)),
-			hidden_dims=list(model_cfg.get("hidden_dims", [256, 256, 256])),
+		if "metadata" not in ckpt:
+			raise KeyError("RayLink checkpoint must contain metadata.")
+		if self.cbf_obs_mode == "gphi" and "model_state_dict" not in ckpt:
+			raise KeyError("RayLink g_phi checkpoint must contain model_state_dict for cbf_obs_mode='gphi'.")
+		self.gphi_metadata = ckpt["metadata"]
+		self.gphi_config = ckpt.get("config", {})
+		model_cfg = self.gphi_config.get("model", {}) if isinstance(self.gphi_config, dict) else {}
+		self.g_phi = RayLinkMLPGPhi(
+			self.gphi_metadata,
+			pair_hidden_dim=int(model_cfg.get("pair_hidden_dim", 128)),
+			head_hidden_dims=list(model_cfg.get("head_hidden_dims", [128, 64])),
+			link_embed_dim=int(model_cfg.get("link_embed_dim", 8)),
+			anchor_embed_dim=int(model_cfg.get("anchor_embed_dim", 8)),
 			activation=str(model_cfg.get("activation", "silu")),
-			predict_hit_prob=bool(model_cfg.get("predict_hit_prob", True)),
-			norm_eps=float(model_cfg.get("norm_eps", 1e-6)),
+			finger_open=float(model_cfg.get("finger_open", 0.04)),
 		)
-		self.g_phi.load_state_dict(ckpt["model"])
+		if "model_state_dict" in ckpt:
+			self.g_phi.load_state_dict(ckpt["model_state_dict"])
 		self.g_phi.eval()
-		for p in self.g_phi.parameters():
-			p.requires_grad = False
+		if self.gphi_freeze or self.cbf_obs_mode == "raylink_oracle":
+			for p in self.g_phi.parameters():
+				p.requires_grad_(False)
+		fp_meta = raylink_cbf_metadata(
+			self.gphi_metadata,
+			gphi_ckpt=str(self.gphi_ckpt or ""),
+			add_normal=bool(self.dynamics_model.add_normal),
+			point_dim=int(self.dynamics_model.point_dims),
+		)
+		self.gphi_metadata_fingerprint = compute_metadata_fingerprint(fp_meta)
 
-	def _reshape_gphi_to_dataset_obs(self, p_hat: torch.Tensor, n_hat: torch.Tensor) -> torch.Tensor:
-		"""
-		Map g_phi outputs to ArmLidar dataset observation layout:
-		(B, point_in_dataset_pc, point_dim_dataset), where point_dim_dataset is 3 or 6.
-		"""
-		target = int(self.dynamics_model.point_in_dataset_pc)
-		B, R, _ = p_hat.shape
-		idx = torch.linspace(0, max(R - 1, 0), steps=target, device=p_hat.device).round().long()
-		p_sel = p_hat[:, idx, :]
-		if self.dynamics_model.add_normal:
-			n_sel = n_hat[:, idx, :]
-			if self.ab_mode == "A_no_normal":
-				n_sel = torch.zeros_like(n_sel)
-			return torch.cat([p_sel, n_sel], dim=-1)
-		return p_sel
+	def _validate_raylink_metadata(self):
+		meta = self.gphi_metadata or {}
+		required_keys = ("T_W_Bego", "T_W_Bobs", "anchor_link_ids", "anchor_T_L_S", "local_ray_dirs", "r_max")
+		missing = [key for key in required_keys if key not in meta]
+		if missing:
+			raise ValueError(f"RayLink metadata is missing required keys: {missing}.")
 
-	def _replace_datax_obs_with_gphi(self, datax: torch.Tensor) -> torch.Tensor:
-		if not self.use_gphi_chain:
-			return datax
-		qe = datax[:, : self.dynamics_model.n_dims]
-		qo = self.dynamics_model.get_obstacle_q_from_datax(datax)
-		if qo is None:
-			return datax
-		device = datax.device
-		if next(self.g_phi.parameters()).device != device:
-			self.g_phi = self.g_phi.to(device)
-		pred = self.g_phi(qe, qo)
-		obs_dataset = self._reshape_gphi_to_dataset_obs(pred["p_hat"], pred["n_hat"]).reshape(datax.shape[0], -1)
-		datax_new = datax.clone()
-		datax_new[:, self.dynamics_model.n_dims : -self.dynamics_model.state_aux_dims_in_dataset] = obs_dataset
-		return datax_new
+		local_ray_dirs = torch.as_tensor(meta["local_ray_dirs"])
+		if local_ray_dirs.ndim != 3 or int(local_ray_dirs.shape[-1]) != 3:
+			raise ValueError(
+				"RayLink metadata local_ray_dirs must have shape [num_anchors, rays_per_anchor, 3], "
+				f"got {tuple(local_ray_dirs.shape)}."
+			)
+		num_anchors = int(local_ray_dirs.shape[0])
+		rays_per_anchor = int(local_ray_dirs.shape[1])
+		num_rays = int(num_anchors * rays_per_anchor)
+		if int(meta.get("num_anchors", num_anchors)) != num_anchors:
+			raise ValueError("RayLink metadata num_anchors does not match local_ray_dirs.")
+		if int(meta.get("num_rays_per_anchor", rays_per_anchor)) != rays_per_anchor:
+			raise ValueError("RayLink metadata num_rays_per_anchor does not match local_ray_dirs.")
+		if int(meta.get("num_rays_total", num_rays)) != num_rays:
+			raise ValueError("RayLink metadata num_rays_total does not match num_anchors * rays_per_anchor.")
+		if self.g_phi is not None and int(getattr(self.g_phi, "num_rays", num_rays)) != num_rays:
+			raise ValueError("RayLink model num_rays does not match metadata num_rays_total.")
+		if len(meta.get("anchor_link_ids", [])) != num_anchors:
+			raise ValueError("RayLink metadata anchor_link_ids length does not match num_anchors.")
+
+		ray_order = str(meta.get("ray_ordering_rule", meta.get("ray_order", "anchor_major"))).lower()
+		if "anchor_major" not in ray_order and not ("anchor" in ray_order and "local_ray_index" in ray_order):
+			raise ValueError(f"raylink_oracle requires anchor-major RayLink ray order, got {ray_order!r}.")
+
+		if self.cbf_obs_mode == "raylink_oracle":
+			env = getattr(self.dynamics_model, "env", None)
+			robot = getattr(self.dynamics_model, "robot", None)
+			obstacle_robot = getattr(env, "obstacle_robot", None) if env is not None else None
+			if env is None or not hasattr(env, "p") or robot is None or obstacle_robot is None:
+				raise ValueError("cbf_obs_mode='raylink_oracle' requires a live ArmEnv with ego and obstacle Panda bodies.")
+			self._validate_raylink_env_pose(env, robot, obstacle_robot)
+
+	def _validate_raylink_env_pose(self, env, robot, obstacle_robot):
+		def _close_vec(label, actual, expected, tol=1e-5):
+			if expected is None:
+				raise ValueError(f"RayLink metadata is missing {label}.")
+			if len(actual) != len(expected) or any(abs(float(a) - float(b)) > tol for a, b in zip(actual, expected)):
+				raise ValueError(f"{label} mismatch: env has {list(actual)}, RayLink metadata has {list(expected)}.")
+
+		ego_expected = _translation_from_T(self.gphi_metadata.get("T_W_Bego"))
+		obs_expected = _translation_from_T(self.gphi_metadata.get("T_W_Bobs"))
+		obs_quat_expected = _quat_xyzw_from_T(self.gphi_metadata.get("T_W_Bobs"))
+		ego_pos, _ = env.p.getBasePositionAndOrientation(int(robot.robotId))
+		obs_pos, obs_quat = env.p.getBasePositionAndOrientation(int(obstacle_robot.robotId))
+		_close_vec("ego_base_pos", ego_pos, ego_expected)
+		_close_vec("obs_base_pos", obs_pos, obs_expected)
+		if obs_quat_expected is None:
+			raise ValueError("RayLink metadata is missing obs_base_quat/T_W_Bobs rotation.")
+		same = all(abs(float(a) - float(b)) <= 1e-5 for a, b in zip(obs_quat, obs_quat_expected))
+		neg_same = all(abs(float(a) + float(b)) <= 1e-5 for a, b in zip(obs_quat, obs_quat_expected))
+		if not (same or neg_same):
+			raise ValueError(f"obs_base_quat mismatch: env has {list(obs_quat)}, RayLink metadata has {list(obs_quat_expected)}.")
+
+	def _validate_state_label_cache_metadata(self):
+		if self.cbf_obs_mode not in ("gphi", "raylink_oracle"):
+			return
+		state_meta = getattr(self.datamodule, "state_label_metadata", None)
+		if not state_meta or not self.gphi_metadata:
+			return
+
+		def _translation_from_T(T):
+			if T is None:
+				return None
+			return [float(T[0][3]), float(T[1][3]), float(T[2][3])]
+
+		ego_pos = _translation_from_T(self.gphi_metadata.get("T_W_Bego"))
+		obs_pos = _translation_from_T(self.gphi_metadata.get("T_W_Bobs"))
+		for key, gphi_value in (("ego_base_pos", ego_pos), ("obs_base_pos", obs_pos)):
+			cache_value = state_meta.get(key, None)
+			if cache_value is None or gphi_value is None:
+				continue
+			if any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(cache_value, gphi_value)):
+				raise ValueError(
+					f"state_label_cache metadata {key}={cache_value} does not match g_phi metadata {key}={gphi_value}."
+				)
+		obs_quat = _quat_xyzw_from_T(self.gphi_metadata.get("T_W_Bobs"))
+		cache_quat = state_meta.get("obs_base_quat", None)
+		if cache_quat is not None and obs_quat is not None:
+			same = all(abs(float(a) - float(b)) <= 1e-6 for a, b in zip(cache_quat, obs_quat))
+			neg_same = all(abs(float(a) + float(b)) <= 1e-6 for a, b in zip(cache_quat, obs_quat))
+			if not (same or neg_same):
+				raise ValueError(
+					f"state_label_cache metadata obs_base_quat={cache_quat} does not match g_phi metadata obs_base_quat={obs_quat}."
+				)
+
+	def prepare_data(self):
+		out = super().prepare_data()
+		self._validate_state_label_cache_metadata()
+		return out
+
+	def parse_state_from_datax(self, datax: torch.Tensor):
+		q_ego = datax[:, : self.dynamics_model.n_dims]
+		q_obs = self.dynamics_model.get_obstacle_q_from_datax(datax)
+		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(datax)
+		aux = datax[:, -self.dynamics_model.state_aux_dims_in_dataset :]
+		if self.cbf_obs_mode in ("gphi", "raylink_oracle") and q_obs is None:
+			raise ValueError(
+				f"cbf_obs_mode='{self.cbf_obs_mode}' requires q_obs in datax auxv2. "
+				"Use scripts/extract_cbf_state_label_cache.py on an auxv2 cache or regenerate the CBF data."
+			)
+		if self.gphi_include_qobs_dynamics:
+			qdot_obs = self._require_qdot_obs(qdot_obs, datax=datax, q_obs=q_obs)
+		return q_ego, q_obs, qdot_obs, aux
+
+	def _require_qdot_obs(
+			self,
+			qdot_obs: Optional[torch.Tensor],
+			datax: Optional[torch.Tensor] = None,
+			q_obs: Optional[torch.Tensor] = None,
+	) -> torch.Tensor:
+		if qdot_obs is None:
+			raise ValueError(
+				"gphi_include_qobs_dynamics=True requires qdot_obs in datax/state-label cache, "
+				"but qdot_obs could not be parsed. Please regenerate state-label cache with auxv2."
+			)
+		if qdot_obs.ndim != 2:
+			raise ValueError(
+				"gphi_include_qobs_dynamics=True requires rank-2 qdot_obs, "
+				f"got shape {tuple(qdot_obs.shape)}."
+			)
+		expected_dim = int(getattr(self.dynamics_model, "obstacle_qdot_dim", self.dynamics_model.n_dims))
+		if int(qdot_obs.shape[1]) != expected_dim:
+			raise ValueError(
+				"gphi_include_qobs_dynamics=True requires qdot_obs width "
+				f"{expected_dim}, got {int(qdot_obs.shape[1])}. Please regenerate state-label cache with auxv2."
+			)
+		if datax is not None and int(qdot_obs.shape[0]) != int(datax.shape[0]):
+			raise ValueError(
+				"gphi_include_qobs_dynamics=True qdot_obs batch size does not match datax: "
+				f"{int(qdot_obs.shape[0])} vs {int(datax.shape[0])}."
+			)
+		if q_obs is not None:
+			qdot_obs = qdot_obs.to(device=q_obs.device, dtype=q_obs.dtype)
+		elif datax is not None:
+			qdot_obs = qdot_obs.to(device=datax.device, dtype=datax.dtype)
+		return qdot_obs
+
+	def build_observation(
+			self,
+			datax: Optional[torch.Tensor] = None,
+			q_ego: Optional[torch.Tensor] = None,
+			q_obs: Optional[torch.Tensor] = None,
+			aux: Optional[torch.Tensor] = None,
+	) -> torch.Tensor:
+		return self.obs_builder.build(datax=datax, q_ego=q_ego, q_obs=q_obs)
+
+	def _raylink_points_to_controller_x(self, q_ego: torch.Tensor, obs_flat: torch.Tensor) -> torch.Tensor:
+		if self.g_phi is None:
+			raise ValueError("RayLink point conversion requires g_phi to be loaded.")
+		if bool(self.dynamics_model.add_normal) or int(self.dynamics_model.point_dims) != 3:
+			raise ValueError("RayLink CBF path is point-only and requires point_dims=3.")
+		bs = int(q_ego.shape[0])
+		points_w = obs_flat.reshape(bs, -1, 3)
+		link_ids = [int(x) for x in self.dynamics_model.list_sensor]
+		T_B_L = self.g_phi.fk(q_ego, link_ids)
+		T_W_L = self.g_phi._world_from_base(self.g_phi.T_W_Bego, T_B_L)
+		origins = T_W_L[:, :, :3, 3]
+		rotations = T_W_L[:, :, :3, :3]
+
+		local_parts = []
+		for idx in range(len(link_ids)):
+			if points_w.shape[1] >= self.dynamics_model.ray_per_sensor:
+				sampled_index = torch.linspace(
+					0,
+					points_w.shape[1] - 1,
+					steps=self.dynamics_model.ray_per_sensor,
+					device=q_ego.device,
+				).round().long()
+			else:
+				sampled_index = torch.arange(
+					self.dynamics_model.ray_per_sensor,
+					device=q_ego.device,
+				).long() % points_w.shape[1]
+			raw_points = torch.index_select(points_w, dim=1, index=sampled_index)
+			origin = origins[:, idx, :]
+			rotation = rotations[:, idx, :, :]
+			offset_pos = torch.transpose(
+				torch.bmm(torch.transpose(rotation, 1, 2), torch.transpose(raw_points - origin.unsqueeze(1), 1, 2)),
+				1,
+				2,
+			)
+			if self.dynamics_model.point_dims == 4 and not self.dynamics_model.include_point_velocity:
+				offset_pos = cartesian_to_spherical(offset_pos.reshape(-1, 3)).reshape(bs, -1, 4)
+			local_parts.append(offset_pos)
+		obs = torch.stack(local_parts, dim=1)
+		return torch.cat((q_ego, obs.reshape(bs, -1)), dim=1)
+
+	def compose_h_input(
+			self,
+			datax: Optional[torch.Tensor],
+			q_ego: torch.Tensor,
+			obs: torch.Tensor,
+			aux: Optional[torch.Tensor] = None,
+	) -> torch.Tensor:
+		if self.cbf_obs_mode == "legacy_oracle":
+			if datax is None:
+				if aux is None:
+					raise ValueError("legacy_oracle compose_h_input requires datax or aux.")
+				datax = torch.cat((q_ego, obs, aux), dim=1)
+			return self.dynamics_model.datax_to_x(datax)
+		if self.cbf_obs_mode in ("gphi", "raylink_oracle"):
+			return self._raylink_points_to_controller_x(q_ego, obs)
+		raise NotImplementedError(f"Unsupported cbf_obs_mode={self.cbf_obs_mode}.")
+
+	def h_from_state(
+			self,
+			q_ego: torch.Tensor,
+			q_obs: Optional[torch.Tensor],
+			datax: Optional[torch.Tensor] = None,
+			aux: Optional[torch.Tensor] = None,
+	) -> torch.Tensor:
+		obs = self.build_observation(datax=datax, q_ego=q_ego, q_obs=q_obs, aux=aux)
+		x = self.compose_h_input(datax, q_ego, obs, aux=aux)
+		state = x[:, :self.dynamics_model.n_dims]
+		z = self.encode_observation(x, datax)
+		return self.h_nn(torch.cat([state, z], dim=-1))
 
 	def _compute_hdot_auto(self, data_x: torch.Tensor, u: torch.Tensor) -> Optional[torch.Tensor]:
 		if not self.use_gphi_chain:
 			return None
 		q_obs = self.dynamics_model.get_obstacle_q_from_datax(data_x)
-		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(data_x)
-		if q_obs is None or qdot_obs is None:
+		if q_obs is None:
+			if self.gphi_include_qobs_dynamics:
+				raise ValueError(
+					"gphi_include_qobs_dynamics=True requires q_obs in datax/state-label cache, "
+					"but q_obs could not be parsed. Please regenerate state-label cache with auxv2."
+				)
 			return None
+		qdot_obs = None
+		if self.gphi_include_qobs_dynamics:
+			qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(data_x)
+			qdot_obs = self._require_qdot_obs(qdot_obs, datax=data_x, q_obs=q_obs)
 
 		hdot_vals = []
 		for i in range(data_x.shape[0]):
-			base = data_x[i].detach()
+			base = data_x[i : i + 1].detach()
 			qe0 = data_x[i, : self.dynamics_model.n_dims]
-			qo0 = q_obs[i]
 			qde = u[i]
-			qdo = qdot_obs[i]
+			if self.gphi_include_qobs_dynamics:
+				qo0 = q_obs[i].detach().clone().requires_grad_(True)
+				qdo0 = qdot_obs[i].to(device=qo0.device, dtype=qo0.dtype)
 
-			def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
-				row = base.clone()
-				row[: self.dynamics_model.n_dims] = qe_s
-				# overwrite q_obs in aux (if present)
-				meta = row[-self.dynamics_model.state_aux_dims_in_dataset :]
-				if self.dynamics_model.obstacle_q_dim > 0:
-					q_start = self.dynamics_model.sensor_aux_dims
-					meta[q_start : q_start + self.dynamics_model.obstacle_q_dim] = qo_s
-				row[-self.dynamics_model.state_aux_dims_in_dataset :] = meta
-				return self.h(row.unsqueeze(0)).squeeze()
+				def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+					return self.h_from_state(qe_s.unsqueeze(0), qo_s.unsqueeze(0), datax=base).squeeze()
 
-			_, hdot_i = jvp(H, (qe0, qo0), (qde, qdo), strict=False)
+				_, hdot_i = jvp(H, (qe0, qo0), (qde, qdo0), strict=False)
+			else:
+				qo0 = q_obs[i].detach()
+
+				def H(qe_s: torch.Tensor) -> torch.Tensor:
+					return self.h_from_state(qe_s.unsqueeze(0), qo0.unsqueeze(0), datax=base).squeeze()
+
+				_, hdot_i = jvp(H, (qe0,), (qde,), strict=False)
 			hdot_vals.append(hdot_i)
 		return torch.stack(hdot_vals).reshape(-1, 1)
 
@@ -260,19 +522,21 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			data_jacobian: tuple=(),
 			scenarios: Optional[ScenarioList] = None,
 	) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-		"""Compute CBF Lie derivatives through H(qe, qo)=h(qe, g_phi(qe, qo)).
-
-		Safe_Dual's dynamic-obstacle CBF uses the chain rule through both ego and
-		obstacle joint states. The parent implementation finite-differences only
-		the ego state and treats the observation as static; keep it as fallback
-		when g_phi metadata is unavailable.
-		"""
+		"""Compute CBF Lie derivatives through H(qe, qo)=h(qe, g_phi(qe, qo))."""
 		if not self.use_gphi_chain:
 			return super().V_with_lie_derivatives(x, data_jacobian=data_jacobian, scenarios=scenarios)
 		q_obs = self.dynamics_model.get_obstacle_q_from_datax(x)
-		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(x)
-		if q_obs is None or qdot_obs is None:
+		if q_obs is None:
+			if self.gphi_include_qobs_dynamics:
+				raise ValueError(
+					"gphi_include_qobs_dynamics=True requires q_obs in datax/state-label cache, "
+					"but q_obs could not be parsed. Please regenerate state-label cache with auxv2."
+				)
 			return super().V_with_lie_derivatives(x, data_jacobian=data_jacobian, scenarios=scenarios)
+		qdot_obs = None
+		if self.gphi_include_qobs_dynamics:
+			qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(x)
+			qdot_obs = self._require_qdot_obs(qdot_obs, datax=x, q_obs=q_obs)
 
 		t0 = time.time()
 		if scenarios is None:
@@ -290,27 +554,37 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			for i in range(bs):
 				base = x[i].detach()
 				qe0 = x[i, : self.dynamics_model.n_dims].detach().clone().requires_grad_(True)
-				qo0 = q_obs[i].detach().clone().requires_grad_(True)
-				qdo = qdot_obs[i].detach()
+				if self.gphi_include_qobs_dynamics:
+					qo0 = q_obs[i].detach().clone().requires_grad_(True)
+					qdo0 = qdot_obs[i].to(device=qo0.device, dtype=qo0.dtype)
 
-				def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
-					row = base.clone()
-					row[: self.dynamics_model.n_dims] = qe_s
-					meta = row[-self.dynamics_model.state_aux_dims_in_dataset :].clone()
-					if self.dynamics_model.obstacle_q_dim > 0:
-						q_start = self.dynamics_model.sensor_aux_dims
-						meta[q_start : q_start + self.dynamics_model.obstacle_q_dim] = qo_s
-					row[-self.dynamics_model.state_aux_dims_in_dataset :] = meta
-					return self.h(row.unsqueeze(0)).squeeze()
+					def H(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
+						return self.h_from_state(qe_s.unsqueeze(0), qo_s.unsqueeze(0), datax=base.unsqueeze(0)).squeeze()
 
-				h_i = H(qe0, qo0)
-				grad_qe, grad_qo = torch.autograd.grad(
-					h_i,
-					(qe0, qo0),
-					create_graph=bool(self.training),
-					retain_graph=bool(self.training),
-				)
-				dynamic_lf = torch.dot(grad_qo, qdo)
+					h_i = H(qe0, qo0)
+					grad_qe, grad_qo = torch.autograd.grad(
+						h_i,
+						(qe0, qo0),
+						create_graph=bool(self.training),
+						retain_graph=bool(self.training),
+						allow_unused=False,
+					)
+					dynamic_lf = torch.sum(grad_qo * qdo0)
+				else:
+					qo0 = q_obs[i].detach().clone()
+
+					def H(qe_s: torch.Tensor) -> torch.Tensor:
+						return self.h_from_state(qe_s.unsqueeze(0), qo0.unsqueeze(0), datax=base.unsqueeze(0)).squeeze()
+
+					h_i = H(qe0)
+					grad_qe = torch.autograd.grad(
+						h_i,
+						qe0,
+						create_graph=bool(self.training),
+						retain_graph=bool(self.training),
+						allow_unused=False,
+					)[0]
+					dynamic_lf = torch.zeros((), device=x.device, dtype=x.dtype)
 				V_vals.append(h_i)
 				Lf_vals.append(dynamic_lf.reshape(1))
 				Lg_vals.append(grad_qe)
@@ -324,101 +598,18 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		return V, Lf_V, Lg_V, {"V_w_Jacobian": time.time() - t0, "lie_derivative": 0.0}
 
 	def derivative_diagnostics(self, data_x: torch.Tensor, u: torch.Tensor, fd_eps: float = 1e-3):
-		"""
-		Compute odot_jvp vs odot_fd (p/m/n split) and hdot_auto vs hdot_fd.
-		Returns None when gphi chain is disabled or obstacle metadata is unavailable.
-		"""
-		if not self.use_gphi_chain:
-			return None
-		q_obs = self.dynamics_model.get_obstacle_q_from_datax(data_x)
-		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(data_x)
-		if q_obs is None or qdot_obs is None:
-			return None
-
-		qe = data_x[:, : self.dynamics_model.n_dims]
-		qde = u
-		device = data_x.device
-		if next(self.g_phi.parameters()).device != device:
-			self.g_phi = self.g_phi.to(device)
-		with torch.no_grad():
-			m_now = self.g_phi(qe, q_obs).get("m_hat", None)
-			if m_now is not None:
-				hit_count_pred = int((m_now.squeeze(-1) > 0.5).sum(dim=1).float().mean().item())
-			else:
-				hit_count_pred = 0
-
-		odot_jvp_list, odot_fd_list = [], []
-		for i in range(data_x.shape[0]):
-			def gflat(qe_s: torch.Tensor, qo_s: torch.Tensor) -> torch.Tensor:
-				out = self.g_phi(qe_s.unsqueeze(0), qo_s.unsqueeze(0))
-				p = out["p_hat"].reshape(-1)
-				n = out["n_hat"].reshape(-1)
-				m = out["m_hat"].reshape(-1) if out.get("m_hat", None) is not None else torch.zeros((out["p_hat"].numel() // 3,), device=qe_s.device, dtype=qe_s.dtype)
-				return torch.cat([p, n, m], dim=0)
-
-			_, odot_jvp_i = jvp(gflat, (qe[i], q_obs[i]), (qde[i], qdot_obs[i]), strict=False)
-			g0 = gflat(qe[i], q_obs[i])
-			g1 = gflat(qe[i] + fd_eps * qde[i], q_obs[i] + fd_eps * qdot_obs[i])
-			odot_fd_i = (g1 - g0) / fd_eps
-			odot_jvp_list.append(odot_jvp_i)
-			odot_fd_list.append(odot_fd_i)
-
-		odot_jvp = torch.stack(odot_jvp_list)
-		odot_fd = torch.stack(odot_fd_list)
-
-		# split by channels: [p(3R), n(3R), m(R)]
-		R = self.g_phi.rays
-		p_end = 3 * R
-		n_end = 6 * R
-		p_jvp = odot_jvp[:, :p_end]
-		n_jvp = odot_jvp[:, p_end:n_end]
-		m_jvp = odot_jvp[:, n_end:]
-		p_fd = odot_fd[:, :p_end]
-		n_fd = odot_fd[:, p_end:n_end]
-		m_fd = odot_fd[:, n_end:]
-		p_err = (p_jvp - p_fd).abs().mean()
-		n_err = (n_jvp - n_fd).abs().mean()
-		m_err = (m_jvp - m_fd).abs().mean()
-
-		hdot_auto = self._compute_hdot_auto(data_x, u)
-		if hdot_auto is None:
-			return None
-		datax_next = self.dynamics_model.batch_lookahead(data_x, u * self.dynamics_model.controller_dt, data_jacobian=())
-		hdot_fd = (self.h(datax_next) - self.h(data_x)) / self.dynamics_model.controller_dt
-		hdot_err = (hdot_auto - hdot_fd).abs().mean()
-
-		return {
-			"odot_err_p": float(p_err.detach().cpu()),
-			"odot_err_n": float(n_err.detach().cpu()),
-			"odot_err_m": float(m_err.detach().cpu()),
-			"odot_jvp_p_meanabs": float(p_jvp.abs().mean().detach().cpu()),
-			"odot_jvp_n_meanabs": float(n_jvp.abs().mean().detach().cpu()),
-			"odot_jvp_m_meanabs": float(m_jvp.abs().mean().detach().cpu()),
-			"odot_fd_p_meanabs": float(p_fd.abs().mean().detach().cpu()),
-			"odot_fd_n_meanabs": float(n_fd.abs().mean().detach().cpu()),
-			"odot_fd_m_meanabs": float(m_fd.abs().mean().detach().cpu()),
-			"hdot_auto_mean": float(hdot_auto.mean().detach().cpu()),
-			"hdot_fd_mean": float(hdot_fd.mean().detach().cpu()),
-			"hdot_err": float(hdot_err.detach().cpu()),
-			"hit_count_pred": hit_count_pred,
-		}
+		return None
 
 	# @torch.autocast('cuda' if torch.cuda.is_available() else 'cpu')
 	def h(self, datax: torch.Tensor):
-		"""Return the CBF value for the observations o
-
-		args:
-			x: bs x self.n_dims_extended tensor of state and observation
-		returns:
-			h: bs x 1 tensor of BF values
-		"""
-		datax_used = self._replace_datax_obs_with_gphi(datax)
-		x = self.dynamics_model.datax_to_x(datax_used)
-		bs = x.shape[0]
+		"""Return the CBF value for the observations o."""
+		q_ego, q_obs, _, aux = self.parse_state_from_datax(datax)
+		obs = self.build_observation(datax=datax, q_ego=q_ego, q_obs=q_obs, aux=aux)
+		x = self.compose_h_input(datax, q_ego, obs, aux=aux)
 		assert x.shape[1] == self.n_dims_extended
 
 		state = x[:, :self.dynamics_model.n_dims]
-		z = self.encode_observation(x, datax_used)
+		z = self.encode_observation(x, datax)
 		h = self.h_nn(torch.cat([state, z], dim=-1))
 
 		return h
@@ -443,7 +634,21 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		feature = self.pc_head(observation)
 		encoded_obs = self.encoder(feature)
 		if self.obstacle_qdot_dim > 0:
-			qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(datax)
+			if datax is None:
+				if self.gphi_include_qobs_dynamics:
+					raise ValueError(
+						"gphi_include_qobs_dynamics=True requires qdot_obs in datax/state-label cache, "
+						"but h_from_state/encode_observation was called without datax."
+					)
+				qdot_obs = torch.zeros(
+					(x.shape[0], self.obstacle_qdot_dim),
+					device=x.device,
+					dtype=x.dtype,
+				)
+			else:
+				qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(datax)
+				if self.gphi_include_qobs_dynamics:
+					qdot_obs = self._require_qdot_obs(qdot_obs, datax=datax)
 			return torch.cat([encoded_obs, qdot_obs], dim=-1)
 		return encoded_obs
 
@@ -595,6 +800,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			h = self.h(data_x)
 			u = torch.where(Lg_V_no_grad >= 0, lower_limit, upper_limit)
 
+			# h_dot = Lf_h + Lg_h @ u; CBF condition: Lf_h + Lg_h @ u + alpha(h) >= 0.
 			hdot_expected = (Lf_V.squeeze(1).squeeze(1) + torch.bmm(Lg_V, u.unsqueeze(2)).squeeze(1).squeeze(
 				1)).unsqueeze(1)
 			if self.train_use_fd:

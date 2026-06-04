@@ -27,6 +27,12 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 		args = argparse.Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 
 	nominal_params = {'name': 1}
+	baseline_arg = bool(getattr(args, "baseline", True))
+	obs_backend_arg = getattr(args, "obs_backend", "raw" if baseline_arg else "gphi")
+	cbf_obs_mode_arg = getattr(args, "cbf_obs_mode", None)
+	if cbf_obs_mode_arg is None:
+		cbf_obs_mode_arg = "gphi" if ((not baseline_arg) and obs_backend_arg == "gphi") else "legacy_oracle"
+	gphi_point_only = cbf_obs_mode_arg in ("gphi", "raylink_oracle")
 	dynamics_model = ArmLidar(
 		nominal_params,
 		dt=kwargs['simulation_dt'],
@@ -38,8 +44,8 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 		env=environment,
 		robot=robot,
 		observation_type='uniform_surface',  #args.observation_type,
-		add_normal=True,
-		point_dim=args.point_dim,
+		add_normal=not gphi_point_only,
+		point_dim=3 if gphi_point_only else args.point_dim,
 	)
 
 	args.cbf_relaxation_penalty = 500.
@@ -59,7 +65,12 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 		("ab_mode", "B_with_normal"),
 		("baseline", True),
 		("obs_backend", "raw"),
-		("gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+		("cbf_obs_mode", cbf_obs_mode_arg),
+		("gphi_ckpt", ""),
+		("gphi_hit_threshold", 0.5),
+		("gphi_hit_temp", 0.1),
+		("gphi_freeze", True),
+		("gphi_include_qobs_dynamics", False),
 		("train_use_fd", True),
 	):
 		if key not in load_kwargs or load_kwargs[key] is None:

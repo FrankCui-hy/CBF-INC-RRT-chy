@@ -5,8 +5,6 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from loss.models.g_phi import _make_activation
-
 
 class PointNetEncoder(nn.Module):
     """Simple PointNet-style encoder for per-ray features."""
@@ -93,3 +91,14 @@ class NeuralCBF(nn.Module):
             z = self.encoder(o_hat.reshape(o_hat.shape[0], -1))
         x = torch.cat([q_ego, z], dim=-1)
         return self.head(x).squeeze(-1)
+
+
+def _make_activation(name: str) -> nn.Module:
+    name = name.lower()
+    if name == "silu":
+        return nn.SiLU()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "relu":
+        return nn.ReLU()
+    raise ValueError(f"Unknown activation: {name}")

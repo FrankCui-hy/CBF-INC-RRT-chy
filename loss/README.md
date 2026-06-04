@@ -1,10 +1,9 @@
-# Differentiable Observation Surrogate + Neural CBF (loss/)
+# FK-aware Ray-Link Observation Surrogate (loss/)
 
-This module provides a runnable PyTorch>=2.0 pipeline:
+This module keeps the current g_phi pipeline only:
 
-1. Collect episode data (`q_ego, q_obs, qdot_ego, qdot_obs, p_gt, n_gt, m, ray geometry, y`).
-2. Train surrogate observation network `g_phi`.
-3. Train neural CBF `h_theta` using analytic `hdot` with `torch.func.jvp`/`vjp`.
-4. Run online controller demo to build CBF linear constraint `A u >= b`.
+1. Generate all-rays-at-once Panda/Panda raycast data with `scripts/generate_neural_raycast_dataset.py`.
+2. Train the FK-aware ray-link surrogate `RayLinkMLPGPhi` with `python -m loss.training.train_raylink_g_phi`.
+3. Evaluate the trained checkpoint with `python -m loss.eval.eval_raylink_g_phi`.
 
-See `loss/configs/config.yaml` for all hyper-parameters.
+See `loss/configs/config_raylink_g_phi.yaml` for hyper-parameters.

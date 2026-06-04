@@ -14,6 +14,7 @@ import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 
 from neural_cbf.systems import ControlAffineSystem
+from neural_cbf.tools.metadata_fingerprint import compute_metadata_fingerprint
 
 import matplotlib.pyplot as plt
 
@@ -41,7 +42,8 @@ class EpisodicDataModule(pl.LightningDataModule):
 			obstacle_block_dist: float = 0.1,
 			obstacle_block_check_steps: int = 20,
 			skip_fixed_sampling: bool = False,
-	):
+			state_label_cache: str = "",
+		):
 		"""Initialize the DataModule
 
 		args:
@@ -80,6 +82,8 @@ class EpisodicDataModule(pl.LightningDataModule):
 		self.obstacle_block_dist = obstacle_block_dist
 		self.obstacle_block_check_steps = obstacle_block_check_steps
 		self.skip_fixed_sampling = skip_fixed_sampling
+		self.state_label_cache = str(state_label_cache or "")
+		self.state_label_metadata = None
 		if quotas is not None:
 			self.quotas = quotas
 		else:
@@ -262,8 +266,99 @@ class EpisodicDataModule(pl.LightningDataModule):
 			x = self.model.closed_loop_dynamics(x, u, collect_dataset=False, update_observation=False)
 		return False
 
+	def _load_state_label_cache(self, cache_path: str):
+		data = torch.load(cache_path, map_location="cpu")
+		if data.get("schema") != "cbf_state_label_v1":
+			raise ValueError(f"Unsupported state-label cache schema: {data.get('schema')}")
+		if not hasattr(self.model, "o_dims_in_dataset"):
+			raise ValueError("state_label_cache is only supported for ArmLidar-style datasets.")
+		self.state_label_metadata = data.get("metadata", {})
+		expected_fp = self.state_label_metadata.get("metadata_fingerprint", None)
+		if expected_fp:
+			meta_without_fp = {
+				k: v for k, v in self.state_label_metadata.items()
+				if k != "metadata_fingerprint"
+			}
+			actual_fp = compute_metadata_fingerprint(meta_without_fp)
+			if str(expected_fp) != str(actual_fp):
+				raise ValueError(
+					"state_label_cache metadata_fingerprint mismatch. "
+					"This cache may have been edited or generated with incompatible geometry metadata."
+				)
+
+		def _split_to_datax(split: dict) -> torch.Tensor:
+			q_ego = split["q_ego"].float()
+			q_obs = split["q_obs"].float()
+			qdot_obs = split["qdot_obs"].float()
+			traj_idx = split["traj_idx"].float().reshape(-1, 1)
+			step_idx = split["step_idx"].float().reshape(-1, 1)
+			n = int(q_ego.shape[0])
+			datax = torch.zeros(
+				n,
+				self.model.n_dims + self.model.o_dims_in_dataset + self.model.state_aux_dims_in_dataset,
+				dtype=q_ego.dtype,
+			)
+			datax[:, : self.model.n_dims] = q_ego
+			aux = datax[:, -self.model.state_aux_dims_in_dataset :]
+			q_start = self.model.sensor_aux_dims
+			qdot_start = q_start + self.model.obstacle_q_dim
+			if q_obs.shape[1] != self.model.obstacle_q_dim:
+				raise ValueError(
+					f"state_label_cache q_obs width {q_obs.shape[1]} does not match model obstacle_q_dim {self.model.obstacle_q_dim}."
+				)
+			if qdot_obs.shape[1] != self.model.obstacle_qdot_dim:
+				raise ValueError(
+					f"state_label_cache qdot_obs width {qdot_obs.shape[1]} does not match model obstacle_qdot_dim {self.model.obstacle_qdot_dim}."
+				)
+			aux[:, q_start:qdot_start] = q_obs
+			aux[:, qdot_start:qdot_start + self.model.obstacle_qdot_dim] = qdot_obs
+			aux[:, -2:] = torch.cat((traj_idx, step_idx), dim=1)
+			datax[:, -self.model.state_aux_dims_in_dataset :] = aux
+			return datax
+
+		self.x_training = _split_to_datax(data["training"])
+		self.x_validation = _split_to_datax(data["validation"])
+		self.x_training_mask = {
+			"safe": data["training"]["safe_mask"].bool(),
+			"unsafe": data["training"]["unsafe_mask"].bool(),
+			"goal": torch.zeros_like(data["training"]["safe_mask"]).bool(),
+			"boundary": data["training"]["boundary_mask"].bool(),
+		}
+		self.x_validation_mask = {
+			"safe": data["validation"]["safe_mask"].bool(),
+			"unsafe": data["validation"]["unsafe_mask"].bool(),
+			"goal": torch.zeros_like(data["validation"]["safe_mask"]).bool(),
+			"boundary": data["validation"]["boundary_mask"].bool(),
+		}
+		self.x_training_lookahead = {
+			"J_P": data["training"]["J_P"].float(),
+			"J_R": data["training"]["J_R"].float(),
+		}
+		self.x_validation_lookahead = {
+			"J_P": data["validation"]["J_P"].float(),
+			"J_R": data["validation"]["J_R"].float(),
+		}
+
 	def prepare_data(self):
 		"""Create the dataset"""
+		if self.state_label_cache:
+			print(f"Using state-label cache from {self.state_label_cache}")
+			self._load_state_label_cache(self.state_label_cache)
+			print("Full dataset:")
+			print(f"\t{self.x_training.shape[0]} training")
+			print(f"\t{self.x_validation.shape[0]} validation")
+			print("\t----------------------")
+			print(f"\t{self.x_training_mask['goal'].sum()} goal points")
+			print(f"\t({self.x_validation_mask['goal'].sum()} val)")
+			print(f"\t{self.x_training_mask['safe'].sum()} safe points")
+			print(f"\t({self.x_validation_mask['safe'].sum()} val)")
+			print(f"\t{self.x_training_mask['unsafe'].sum()} unsafe points")
+			print(f"\t({self.x_validation_mask['unsafe'].sum()} val)")
+			print(f"\t{self.x_training_mask['boundary'].sum()} boundary points")
+			print(f"\t({self.x_validation_mask['boundary'].sum()} val)")
+			self.downsample_unsafe()
+			return
+
 		# load dataset if saved, prefer not saving in checkpoint
 		dataset_path = os.path.abspath(__file__).rsplit('/', 3)[0] + f'/models/neural_cbf/{str(self.model)}/data/'
 		if not os.path.exists(dataset_path):

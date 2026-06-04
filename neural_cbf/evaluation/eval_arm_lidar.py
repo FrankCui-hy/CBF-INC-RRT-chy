@@ -372,7 +372,12 @@ def init_val(path, args):
 														 ab_mode=getattr(args, "ab_mode", "B_with_normal"),
 														 baseline=baseline_flag,
 														 obs_backend=getattr(args, "obs_backend", "raw" if baseline_flag else "gphi"),
-														 gphi_ckpt=getattr(args, "gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+														 cbf_obs_mode=getattr(args, "cbf_obs_mode", None),
+														 gphi_ckpt=getattr(args, "gphi_ckpt", ""),
+														 gphi_hit_threshold=getattr(args, "gphi_hit_threshold", 0.5),
+														 gphi_hit_temp=getattr(args, "gphi_hit_temp", 0.1),
+														 gphi_freeze=getattr(args, "gphi_freeze", True),
+														 gphi_include_qobs_dynamics=getattr(args, "gphi_include_qobs_dynamics", False),
 														 train_use_fd=getattr(args, "train_use_fd", baseline_flag),
 														 map_location='cpu')
 
@@ -3615,7 +3620,13 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=None)
     parser.add_argument("--no_baseline", dest="baseline", action="store_false")
     parser.add_argument("--obs_backend", type=str, default=None, choices=["gphi", "raw"])
+    parser.add_argument("--cbf_obs_mode", type=str, default=None, choices=["legacy_oracle", "gphi", "raylink_oracle"])
     parser.add_argument("--gphi_ckpt", type=str, default=None)
+    parser.add_argument("--gphi_hit_threshold", type=float, default=None)
+    parser.add_argument("--gphi_hit_temp", type=float, default=None)
+    parser.add_argument("--gphi_freeze", dest="gphi_freeze", action="store_true", default=None)
+    parser.add_argument("--no_gphi_freeze", dest="gphi_freeze", action="store_false")
+    parser.add_argument("--gphi_include_qobs_dynamics", action="store_true", default=None)
     parser.add_argument("--train_use_fd", dest="train_use_fd", action="store_true", default=None)
     parser.add_argument("--no_train_use_fd", dest="train_use_fd", action="store_false")
 
@@ -3820,7 +3831,18 @@ if __name__ == "__main__":
     base_args.accelerator = "cpu"  # controller loads to cpu; your training uses GPU elsewhere
     base_args.gui = 1 if args_cli.gui else 0
     base_args.robot_name = args_cli.robot_name
-    for _k in ("ab_mode", "baseline", "obs_backend", "gphi_ckpt", "train_use_fd"):
+    for _k in (
+        "ab_mode",
+        "baseline",
+        "obs_backend",
+        "cbf_obs_mode",
+        "gphi_ckpt",
+        "gphi_hit_threshold",
+        "gphi_hit_temp",
+        "gphi_freeze",
+        "gphi_include_qobs_dynamics",
+        "train_use_fd",
+    ):
         _v = getattr(args_cli, _k, None)
         if _v is not None:
             setattr(base_args, _k, _v)

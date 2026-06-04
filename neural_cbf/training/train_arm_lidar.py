@@ -30,8 +30,10 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def normalize_method_flags(args):
-    if getattr(args, "baseline", None) is None:
+    if getattr(args, "cbf_obs_mode", "legacy_oracle") in ("gphi", "raylink_oracle") and getattr(args, "baseline", None) is None:
         args.baseline = False
+    if getattr(args, "baseline", None) is None:
+        args.baseline = True
 
     if args.baseline:
         if getattr(args, "obs_backend", None) is None:
@@ -40,14 +42,42 @@ def normalize_method_flags(args):
             args.train_use_fd = True
     else:
         if getattr(args, "obs_backend", None) is None:
-            args.obs_backend = "gphi"
+            args.obs_backend = "gphi" if getattr(args, "cbf_obs_mode", "legacy_oracle") == "gphi" else "raw"
         if getattr(args, "train_use_fd", None) is None:
-            args.train_use_fd = False
+            args.train_use_fd = False if getattr(args, "cbf_obs_mode", "legacy_oracle") == "gphi" else True
     return args
 
 
 def main(args):
     args = normalize_method_flags(args)
+    if args.cbf_obs_mode == "gphi":
+        if not args.gphi_ckpt:
+            raise ValueError("--cbf_obs_mode gphi requires --gphi_ckpt.")
+        if bool('norm' in args.dataset_name):
+            raise ValueError("--cbf_obs_mode gphi is point-only. Use a dataset_name without 'norm'.")
+        if args.point_dim != 3:
+            raise ValueError("--cbf_obs_mode gphi requires --point_dim 3.")
+        if args.train_use_fd:
+            raise ValueError("--cbf_obs_mode gphi requires --no_train_use_fd.")
+    if args.cbf_obs_mode == "raylink_oracle":
+        if not args.gphi_ckpt:
+            raise ValueError("--cbf_obs_mode raylink_oracle requires --gphi_ckpt for RayLink metadata.")
+        if bool('norm' in args.dataset_name):
+            raise ValueError("--cbf_obs_mode raylink_oracle is point-only. Use a dataset_name without 'norm'.")
+        if args.point_dim != 3:
+            raise ValueError("--cbf_obs_mode raylink_oracle requires --point_dim 3.")
+        if not args.train_use_fd:
+            raise ValueError(
+                "cbf_obs_mode='raylink_oracle' currently supports train_use_fd=True only. "
+                "Oracle raycast is not differentiable, so analytic chain rule is not supported."
+            )
+    if args.state_label_cache and args.cbf_obs_mode == "legacy_oracle":
+        raise ValueError("--state_label_cache discards oracle observations and cannot be used with legacy_oracle mode.")
+    if args.gphi_include_qobs_dynamics:
+        if args.cbf_obs_mode != "gphi":
+            raise ValueError("--gphi_include_qobs_dynamics is only supported with --cbf_obs_mode gphi.")
+        if args.train_use_fd:
+            raise ValueError("--gphi_include_qobs_dynamics requires --no_train_use_fd.")
 
     # Define the scenarios
     nominal_params = {}
@@ -116,6 +146,7 @@ def main(args):
         name=args.dataset_name,
         obstacle_block_dist=args.obstacle_block_dist,
         obstacle_block_check_steps=args.obstacle_block_check_steps,
+        state_label_cache=args.state_label_cache,
     )
 
 
@@ -170,7 +201,7 @@ def main(args):
         "epsilon": getattr(args, "epsilon", 0.0),
     }
     requested_version = args.version
-    method_tag = "baseline_fd_raw" if args.baseline else "safe_dual_gphi_chain"
+    method_tag = "baseline_fd_raw" if args.baseline else f"cbf_obs_{args.cbf_obs_mode}"
     version_name = requested_version if method_tag in requested_version else f"{requested_version}_{method_tag}"
     args.method_tag = method_tag
     args.version = version_name
@@ -190,7 +221,12 @@ def main(args):
                                               ab_mode=args.ab_mode,
                                               baseline=args.baseline,
                                               obs_backend=args.obs_backend,
+                                              cbf_obs_mode=args.cbf_obs_mode,
                                               gphi_ckpt=args.gphi_ckpt,
+                                              gphi_hit_threshold=args.gphi_hit_threshold,
+                                              gphi_hit_temp=args.gphi_hit_temp,
+                                              gphi_freeze=args.gphi_freeze,
+                                              gphi_include_qobs_dynamics=args.gphi_include_qobs_dynamics,
                                               train_use_fd=args.train_use_fd,
                                               use_neural_actor="RL" in requested_version,)
 
@@ -315,8 +351,23 @@ if __name__ == "__main__":
                         help='Use Safe_Dual analytic g_phi chain.')
     parser.add_argument('--obs_backend', type=str, default=None, choices=['gphi', 'raw'],
                         help='Observation backend for training. Defaults to raw for baseline and gphi otherwise.')
-    parser.add_argument('--gphi_ckpt', type=str, default='loss/outputs_real_v2/checkpoints/g_phi_best.pt',
-                        help='Checkpoint path for loss.models.g_phi when obs_backend=gphi.')
+    parser.add_argument(
+        '--gphi_ckpt',
+        type=str,
+        default='',
+        help='FK-aware RayLink g_phi checkpoint path.',
+    )
+    parser.add_argument('--cbf_obs_mode', type=str, default='legacy_oracle',
+                        choices=['legacy_oracle', 'gphi', 'raylink_oracle'],
+                        help='Observation source for CBF training.')
+    parser.add_argument('--gphi_hit_threshold', type=float, default=0.5)
+    parser.add_argument('--gphi_hit_temp', type=float, default=0.1)
+    parser.add_argument('--gphi_freeze', dest='gphi_freeze', action='store_true', default=True)
+    parser.add_argument('--no_gphi_freeze', dest='gphi_freeze', action='store_false')
+    parser.add_argument('--gphi_include_qobs_dynamics', action='store_true', default=False,
+                        help='Include dH/dq_obs @ qdot_obs in the RayLink gphi analytic CBF derivative.')
+    parser.add_argument('--state_label_cache', type=str, default='',
+                        help='Optional cbf_state_label_v1 cache. Only valid for gphi/raylink_oracle modes.')
     parser.add_argument('--train_use_fd', dest='train_use_fd', action='store_true', default=None,
                         help='Compute FD hdot in training (debug only, slower). Default: disabled.')
     parser.add_argument('--no_train_use_fd', dest='train_use_fd', action='store_false',

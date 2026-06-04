@@ -209,7 +209,7 @@ def load_controller(ckpt_path, dm, suite, args):
             ab_mode=getattr(args, "ab_mode", "B_with_normal"),
             baseline=baseline_flag,
             obs_backend=getattr(args, "obs_backend", "raw" if baseline_flag else "gphi"),
-            gphi_ckpt=getattr(args, "gphi_ckpt", "loss/outputs_real_v2/checkpoints/g_phi_best.pt"),
+            gphi_ckpt=getattr(args, "gphi_ckpt", ""),
             train_use_fd=getattr(args, "train_use_fd", baseline_flag),
             map_location="cpu",
         )
