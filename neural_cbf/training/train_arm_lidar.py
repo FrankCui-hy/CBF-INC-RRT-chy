@@ -3,7 +3,6 @@ import sys
 import inspect
 
 from argparse import ArgumentParser
-from importlib_metadata import requires
 
 import torch
 import torch.multiprocessing
@@ -30,7 +29,7 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def normalize_method_flags(args):
-    if getattr(args, "cbf_obs_mode", "legacy_oracle") in ("gphi", "raylink_oracle") and getattr(args, "baseline", None) is None:
+    if getattr(args, "cbf_obs_mode", "legacy_oracle") in ("gphi", "raylink_oracle", "raylink_cached_oracle") and getattr(args, "baseline", None) is None:
         args.baseline = False
     if getattr(args, "baseline", None) is None:
         args.baseline = True
@@ -46,6 +45,22 @@ def normalize_method_flags(args):
         if getattr(args, "train_use_fd", None) is None:
             args.train_use_fd = False if getattr(args, "cbf_obs_mode", "legacy_oracle") == "gphi" else True
     return args
+
+
+def raylink_num_rays_from_ckpt(ckpt_path: str) -> int:
+    if not ckpt_path:
+        raise ValueError("RayLink checkpoint path is empty.")
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+    metadata = ckpt.get("metadata", {})
+    if "num_rays_total" in metadata:
+        return int(metadata["num_rays_total"])
+    local_ray_dirs = metadata.get("local_ray_dirs", None)
+    if local_ray_dirs is None:
+        raise ValueError(f"RayLink checkpoint metadata is missing num_rays_total/local_ray_dirs: {ckpt_path}")
+    return int(np.asarray(local_ray_dirs).shape[0] * np.asarray(local_ray_dirs).shape[1])
 
 
 def main(args):
@@ -70,6 +85,26 @@ def main(args):
             raise ValueError(
                 "cbf_obs_mode='raylink_oracle' currently supports train_use_fd=True only. "
                 "Oracle raycast is not differentiable, so analytic chain rule is not supported."
+            )
+    if args.cbf_obs_mode == "raylink_cached_oracle":
+        if not args.gphi_ckpt:
+            raise ValueError("--cbf_obs_mode raylink_cached_oracle requires --gphi_ckpt for RayLink metadata/FK.")
+        if not args.state_label_cache:
+            raise ValueError("--cbf_obs_mode raylink_cached_oracle requires --state_label_cache with cached RayLink oracle points.")
+        if bool('norm' in args.dataset_name):
+            raise ValueError("--cbf_obs_mode raylink_cached_oracle is point-only. Use a dataset_name without 'norm'.")
+        if args.point_dim != 3:
+            raise ValueError("--cbf_obs_mode raylink_cached_oracle requires --point_dim 3.")
+        if not args.train_use_fd:
+            raise ValueError(
+                "cbf_obs_mode='raylink_cached_oracle' currently supports train_use_fd=True only. "
+                "The cached oracle baseline uses finite-difference hdot through q perturbation and local transforms."
+            )
+        expected_num_rays = raylink_num_rays_from_ckpt(args.gphi_ckpt)
+        if int(args.n_observation_dataset) != expected_num_rays:
+            raise ValueError(
+                "--cbf_obs_mode raylink_cached_oracle requires --n_observation_dataset equal to the RayLink num_rays_total "
+                f"({expected_num_rays}), got {int(args.n_observation_dataset)}."
             )
     if args.state_label_cache and args.cbf_obs_mode == "legacy_oracle":
         raise ValueError("--state_label_cache discards oracle observations and cannot be used with legacy_oracle mode.")
@@ -358,7 +393,7 @@ if __name__ == "__main__":
         help='FK-aware RayLink g_phi checkpoint path.',
     )
     parser.add_argument('--cbf_obs_mode', type=str, default='legacy_oracle',
-                        choices=['legacy_oracle', 'gphi', 'raylink_oracle'],
+                        choices=['legacy_oracle', 'gphi', 'raylink_oracle', 'raylink_cached_oracle'],
                         help='Observation source for CBF training.')
     parser.add_argument('--gphi_hit_threshold', type=float, default=0.5)
     parser.add_argument('--gphi_hit_temp', type=float, default=0.1)
@@ -367,7 +402,7 @@ if __name__ == "__main__":
     parser.add_argument('--gphi_include_qobs_dynamics', action='store_true', default=False,
                         help='Include dH/dq_obs @ qdot_obs in the RayLink gphi analytic CBF derivative.')
     parser.add_argument('--state_label_cache', type=str, default='',
-                        help='Optional cbf_state_label_v1 cache. Only valid for gphi/raylink_oracle modes.')
+                        help='Optional cbf_state_label_v1 cache. Valid for gphi/raylink_oracle/raylink_cached_oracle modes.')
     parser.add_argument('--train_use_fd', dest='train_use_fd', action='store_true', default=None,
                         help='Compute FD hdot in training (debug only, slower). Default: disabled.')
     parser.add_argument('--no_train_use_fd', dest='train_use_fd', action='store_false',

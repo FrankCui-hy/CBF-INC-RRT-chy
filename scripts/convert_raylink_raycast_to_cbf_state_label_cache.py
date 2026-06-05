@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Convert a RayLink raycast HDF5 dataset into a CBF state-label cache.
 
-The output intentionally discards ray observations. CBF training later rebuilds
-observations online according to cbf_obs_mode:
+By default the output keeps only state+label data. With
+--include_raylink_oracle_points, it also stores cached RayLink oracle world
+points for the paper-style finite-difference baseline:
+  - raylink_cached_oracle: datax = q_ego + cached RayLink points + aux
+
+Other CBF modes can still rebuild observations online according to cbf_obs_mode:
   - gphi: frozen RayLinkMLPGPhi(q_ego, q_obs)
   - raylink_oracle: PyBullet oracle rays with the same RayLink metadata
 """
@@ -98,19 +102,24 @@ def compare_metadata(dataset_meta: Dict[str, Any], ckpt_meta: Dict[str, Any]) ->
             raise ValueError(f"RayLink metadata mismatch for {key}. Refusing to mix dataset and g_phi checkpoint layouts.")
 
 
-def load_torch_checkpoint_metadata(path: str) -> Dict[str, Any]:
+def load_torch_checkpoint(path: str) -> Dict[str, Any]:
     import torch
 
     try:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:
         ckpt = torch.load(path, map_location="cpu")
+    return ckpt
+
+
+def load_torch_checkpoint_metadata(path: str) -> Dict[str, Any]:
+    ckpt = load_torch_checkpoint(path)
     if "metadata" not in ckpt:
         raise KeyError(f"g_phi checkpoint does not contain metadata: {path}")
     return ckpt["metadata"]
 
 
-def read_split(hdf5_path: Path, d_safe: float, qdot_mode: str):
+def read_split(hdf5_path: Path, d_safe: float, qdot_mode: str, include_depth: bool = False, r_max: Optional[float] = None):
     import h5py
     import numpy as np
     import torch
@@ -124,6 +133,18 @@ def read_split(hdf5_path: Path, d_safe: float, qdot_mode: str):
         q_obs = torch.from_numpy(f["q_obs"][:].astype(np.float32))
         d_min = torch.from_numpy(f["d_min"][:].astype(np.float32)).reshape(-1)
         collision = torch.from_numpy(f["collision"][:].astype(np.uint8)).bool().reshape(-1)
+        depth = None
+        if include_depth:
+            if "depth" in f:
+                depth = torch.from_numpy(f["depth"][:].astype(np.float32))
+            elif "depth_norm" in f:
+                if r_max is None:
+                    raise ValueError(f"{hdf5_path} has depth_norm only; pass metadata r_max to reconstruct metric depth.")
+                depth = torch.from_numpy(f["depth_norm"][:].astype(np.float32)) * float(r_max)
+            else:
+                raise KeyError(
+                    f"{hdf5_path} does not contain depth/depth_norm but --include_raylink_oracle_points was requested."
+                )
 
         if qdot_mode == "hdf5":
             if "qdot_obs" not in f:
@@ -144,11 +165,16 @@ def read_split(hdf5_path: Path, d_safe: float, qdot_mode: str):
         raise ValueError(f"Split length mismatch in {hdf5_path}.")
     if qdot_obs.shape != q_obs.shape:
         raise ValueError(f"qdot_obs shape {tuple(qdot_obs.shape)} does not match q_obs shape {tuple(q_obs.shape)}.")
+    if include_depth:
+        if depth is None or depth.ndim != 2:
+            raise ValueError(f"Expected rank-2 RayLink depth in {hdf5_path}, got {None if depth is None else tuple(depth.shape)}.")
+        if int(depth.shape[0]) != int(q_ego.shape[0]):
+            raise ValueError(f"Depth batch size does not match q_ego in {hdf5_path}: {tuple(depth.shape)} vs {tuple(q_ego.shape)}.")
 
     unsafe_mask = collision
     safe_mask = torch.logical_and(d_min > float(d_safe), torch.logical_not(unsafe_mask))
     boundary_mask = torch.logical_not(torch.logical_or(safe_mask, unsafe_mask))
-    return {
+    out = {
         "q_ego": q_ego,
         "q_obs": q_obs,
         "qdot_obs": qdot_obs,
@@ -160,6 +186,9 @@ def read_split(hdf5_path: Path, d_safe: float, qdot_mode: str):
         "d_min": d_min,
         "collision": collision,
     }
+    if include_depth:
+        out["depth"] = depth
+    return out
 
 
 def attach_jacobians(split: Dict[str, Any], dynamics_model: Any, chunk_size: int, split_name: str) -> Dict[str, Any]:
@@ -190,6 +219,70 @@ def attach_jacobians(split: Dict[str, Any], dynamics_model: Any, chunk_size: int
         "J_P": J_P,
         "J_R": J_R,
     }
+    for optional_key in ("raylink_points_W",):
+        if optional_key in split:
+            out[optional_key] = split[optional_key]
+    return out
+
+
+def build_raylink_geometry_model(metadata: Dict[str, Any], gphi_ckpt: str = ""):
+    from loss.models.raylink_g_phi import RayLinkMLPGPhi
+
+    cfg: Dict[str, Any] = {}
+    if gphi_ckpt:
+        ckpt = load_torch_checkpoint(gphi_ckpt)
+        cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    model = RayLinkMLPGPhi(
+        metadata,
+        pair_hidden_dim=int(model_cfg.get("pair_hidden_dim", 128)),
+        head_hidden_dims=list(model_cfg.get("head_hidden_dims", [128, 64])),
+        link_embed_dim=int(model_cfg.get("link_embed_dim", 8)),
+        anchor_embed_dim=int(model_cfg.get("anchor_embed_dim", 8)),
+        activation=str(model_cfg.get("activation", "silu")),
+        finger_open=float(model_cfg.get("finger_open", 0.04)),
+    )
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    return model
+
+
+def attach_raylink_cached_points(
+    split: Dict[str, Any],
+    metadata: Dict[str, Any],
+    gphi_ckpt: str,
+    chunk_size: int,
+    split_name: str,
+) -> Dict[str, Any]:
+    import torch
+
+    if "depth" not in split:
+        raise KeyError(f"{split_name} split is missing depth; cannot build cached RayLink oracle points.")
+    model = build_raylink_geometry_model(metadata, gphi_ckpt)
+    q_ego = split["q_ego"].float()
+    q_obs = split["q_obs"].float()
+    depth = split["depth"].float()
+    n = int(q_ego.shape[0])
+    expected_rays = int(getattr(model, "num_rays"))
+    if int(depth.shape[1]) != expected_rays:
+        raise ValueError(
+            f"{split_name} depth ray count {int(depth.shape[1])} does not match RayLink metadata num_rays={expected_rays}."
+        )
+    cached = torch.empty((n, expected_rays * 3), dtype=torch.float32)
+    chunk_size = max(int(chunk_size), 1)
+    with torch.no_grad():
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            geom = model.compute_geometry(q_ego[start:end], q_obs[start:end])
+            origins = geom["ray_origins_W"].float()
+            dirs = geom["ray_dirs_W"].float()
+            depth_chunk = depth[start:end].float()
+            points = origins + depth_chunk.unsqueeze(-1) * dirs
+            cached[start:end] = points.reshape(end - start, -1).cpu()
+            print(f"[raylink_points:{split_name}] {end}/{n}")
+    out = dict(split)
+    out["raylink_points_W"] = cached
     return out
 
 
@@ -271,10 +364,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--obs_base_quat", default=None)
     p.add_argument("--n_observation", type=int, default=256)
     p.add_argument("--n_observation_dataset", type=int, default=256)
+    p.add_argument(
+        "--include_raylink_oracle_points",
+        action="store_true",
+        default=False,
+        help="Store cached RayLink oracle world points under raylink_points_W for raylink_cached_oracle FD training.",
+    )
     p.add_argument("--simulation_dt", type=float, default=1.0 / 120.0)
     p.add_argument("--controller_period", type=float, default=1.0 / 30.0)
     p.add_argument("--obstacle_horizon_s", type=float, default=0.2)
     p.add_argument("--jacobian_chunk_size", type=int, default=512)
+    p.add_argument("--raylink_points_chunk_size", type=int, default=1024)
     return p.parse_args()
 
 
@@ -297,19 +397,66 @@ def main() -> None:
 
     with open(metadata_path, "r", encoding="utf-8") as f:
         dataset_meta = json.load(f)
-    d_safe = float(args.d_safe if args.d_safe is not None else dataset_meta.get("d_safe"))
+    d_safe_value = args.d_safe if args.d_safe is not None else dataset_meta.get("d_safe")
+    if d_safe_value is None:
+        raise ValueError("metadata.json does not contain d_safe. Pass --d_safe explicitly.")
+    d_safe = float(d_safe_value)
     if not math.isfinite(d_safe) or d_safe <= 0.0:
         raise ValueError(f"Invalid d_safe={d_safe}. Pass --d_safe explicitly.")
 
+    ckpt_meta = None
     if args.gphi_ckpt:
         ckpt_meta = load_torch_checkpoint_metadata(args.gphi_ckpt)
         compare_metadata(dataset_meta, ckpt_meta)
+    if args.include_raylink_oracle_points and not args.gphi_ckpt:
+        raise ValueError("--include_raylink_oracle_points requires --gphi_ckpt so the cached point layout is tied to the same RayLink metadata/FK.")
+    raylink_meta = ckpt_meta if ckpt_meta is not None else dataset_meta
+    raylink_num_rays = int(raylink_meta.get("num_rays_total", 0))
+    if raylink_num_rays <= 0 and "local_ray_dirs" in raylink_meta:
+        local_ray_dirs = raylink_meta["local_ray_dirs"]
+        raylink_num_rays = int(len(local_ray_dirs) * len(local_ray_dirs[0]))
+    if args.include_raylink_oracle_points:
+        if raylink_num_rays <= 0:
+            raise ValueError("RayLink metadata is missing num_rays_total/local_ray_dirs.")
+        if int(args.n_observation_dataset) != int(raylink_num_rays):
+            raise ValueError(
+                "--include_raylink_oracle_points requires --n_observation_dataset to equal RayLink num_rays_total "
+                f"({raylink_num_rays}), got {int(args.n_observation_dataset)}."
+            )
 
     dynamics_model, base_meta = build_dynamics_for_jacobian(args, dataset_meta, d_safe)
-    train_raw = read_split(train_path, d_safe=d_safe, qdot_mode=str(args.qdot_mode))
-    val_raw = read_split(val_path, d_safe=d_safe, qdot_mode=str(args.qdot_mode))
+    r_max = float(raylink_meta.get("r_max", dataset_meta.get("r_max", 5.0)))
+    train_raw = read_split(
+        train_path,
+        d_safe=d_safe,
+        qdot_mode=str(args.qdot_mode),
+        include_depth=bool(args.include_raylink_oracle_points),
+        r_max=r_max,
+    )
+    val_raw = read_split(
+        val_path,
+        d_safe=d_safe,
+        qdot_mode=str(args.qdot_mode),
+        include_depth=bool(args.include_raylink_oracle_points),
+        r_max=r_max,
+    )
     summarize_split("train/raw", train_raw)
     summarize_split("val/raw", val_raw)
+    if args.include_raylink_oracle_points:
+        train_raw = attach_raylink_cached_points(
+            train_raw,
+            metadata=raylink_meta,
+            gphi_ckpt=str(args.gphi_ckpt),
+            chunk_size=int(args.raylink_points_chunk_size),
+            split_name="train",
+        )
+        val_raw = attach_raylink_cached_points(
+            val_raw,
+            metadata=raylink_meta,
+            gphi_ckpt=str(args.gphi_ckpt),
+            chunk_size=int(args.raylink_points_chunk_size),
+            split_name="val",
+        )
 
     training = attach_jacobians(train_raw, dynamics_model, args.jacobian_chunk_size, "train")
     validation = attach_jacobians(val_raw, dynamics_model, args.jacobian_chunk_size, "val")
@@ -338,7 +485,10 @@ def main() -> None:
         "q_dim": int(training["q_ego"].shape[1]),
         "obstacle_q_dim": int(training["q_obs"].shape[1]),
         "obstacle_qdot_dim": int(training["qdot_obs"].shape[1]),
-        "obs_dim_discarded": int(dynamics_model.o_dims_in_dataset),
+        "obs_dim_discarded": 0 if args.include_raylink_oracle_points else int(dynamics_model.o_dims_in_dataset),
+        "contains_raylink_cached_oracle_points": bool(args.include_raylink_oracle_points),
+        "cached_observation_key": "raylink_points_W" if args.include_raylink_oracle_points else "",
+        "obs_dim_cached": int(raylink_num_rays * 3) if args.include_raylink_oracle_points else 0,
         "sensor_aux_dims": int(dynamics_model.sensor_aux_dims),
         "n_observation": int(args.n_observation),
         "n_observation_dataset": int(args.n_observation_dataset),
@@ -346,18 +496,22 @@ def main() -> None:
         "add_normal": False,
         "include_point_velocity": False,
         "raylink_metadata_subset": {
-            "r_max": dataset_meta.get("r_max"),
-            "num_anchors": dataset_meta.get("num_anchors"),
-            "num_rays_per_anchor": dataset_meta.get("num_rays_per_anchor"),
-            "num_rays_total": dataset_meta.get("num_rays_total"),
-            "anchor_link_ids": dataset_meta.get("anchor_link_ids"),
-            "ray_ordering_rule": dataset_meta.get("ray_ordering_rule"),
+            "r_max": raylink_meta.get("r_max"),
+            "num_anchors": raylink_meta.get("num_anchors"),
+            "num_rays_per_anchor": raylink_meta.get("num_rays_per_anchor"),
+            "num_rays_total": raylink_meta.get("num_rays_total"),
+            "anchor_link_ids": raylink_meta.get("anchor_link_ids"),
+            "ray_ordering_rule": raylink_meta.get("ray_ordering_rule"),
         },
         "split_summary": {
             "training": train_summary,
             "validation": val_summary,
         },
-        "note": "Ray observations are intentionally discarded; gphi/raylink_oracle CBF modes rebuild observations online.",
+        "note": (
+            "RayLink oracle world points are cached for raylink_cached_oracle FD training."
+            if args.include_raylink_oracle_points
+            else "Ray observations are intentionally discarded; gphi/raylink_oracle CBF modes rebuild observations online."
+        ),
     }
     metadata["metadata_fingerprint"] = compute_metadata_fingerprint(metadata)
     payload = {

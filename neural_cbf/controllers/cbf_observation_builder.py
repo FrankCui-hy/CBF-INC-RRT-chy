@@ -120,9 +120,9 @@ class CBFObservationBuilder:
         self.raycast_ego_robot = raycast_ego_robot
         self.raycast_obstacle_robot = raycast_obstacle_robot
 
-        if self.mode not in ("legacy_oracle", "gphi", "raylink_oracle"):
+        if self.mode not in ("legacy_oracle", "gphi", "raylink_oracle", "raylink_cached_oracle"):
             raise ValueError(f"Unknown CBF observation mode: {self.mode}")
-        if self.mode in ("gphi", "raylink_oracle"):
+        if self.mode in ("gphi", "raylink_oracle", "raylink_cached_oracle"):
             if self.g_phi is None:
                 raise ValueError(f"cbf_obs_mode='{self.mode}' requires RayLink metadata/FK from a g_phi checkpoint.")
             if self.add_normal:
@@ -158,11 +158,10 @@ class CBFObservationBuilder:
         q_obs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.mode == "legacy_oracle":
-            if datax is None:
-                raise ValueError("legacy_oracle observation mode requires datax.")
-            if self.aux_dim <= 0:
-                return datax[:, self.q_dim :]
-            return datax[:, self.q_dim : -self.aux_dim]
+            return self._observation_slice_from_datax(datax, "legacy_oracle")
+
+        if self.mode == "raylink_cached_oracle":
+            return self._observation_slice_from_datax(datax, "raylink_cached_oracle")
 
         if q_ego is None or q_obs is None:
             raise ValueError(f"{self.mode} observation mode requires q_ego and q_obs.")
@@ -186,6 +185,13 @@ class CBFObservationBuilder:
         depth_eff = w * depth_hit + (1.0 - w) * float(self.r_max)
         points_w = ray_origins + depth_eff.unsqueeze(-1) * ray_dirs
         return points_w.reshape(points_w.shape[0], -1)
+
+    def _observation_slice_from_datax(self, datax: Optional[torch.Tensor], mode: str) -> torch.Tensor:
+        if datax is None:
+            raise ValueError(f"{mode} observation mode requires datax.")
+        if self.aux_dim <= 0:
+            return datax[:, self.q_dim :]
+        return datax[:, self.q_dim : -self.aux_dim]
 
     def _raycast_handles(self):
         env = self.raycast_env

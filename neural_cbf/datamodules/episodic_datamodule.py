@@ -290,6 +290,11 @@ class EpisodicDataModule(pl.LightningDataModule):
 			q_ego = split["q_ego"].float()
 			q_obs = split["q_obs"].float()
 			qdot_obs = split["qdot_obs"].float()
+			cached_obs = None
+			for obs_key in ("raylink_points_W", "cached_obs", "observation"):
+				if obs_key in split:
+					cached_obs = split[obs_key].float()
+					break
 			traj_idx = split["traj_idx"].float().reshape(-1, 1)
 			step_idx = split["step_idx"].float().reshape(-1, 1)
 			n = int(q_ego.shape[0])
@@ -299,6 +304,24 @@ class EpisodicDataModule(pl.LightningDataModule):
 				dtype=q_ego.dtype,
 			)
 			datax[:, : self.model.n_dims] = q_ego
+			if cached_obs is not None:
+				if cached_obs.ndim != 2:
+					raise ValueError(
+						"state_label_cache cached observation must be rank-2, "
+						f"got shape {tuple(cached_obs.shape)}."
+					)
+				if int(cached_obs.shape[0]) != n:
+					raise ValueError(
+						"state_label_cache cached observation batch size does not match q_ego: "
+						f"{int(cached_obs.shape[0])} vs {n}."
+					)
+				if int(cached_obs.shape[1]) != int(self.model.o_dims_in_dataset):
+					raise ValueError(
+						"state_label_cache cached observation width does not match model.o_dims_in_dataset: "
+						f"{int(cached_obs.shape[1])} vs {int(self.model.o_dims_in_dataset)}. "
+						"For default RayLink point-only cache, use --n_observation_dataset 768 and --point_dim 3."
+					)
+				datax[:, self.model.n_dims : self.model.n_dims + self.model.o_dims_in_dataset] = cached_obs
 			aux = datax[:, -self.model.state_aux_dims_in_dataset :]
 			q_start = self.model.sensor_aux_dims
 			qdot_start = q_start + self.model.obstacle_q_dim

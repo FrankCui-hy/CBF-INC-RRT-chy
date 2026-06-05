@@ -126,7 +126,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		self.train_use_fd = bool(kwargs.get("train_use_fd", self.baseline))
 		self._validate_method_config()
 		self.use_gphi_chain = self.cbf_obs_mode == "gphi"
-		self.use_raylink_layout = self.cbf_obs_mode in ("gphi", "raylink_oracle")
+		self.use_raylink_layout = self.cbf_obs_mode in ("gphi", "raylink_oracle", "raylink_cached_oracle")
 		self.g_phi = None
 		if self.use_raylink_layout:
 			self._init_g_phi()
@@ -166,7 +166,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 	def _validate_method_config(self):
 		if self.obs_backend not in ("gphi", "raw"):
 			raise ValueError(f"Unknown obs_backend={self.obs_backend}. Use gphi or raw.")
-		if self.cbf_obs_mode not in ("legacy_oracle", "gphi", "raylink_oracle"):
+		if self.cbf_obs_mode not in ("legacy_oracle", "gphi", "raylink_oracle", "raylink_cached_oracle"):
 			raise ValueError(f"Unknown cbf_obs_mode={self.cbf_obs_mode}.")
 		if self.gphi_include_qobs_dynamics:
 			if self.cbf_obs_mode != "gphi":
@@ -202,6 +202,21 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 				raise ValueError("cbf_obs_mode='raylink_oracle' is point-only; use a non-normal CBF dataset/model.")
 			if int(self.dynamics_model.point_dims) != 3:
 				raise ValueError("cbf_obs_mode='raylink_oracle' currently requires point_dim=3 and no extra point channels.")
+		if self.cbf_obs_mode == "raylink_cached_oracle":
+			if not self.train_use_fd:
+				raise ValueError(
+					"cbf_obs_mode='raylink_cached_oracle' currently supports train_use_fd=True only. "
+					"The cached oracle baseline uses finite-difference hdot through q perturbation and local transforms."
+				)
+			if self.gphi_ckpt is None or str(self.gphi_ckpt).strip() == "":
+				raise ValueError("cbf_obs_mode='raylink_cached_oracle' requires a non-empty gphi_ckpt for RayLink metadata/FK.")
+			if bool(self.dynamics_model.add_normal):
+				raise ValueError("cbf_obs_mode='raylink_cached_oracle' is point-only; use a non-normal CBF dataset/model.")
+			if int(self.dynamics_model.point_dims) != 3:
+				raise ValueError("cbf_obs_mode='raylink_cached_oracle' currently requires point_dim=3 and no extra point channels.")
+			cache_path = str(getattr(self.datamodule, "state_label_cache", "") or "") if self.datamodule is not None else ""
+			if self.datamodule is not None and cache_path.strip() == "":
+				raise ValueError("cbf_obs_mode='raylink_cached_oracle' requires --state_label_cache with cached RayLink oracle points.")
 
 	def method_metadata(self) -> dict:
 		method = "baseline_fd_raw" if self.baseline else f"cbf_obs_{self.cbf_obs_mode}"
@@ -242,7 +257,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		if "model_state_dict" in ckpt:
 			self.g_phi.load_state_dict(ckpt["model_state_dict"])
 		self.g_phi.eval()
-		if self.gphi_freeze or self.cbf_obs_mode == "raylink_oracle":
+		if self.gphi_freeze or self.cbf_obs_mode in ("raylink_oracle", "raylink_cached_oracle"):
 			for p in self.g_phi.parameters():
 				p.requires_grad_(False)
 		fp_meta = raylink_cbf_metadata(
@@ -282,7 +297,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 
 		ray_order = str(meta.get("ray_ordering_rule", meta.get("ray_order", "anchor_major"))).lower()
 		if "anchor_major" not in ray_order and not ("anchor" in ray_order and "local_ray_index" in ray_order):
-			raise ValueError(f"raylink_oracle requires anchor-major RayLink ray order, got {ray_order!r}.")
+			raise ValueError(f"RayLink CBF modes require anchor-major RayLink ray order, got {ray_order!r}.")
 
 		if self.cbf_obs_mode == "raylink_oracle":
 			env = getattr(self.dynamics_model, "env", None)
@@ -314,11 +329,25 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 			raise ValueError(f"obs_base_quat mismatch: env has {list(obs_quat)}, RayLink metadata has {list(obs_quat_expected)}.")
 
 	def _validate_state_label_cache_metadata(self):
-		if self.cbf_obs_mode not in ("gphi", "raylink_oracle"):
+		if self.cbf_obs_mode not in ("gphi", "raylink_oracle", "raylink_cached_oracle"):
 			return
 		state_meta = getattr(self.datamodule, "state_label_metadata", None)
 		if not state_meta or not self.gphi_metadata:
 			return
+		if self.cbf_obs_mode == "raylink_cached_oracle":
+			if not bool(state_meta.get("contains_raylink_cached_oracle_points", False)):
+				raise ValueError(
+					"cbf_obs_mode='raylink_cached_oracle' requires a state-label cache generated with "
+					"--include_raylink_oracle_points. This prevents silently training on an empty or legacy observation slice."
+				)
+			expected_obs_dim = int(getattr(self.dynamics_model, "o_dims_in_dataset", 0))
+			cache_obs_dim = state_meta.get("obs_dim_cached", None)
+			if cache_obs_dim is not None and int(cache_obs_dim) != expected_obs_dim:
+				raise ValueError(
+					"state_label_cache cached RayLink observation dim does not match the controller dataset dim: "
+					f"cache obs_dim_cached={int(cache_obs_dim)}, model o_dims_in_dataset={expected_obs_dim}. "
+					"Use --n_observation_dataset equal to the RayLink num_rays and --point_dim 3."
+				)
 
 		def _translation_from_T(T):
 			if T is None:
@@ -355,7 +384,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 		q_obs = self.dynamics_model.get_obstacle_q_from_datax(datax)
 		qdot_obs, _, _ = self.dynamics_model.get_obstacle_meta_from_datax(datax)
 		aux = datax[:, -self.dynamics_model.state_aux_dims_in_dataset :]
-		if self.cbf_obs_mode in ("gphi", "raylink_oracle") and q_obs is None:
+		if self.cbf_obs_mode in ("gphi", "raylink_oracle", "raylink_cached_oracle") and q_obs is None:
 			raise ValueError(
 				f"cbf_obs_mode='{self.cbf_obs_mode}' requires q_obs in datax auxv2. "
 				"Use scripts/extract_cbf_state_label_cache.py on an auxv2 cache or regenerate the CBF data."
@@ -460,7 +489,7 @@ class NeuralLidarCBFController(NeuralObsCBFController):
 					raise ValueError("legacy_oracle compose_h_input requires datax or aux.")
 				datax = torch.cat((q_ego, obs, aux), dim=1)
 			return self.dynamics_model.datax_to_x(datax)
-		if self.cbf_obs_mode in ("gphi", "raylink_oracle"):
+		if self.cbf_obs_mode in ("gphi", "raylink_oracle", "raylink_cached_oracle"):
 			return self._raylink_points_to_controller_x(q_ego, obs)
 		raise NotImplementedError(f"Unsupported cbf_obs_mode={self.cbf_obs_mode}.")
 

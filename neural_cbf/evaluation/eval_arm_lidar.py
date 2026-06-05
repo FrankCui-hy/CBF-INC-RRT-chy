@@ -3620,7 +3620,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=None)
     parser.add_argument("--no_baseline", dest="baseline", action="store_false")
     parser.add_argument("--obs_backend", type=str, default=None, choices=["gphi", "raw"])
-    parser.add_argument("--cbf_obs_mode", type=str, default=None, choices=["legacy_oracle", "gphi", "raylink_oracle"])
+    parser.add_argument("--cbf_obs_mode", type=str, default=None, choices=["legacy_oracle", "gphi", "raylink_oracle", "raylink_cached_oracle"])
     parser.add_argument("--gphi_ckpt", type=str, default=None)
     parser.add_argument("--gphi_hit_threshold", type=float, default=None)
     parser.add_argument("--gphi_hit_temp", type=float, default=None)

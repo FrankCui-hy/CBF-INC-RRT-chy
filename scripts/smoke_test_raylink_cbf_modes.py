@@ -41,6 +41,7 @@ class SmokeContext:
 
 class DummyDataModule:
     state_label_metadata = None
+    state_label_cache = ""
 
     def prepare_data(self):
         return None
@@ -117,7 +118,7 @@ def expect_raises(name: str, fn: Callable[[], None], contains: str):
 def build_context(args: argparse.Namespace) -> SmokeContext:
     np, torch, ArmEnv, ArmLidar, _, _ = import_runtime()
     if not args.gphi_ckpt:
-        raise ValueError("--gphi_ckpt is required because this smoke covers gphi and raylink_oracle modes.")
+        raise ValueError("--gphi_ckpt is required because this smoke covers gphi and RayLink oracle modes.")
     if not os.path.exists(args.gphi_ckpt):
         raise FileNotFoundError(f"--gphi_ckpt does not exist: {args.gphi_ckpt}")
 
@@ -195,10 +196,13 @@ def build_context(args: argparse.Namespace) -> SmokeContext:
 def make_controller(ctx: SmokeContext, mode: str, train_use_fd: bool, include_qobs_dynamics: bool = False):
     _, _, _, _, NeuralLidarCBFController, ExperimentSuite = import_runtime()
     baseline = mode == "legacy_oracle"
+    datamodule = DummyDataModule()
+    if mode == "raylink_cached_oracle":
+        datamodule.state_label_cache = "__smoke_cached_raylink_oracle__"
     controller = NeuralLidarCBFController(
         ctx.dynamics_model,
         [{}],
-        DummyDataModule(),
+        datamodule,
         ExperimentSuite([]),
         safe_level=0.1,
         unsafe_level=0.1,
@@ -223,7 +227,7 @@ def make_controller(ctx: SmokeContext, mode: str, train_use_fd: bool, include_qo
         baseline=baseline,
         obs_backend="gphi" if mode == "gphi" else "raw",
         cbf_obs_mode=mode,
-        gphi_ckpt=ctx.args.gphi_ckpt if mode in ("gphi", "raylink_oracle") else "",
+        gphi_ckpt=ctx.args.gphi_ckpt if mode in ("gphi", "raylink_oracle", "raylink_cached_oracle") else "",
         gphi_hit_threshold=float(ctx.args.gphi_hit_threshold),
         gphi_hit_temp=float(ctx.args.gphi_hit_temp),
         gphi_freeze=True,
@@ -316,6 +320,57 @@ def test_raylink_oracle_no_train_use_fd_guard(ctx: SmokeContext):
     )
 
 
+def cached_raylink_datax(ctx: SmokeContext, ctrl, datax):
+    torch = ctx.torch
+    q_ego, q_obs, _, _ = ctrl.parse_state_from_datax(datax)
+    with torch.no_grad():
+        geom = ctrl.g_phi.compute_geometry(q_ego, q_obs)
+        points = geom["ray_origins_W"] + float(ctrl.g_phi.r_max) * geom["ray_dirs_W"]
+        points = points.reshape(points.shape[0], -1, 3)
+        target_points = int(ctx.dynamics_model.o_dims_in_dataset // 3)
+        if points.shape[1] >= target_points:
+            idx = torch.linspace(0, points.shape[1] - 1, steps=target_points, device=points.device).round().long()
+            points = torch.index_select(points, dim=1, index=idx)
+        else:
+            idx = torch.arange(target_points, device=points.device).long() % points.shape[1]
+            points = torch.index_select(points, dim=1, index=idx)
+        obs_flat = points.reshape(points.shape[0], -1).to(device=datax.device, dtype=datax.dtype)
+    cached = datax.detach().clone()
+    obs_start = int(ctx.dynamics_model.n_dims)
+    obs_end = obs_start + int(ctx.dynamics_model.o_dims_in_dataset)
+    cached[:, obs_start:obs_end] = obs_flat
+    return cached
+
+
+def test_raylink_cached_oracle_fd(ctx: SmokeContext):
+    torch = ctx.torch
+    ctrl = make_controller(ctx, "raylink_cached_oracle", train_use_fd=True)
+    datax = cached_raylink_datax(ctx, ctrl, ctx.datax[:1])
+    q_ego, q_obs, _, aux = ctrl.parse_state_from_datax(datax)
+    obs = ctrl.build_observation(datax=datax, q_ego=q_ego, q_obs=q_obs, aux=aux)
+    assert_tensor("raylink_cached_oracle obs", obs, (1, ctx.dynamics_model.o_dims_in_dataset))
+    h0 = ctrl.h(datax)
+    assert_tensor("raylink_cached_oracle h", h0, (1, 1))
+
+    dq = torch.full((1, ctx.dynamics_model.n_controls), 1e-3, dtype=datax.dtype, device=datax.device)
+    datax_next = ctx.dynamics_model.batch_lookahead(datax, dq, data_jacobian=())
+    h1 = ctrl.h(datax_next)
+    fd_hdot = (h1 - h0) / float(ctx.dynamics_model.controller_dt)
+    assert_tensor("raylink_cached_oracle one-step FD hdot", fd_hdot, (1, 1))
+
+    h_fd, J_fd, _ = ctrl.h_with_jacobian(datax, data_jacobian=())
+    assert_tensor("raylink_cached_oracle h_with_jacobian h", h_fd, (1, 1))
+    assert_tensor("raylink_cached_oracle h_with_jacobian J", J_fd, (1, 1, ctx.dynamics_model.n_controls))
+
+
+def test_raylink_cached_oracle_no_train_use_fd_guard(ctx: SmokeContext):
+    expect_raises(
+        "raylink_cached_oracle no_train_use_fd guard",
+        lambda: make_controller(ctx, "raylink_cached_oracle", train_use_fd=False),
+        "train_use_fd=True only",
+    )
+
+
 def test_missing_qobs_guard(ctx: SmokeContext):
     ctrl = make_controller(ctx, "gphi", train_use_fd=False)
     original = ctrl.dynamics_model.get_obstacle_q_from_datax
@@ -355,7 +410,7 @@ def run_test(name: str, fn: Callable[[], None]) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke test legacy_oracle/gphi/raylink_oracle CBF modes.")
+    parser = argparse.ArgumentParser(description="Smoke test legacy_oracle/gphi/raylink_oracle/raylink_cached_oracle CBF modes.")
     parser.add_argument("--gphi_ckpt", required=True, help="RayLink g_phi checkpoint used for metadata/FK.")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--robot_name", default="panda")
@@ -388,6 +443,8 @@ def main() -> int:
         ("gphi dynamic dH/dq_obs @ qdot_obs", lambda: test_gphi_dynamic(ctx)),
         ("raylink_oracle build_observation + h + FD one-step", lambda: test_raylink_oracle_fd(ctx)),
         ("raylink_oracle + no_train_use_fd guard", lambda: test_raylink_oracle_no_train_use_fd_guard(ctx)),
+        ("raylink_cached_oracle build_observation + h + FD one-step", lambda: test_raylink_cached_oracle_fd(ctx)),
+        ("raylink_cached_oracle + no_train_use_fd guard", lambda: test_raylink_cached_oracle_no_train_use_fd_guard(ctx)),
         ("missing q_obs guard", lambda: test_missing_qobs_guard(ctx)),
         ("missing qdot_obs guard", lambda: test_missing_qdot_guard(ctx)),
     ]

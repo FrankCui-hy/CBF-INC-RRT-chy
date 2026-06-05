@@ -99,6 +99,81 @@ python -m loss.eval.eval_raylink_g_phi \
 # FK-aware g_phi 现在只保留 ray-link 训练/eval 管线；旧 gphi-chain 控制器命令已删除。
 # 把 RayLinkMLPGPhi 接到 h_theta/QP 前，不要再使用旧版 g_phi 命令。
 
+# 4.0 从 RayLink g_phi 数据集转换 CBF state-label cache
+# 这一步复用 RayLink 数据里的 q_ego/q_obs/d_min/collision/depth：
+# - safe/unsafe/boundary label 来自 d_min/collision
+# - qdot_obs 如果没有真实动态轨迹，先显式设为 0（静态障碍 baseline）
+# - --include_raylink_oracle_points 会离线缓存 RayLink oracle point cloud，供 raylink_cached_oracle FD baseline 训练使用
+# 默认 RayLink layout 是 6 anchors x 128 rays = 768 points，所以这里必须用 --n_observation_dataset 768
+python scripts/convert_raylink_raycast_to_cbf_state_label_cache.py \
+  --dataset_dir dataset/neural_raycast_full \
+  --out dataset/cbf_state_label/raylink_cached_oracle_state_label.pt \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --d_safe 0.02 \
+  --qdot_mode zeros \
+  --assume_static_obstacle \
+  --include_raylink_oracle_points \
+  --n_observation 256 \
+  --n_observation_dataset 768 \
+  --jacobian_chunk_size 512 \
+  --raylink_points_chunk_size 512
+
+# 4.0a Smoke test 四条 CBF observation 路径
+# 这里会覆盖 legacy_oracle、gphi static、gphi dynamic、在线 raylink_oracle、cached raylink oracle。
+python scripts/smoke_test_raylink_cbf_modes.py \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --batch_size 2 \
+  --n_observation 32 \
+  --n_observation_dataset 64
+
+# 4.0b 正式训练 RayLink cached oracle FD baseline
+# 这是和论文 baseline 对齐的路径：训练时不在每个 step 重新 PyBullet raycast。
+# datax = q_ego + cached RayLink oracle point cloud + aux，FD 只通过 q perturb + local transform 估 hdot。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version cbf_raylink_cached_oracle_fd \
+  --no_baseline \
+  --cbf_obs_mode raylink_cached_oracle \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --state_label_cache dataset/cbf_state_label/raylink_cached_oracle_state_label.pt \
+  --train_use_fd \
+  --dataset_name pino_motor \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 768 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+# 4.0c 训练 ours: frozen g_phi + analytic chain rule
+# 使用同一个 state-label cache；gphi 模式会忽略 cached point cloud，在线调用 frozen g_phi 保持可导。
+python neural_cbf/training/train_arm_lidar.py \
+  --robot_name panda \
+  --obstacle_robot_name panda \
+  --obstacle_traj_path data/obstacle_trajs/panda_trajs.npz \
+  --version cbf_gphi_static_analytic \
+  --no_baseline \
+  --cbf_obs_mode gphi \
+  --gphi_ckpt loss/outputs_raylink_g_phi/checkpoints/best_safety.pt \
+  --state_label_cache dataset/cbf_state_label/raylink_cached_oracle_state_label.pt \
+  --no_train_use_fd \
+  --dataset_name pino_motor \
+  --observation_type uniform_surface \
+  --point_dim 3 \
+  --n_observation 256 \
+  --n_observation_dataset 768 \
+  --max_epochs 121 \
+  --batch_size 64 \
+  --devices 0
+
+# 如果 state-label cache 里的 qdot_obs 是真实动态障碍速度，再打开 dynamic Lf_h：
+#   --gphi_include_qobs_dynamics
+# 现在上面的转换命令用的是 --qdot_mode zeros，所以 dynamic Lf_h 会等于 0，不建议用它做动态实验。
+
 # 4.1 单独生成 ArmLidar 数据集，不训练
 # 数据会写到 datamodule 默认缓存路径；dataset_name 会参与文件名。
 python scripts/generate_dataset_arm_lidar.py \

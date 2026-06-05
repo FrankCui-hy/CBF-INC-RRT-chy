@@ -32,7 +32,7 @@ def eval_rrt_lidar(seed, environment, robot, method_model_dir, obs_positions, ob
 	cbf_obs_mode_arg = getattr(args, "cbf_obs_mode", None)
 	if cbf_obs_mode_arg is None:
 		cbf_obs_mode_arg = "gphi" if ((not baseline_arg) and obs_backend_arg == "gphi") else "legacy_oracle"
-	gphi_point_only = cbf_obs_mode_arg in ("gphi", "raylink_oracle")
+	gphi_point_only = cbf_obs_mode_arg in ("gphi", "raylink_oracle", "raylink_cached_oracle")
 	dynamics_model = ArmLidar(
 		nominal_params,
 		dt=kwargs['simulation_dt'],
